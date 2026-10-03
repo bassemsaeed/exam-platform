@@ -1,0 +1,8 @@
+{
+  "name": "exam-platform-backend-starter",
+  "version": "1.0.0",
+  "description": "Backend + minimal frontend contract (auth/api client only)",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.8.1"
+}
