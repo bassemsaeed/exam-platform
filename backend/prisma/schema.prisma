@@ -1,0 +1,572 @@
+// University Exam Platform — Prisma 7 + PostgreSQL + Better Auth 1.x
+// ERD: erd_academic_structure.html (26 tables). Prisma fields are camelCase;
+// tables/columns map to snake_case to match the ERD.
+
+generator client {
+  provider             = "prisma-client"
+  output               = "../src/generated/prisma"
+  importFileExtension  = "js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------- Enums ----------
+
+enum Role {
+  admin
+  doctor
+  ta
+  student
+}
+
+enum QuestionOwner {
+  doctor
+  ta_shared
+}
+
+enum QuestionType {
+  mcq
+  true_false
+}
+
+enum Difficulty {
+  easy
+  medium
+  hard
+}
+
+enum ExamType {
+  doctor_exam
+  ta_quiz
+}
+
+enum ExamStatus {
+  draft
+  pending_approval
+  approved
+  rejected
+  locked
+  closed
+}
+
+enum TargetScope {
+  subject
+  sections
+  student_list
+}
+
+enum StudentExamStatus {
+  not_started
+  in_progress
+  submitted
+  auto_submitted
+}
+
+enum ImportType {
+  users
+  questions
+}
+
+enum ImportStatus {
+  dry_run
+  committed
+  expired
+}
+
+enum ExportStatus {
+  queued
+  running
+  done
+  failed
+}
+
+// ---------- Better Auth core (required names/fields — do not rename) ----------
+
+model User {
+  id                 String    @id
+  name               String
+  email              String
+  emailVerified      Boolean   @default(false)
+  image              String?
+  username           String?   // username plugin (displayUsername disabled); null only for non-imported rows
+  role               Role      @default(student)
+  canChangePassword  Boolean   @default(true) @map("can_change_password")
+  isActive           Boolean   @default(true) @map("is_active")
+  academicYear       Int?      @map("academic_year") // 1..7, student cohort year
+  college            String?   // faculty/school name, free text
+  departmentId       String?   @db.Uuid @map("department_id")
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  department         Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  sessions          Session[]
+  accounts          Account[]
+
+  @@unique([email])
+  @@unique([username])
+  enrollments        Enrollment[]
+  doctorAssignments  DoctorAssignment[]
+  taughtSections     Section[]            @relation("SectionTA")
+  sectionMemberships SectionMembership[]
+  doctorQuestions    Question[]           @relation("QuestionDoctor")
+  taQuestions        Question[]           @relation("QuestionTA")
+  createdExams       Exam[]               @relation("ExamCreator")
+  approvedExams      Exam[]               @relation("ExamApprover")
+  targetedRedos      ExamTargetStudent[]
+  studentExams       StudentExam[]
+  permissionOverrides UserPermissionOverride[]
+  importBatches      ImportBatch[]
+  importLogs         ExcelImportLog[]
+  exportJobs         ExportJob[]
+  compensations      ExamCompensation[]   @relation("Compensator")
+  notificationReads NotificationRead[]
+  auditLogs          AuditLog[]           @relation("Actor")
+
+  @@map("user")
+}
+
+model Session {
+  id        String   @id
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("session")
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String? // credential hash (Excel import + changes)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+  @@map("account")
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier, expiresAt])
+  @@map("verification")
+}
+
+// ---------- Academic structure ----------
+
+model Department {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code      String    @unique
+  name      String
+  users     User[]
+  subjects  Subject[]
+
+  @@map("department")
+}
+
+model Subject {
+  id           String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  departmentId String?   @db.Uuid @map("department_id")
+  code         String    @unique // e.g. CS301 — Excel join key
+  name         String
+
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  enrollments  Enrollment[]
+  doctorAssignments DoctorAssignment[]
+  sections     Section[]
+  questions    Question[]
+  exams        Exam[]
+  exportJobs   ExportJob[]
+
+  @@map("subject")
+}
+
+model Term {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  name      String   @unique // e.g. Fall-2026
+  startsOn  DateTime @db.Date @map("starts_on")
+  endsOn    DateTime @db.Date @map("ends_on")
+  isCurrent Boolean  @default(false) @map("is_current") // exactly one true — enforced by partial unique index (see migrations); imports/enrollment target this
+
+  sections          Section[]
+  enrollments       Enrollment[]
+  doctorAssignments DoctorAssignment[]
+  exams             Exam[]
+
+  @@map("term")
+}
+
+model Enrollment {
+  studentId String @map("student_id")
+  subjectId String @db.Uuid @map("subject_id")
+  termId    String @db.Uuid @map("term_id")
+
+  student User    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subject Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  term    Term    @relation(fields: [termId], references: [id], onDelete: Cascade)
+
+  @@id([studentId, subjectId, termId])
+  @@index([subjectId, termId])
+  @@map("enrollment")
+}
+
+model DoctorAssignment {
+  doctorId  String @map("doctor_id")
+  subjectId String @db.Uuid @map("subject_id")
+  termId    String @db.Uuid @map("term_id")
+
+  doctor  User    @relation(fields: [doctorId], references: [id], onDelete: Cascade)
+  subject Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  term    Term    @relation(fields: [termId], references: [id], onDelete: Cascade)
+
+  @@id([doctorId, subjectId, termId])
+  @@index([subjectId, termId])
+  @@map("doctor_assignment")
+}
+
+model Section {
+  id        String @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  subjectId String @db.Uuid @map("subject_id")
+  termId    String @db.Uuid @map("term_id")
+  taId      String @map("ta_id") // must be role=ta — enforced in API
+  name      String // e.g. Section A
+
+  subject     Subject             @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  term        Term                @relation(fields: [termId], references: [id], onDelete: Cascade)
+  ta          User                @relation("SectionTA", fields: [taId], references: [id], onDelete: Restrict)
+  memberships SectionMembership[]
+  examTargets ExamTargetSection[]
+
+  @@unique([subjectId, termId, name])
+  @@index([subjectId, termId])
+  @@index([taId])
+  @@map("section")
+}
+
+model SectionMembership {
+  studentId String @map("student_id")
+  sectionId String @db.Uuid @map("section_id")
+
+  student User    @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  section Section @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+
+  @@id([studentId, sectionId])
+  @@index([sectionId])
+  @@map("section_membership")
+}
+
+// ---------- Question banks ----------
+
+model Question {
+  id           String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  subjectId    String        @db.Uuid @map("subject_id")
+  ownerType    QuestionOwner @map("owner_type")
+  doctorId     String?       @map("doctor_id") // set iff owner_type=doctor
+  addedByTaId  String?       @map("added_by_ta_id") // set iff owner_type=ta_shared
+  questionType QuestionType  @map("question_type")
+  text         String
+  options      Json          @db.JsonB
+  correctAnswer String       @map("correct_answer")
+  grade        Decimal       @db.Decimal(10, 2)
+  difficulty   Difficulty
+  imageUrl     String?       @map("image_url")
+  createdAt    DateTime      @default(now()) @map("created_at")
+
+  subject       Subject             @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  doctor        User?               @relation("QuestionDoctor", fields: [doctorId], references: [id], onDelete: Restrict)
+  addedByTa     User?               @relation("QuestionTA", fields: [addedByTaId], references: [id], onDelete: Restrict)
+  sampledIn     StudentExamQuestion[]
+  compensations ExamCompensation[]
+
+  @@index([subjectId, difficulty])
+  @@index([subjectId, ownerType])
+  @@map("question")
+}
+
+// ---------- Exams ----------
+
+model Exam {
+  id              String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  subjectId       String     @db.Uuid @map("subject_id")
+  termId          String     @db.Uuid @map("term_id")
+  type            ExamType
+  createdBy       String     @map("created_by")
+  status          ExamStatus @default(draft)
+  rejectionReason String?    @map("rejection_reason")
+  approvedBy      String?    @map("approved_by")
+  startTime       DateTime   @db.Timestamptz(6) @map("start_time")
+  endTime         DateTime   @db.Timestamptz(6) @map("end_time")
+  durationMinutes Int        @map("duration_minutes")
+  difficultyMix   Json       @db.JsonB @map("difficulty_mix")
+  manualQuestionIds Json?     @map("manual_question_ids") // hand-picked blueprint (author order); null = auto-sample by mix
+  questionSource  String?    @map("question_source") // TA quiz: shared|mine. Doctor: own (implicit).
+  accessCodeHash  String?    @map("access_code_hash") // sha256(entry code); null = open entry
+  targetScope     TargetScope @map("target_scope")
+  createdAt       DateTime   @default(now()) @map("created_at")
+  updatedAt       DateTime   @updatedAt @map("updated_at")
+
+  subject       Subject             @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  term          Term                @relation(fields: [termId], references: [id], onDelete: Restrict)
+  creator       User                @relation("ExamCreator", fields: [createdBy], references: [id], onDelete: Restrict)
+  approver      User?               @relation("ExamApprover", fields: [approvedBy], references: [id], onDelete: SetNull)
+  targetSections ExamTargetSection[]
+  targetStudents ExamTargetStudent[]
+  instances     StudentExam[]
+  events        ExamEvent[]
+  compensations ExamCompensation[]
+  exportJobs    ExportJob[]
+
+  @@index([subjectId, termId, startTime])
+  @@index([status])
+  @@index([termId, status])
+  @@map("exam")
+}
+
+model ExamTargetSection {
+  examId    String @db.Uuid @map("exam_id")
+  sectionId String @db.Uuid @map("section_id")
+
+  exam    Exam    @relation(fields: [examId], references: [id], onDelete: Cascade)
+  section Section @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+
+  @@id([examId, sectionId])
+  @@map("exam_target_section")
+}
+
+model ExamTargetStudent {
+  examId    String @db.Uuid @map("exam_id")
+  studentId String @map("student_id") // ad-hoc redo list
+
+  exam    Exam @relation(fields: [examId], references: [id], onDelete: Cascade)
+  student User @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@id([examId, studentId])
+  @@map("exam_target_student")
+}
+
+model StudentExam {
+  id               String           @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  examId           String           @db.Uuid @map("exam_id")
+  studentId        String           @map("student_id")
+  status           StudentExamStatus @default(not_started)
+  startedAt        DateTime?        @db.Timestamptz(6) @map("started_at")
+  submittedAt      DateTime?        @db.Timestamptz(6) @map("submitted_at")
+  totalGrade       Decimal?         @db.Decimal(10, 2) @map("total_grade")
+  lastHeartbeatAt  DateTime?        @db.Timestamptz(6) @map("last_heartbeat_at")
+
+  exam      Exam                  @relation(fields: [examId], references: [id], onDelete: Cascade)
+  student   User                  @relation(fields: [studentId], references: [id], onDelete: Restrict)
+  questions StudentExamQuestion[]
+
+  @@unique([examId, studentId])
+  @@index([examId, status])
+  @@index([studentId, status])
+  @@index([studentId, submittedAt])
+  @@map("student_exam")
+}
+
+model StudentExamQuestion {
+  id                      String  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  studentExamId           String  @db.Uuid @map("student_exam_id")
+  questionId              String  @db.Uuid @map("question_id")
+  selectedAnswer          String? @map("selected_answer")
+  isFlagged               Boolean @default(false) @map("is_flagged")
+  gradeAwarded            Decimal? @db.Decimal(10, 2) @map("grade_awarded")
+  creditAdjustmentReason  String? @map("credit_adjustment_reason")
+
+  studentExam StudentExam @relation(fields: [studentExamId], references: [id], onDelete: Cascade)
+  question    Question    @relation(fields: [questionId], references: [id], onDelete: Restrict)
+
+  @@unique([studentExamId, questionId])
+  @@index([questionId])
+  @@index([studentExamId])
+  @@map("student_exam_question")
+}
+
+model ExamEvent {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  examId    String   @db.Uuid @map("exam_id")
+  seq       Int      @default(autoincrement()) // monotonic per-table order for sound SSE replay cursors
+  type      String // started|voided|warning|submitted|closed
+  payload   Json     @db.JsonB
+  createdAt DateTime @default(now()) @map("created_at")
+
+  exam Exam @relation(fields: [examId], references: [id], onDelete: Cascade)
+
+  @@index([examId, seq])
+  @@map("exam_event")
+}
+
+model ExamCompensation {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  examId          String   @db.Uuid @map("exam_id")
+  questionId      String   @db.Uuid @map("question_id")
+  adjustedBy      String   @map("adjusted_by")
+  adjustmentType  String   @map("adjustment_type") // full_credit|delta|set
+  adjustmentValue Decimal? @db.Decimal(10, 2) @map("adjustment_value")
+  studentIds      String[] @default([]) @map("student_ids") // empty = all students; non-empty = targeted subset only
+  reason          String
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  exam     Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  question Question @relation(fields: [questionId], references: [id], onDelete: Restrict)
+  adjuster User     @relation("Compensator", fields: [adjustedBy], references: [id], onDelete: Restrict)
+
+  @@unique([examId, questionId])
+  @@map("exam_compensation")
+}
+
+// ---------- Governance ----------
+
+model PermissionDefault {
+  role          Role
+  permissionKey String  @map("permission_key")
+  allowed       Boolean
+
+  @@id([role, permissionKey])
+  @@map("permission_default")
+}
+
+model UserPermissionOverride {
+  userId        String  @map("user_id")
+  permissionKey String  @map("permission_key")
+  allowed       Boolean
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, permissionKey])
+  @@map("user_permission_override")
+}
+
+model ImportBatch {
+  id         String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  type       ImportType
+  uploadedBy String       @map("uploaded_by")
+  filename   String
+  status     ImportStatus @default(dry_run)
+  totalRows  Int          @map("total_rows")
+  validRows  Int          @map("valid_rows")
+  payload    Json         @db.JsonB // validated rows, deleted after commit/expire
+  expiresAt  DateTime     @db.Timestamptz(6) @map("expires_at")
+  createdAt  DateTime     @default(now()) @map("created_at")
+
+  uploader User            @relation(fields: [uploadedBy], references: [id], onDelete: Restrict)
+  log      ExcelImportLog?
+
+  @@index([status, expiresAt])
+  @@map("import_batch")
+}
+
+model ExcelImportLog {
+  id            String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  importType    ImportType @map("import_type")
+  batchId       String?    @db.Uuid @unique @map("batch_id")
+  uploadedBy    String     @map("uploaded_by")
+  filename      String
+  totalRows     Int        @map("total_rows")
+  importedCount Int        @map("imported_count")
+  errorCount    Int        @map("error_count")
+  errorReport   Json       @db.JsonB @map("error_report")
+  createdAt     DateTime   @default(now()) @map("created_at")
+
+  batch    ImportBatch? @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  uploader User         @relation(fields: [uploadedBy], references: [id], onDelete: Restrict)
+
+  @@map("excel_import_log")
+}
+
+model SebKey {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  label        String   @unique // e.g. Lab-A-PCs
+  keyHash      String   @unique @map("key_hash") // sha256(raw) — rotation/audit index
+  encryptedKey String?  @map("encrypted_key") // AES-256-GCM raw, for verification (never plaintext column)
+  isActive     Boolean  @default(true) @map("is_active")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  @@map("seb_key")
+}
+
+model ExportJob {
+  id          String       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  requestedBy String       @map("requested_by")
+  examId      String?      @db.Uuid @map("exam_id")
+  subjectId   String?      @db.Uuid @map("subject_id")
+  scope       String // exam|quiz|all
+  params      Json         @db.JsonB // {section_ids, term_id}
+  status      ExportStatus @default(queued)
+  fileUrl     String?      @map("file_url") // signed URL on shared storage
+  createdAt   DateTime     @default(now()) @map("created_at")
+
+  requester User     @relation(fields: [requestedBy], references: [id], onDelete: Restrict)
+  exam      Exam?    @relation(fields: [examId], references: [id], onDelete: SetNull)
+  subject   Subject? @relation(fields: [subjectId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt])
+  @@map("export_job")
+}
+
+model AuditLog {
+  id         String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  actorId    String   @map("actor_id")
+  action     String // e.g. exam.approve, user.deactivate
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  metadata   Json?    @db.JsonB // {before, after, reason}
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  actor User @relation("Actor", fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@index([entityType, entityId, createdAt])
+  @@index([actorId, createdAt])
+  @@map("audit_log")
+}
+
+// Additive support queue: a public request never establishes an identity.
+model AccountSupportRequest {
+  id          String   @id @default(uuid()) @db.Uuid
+  kind        String
+  name        String
+  username    String?
+  contact     String
+  details     String
+  status      String   @default("pending")
+  adminNote   String?  @map("admin_note")
+  createdAt   DateTime @default(now()) @map("created_at")
+  resolvedAt  DateTime? @map("resolved_at")
+  @@index([status, createdAt])
+  @@map("account_support_request")
+}
+
+model NotificationRead {
+  userId      String   @map("user_id")
+  key         String
+  readAt      DateTime @default(now()) @map("read_at")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@id([userId, key])
+  @@map("notification_read")
+}

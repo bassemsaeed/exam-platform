@@ -1,0 +1,26 @@
+{
+  "name": "exam-platform-backend-starter",
+  "version": "1.0.0",
+  "description": "O6U exam platform \u2014 Express API, PostgreSQL, and React frontend",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.8.1",
+  "devDependencies": {
+    "playwright": "^1.63.0"
+  },
+  "scripts": {
+    "setup:local": "node scripts/setup-local.mjs",
+    "build": "pnpm --filter frontend build && pnpm --filter backend build",
+    "start": "pnpm --filter backend start",
+    "dev": "pnpm --parallel --filter backend --filter frontend dev",
+    "test:login": "node scripts/verify-login.mjs",
+    "test:platform": "node scripts/verify-platform.mjs",
+    "test:workflows": "node scripts/verify-real-workflows.mjs",
+    "test:exam": "node scripts/verify-real-exam.mjs",
+    "test:preferences": "node scripts/verify-preferences.mjs",
+    "test:additions": "node scripts/verify-additions.mjs",
+    "test:real-additions": "node scripts/verify-real-additions.mjs",
+    "test:password": "node scripts/verify-password-change.mjs",
+    "test:real": "node scripts/verify-login.mjs && node scripts/verify-real-workflows.mjs && node scripts/verify-real-exam.mjs && node scripts/verify-real-additions.mjs && node scripts/verify-password-change.mjs"
+  }
+}
