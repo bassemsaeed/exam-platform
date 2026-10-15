@@ -3402,7 +3402,9 @@ input[type="datetime-local"],
 .exam-only .workspace-header { justify-content: flex-end; }
 .exam-only .header-tools .icon-button { display: inline-flex; align-items: center; justify-content: center; }
 .exam-only .workspace-content { width: 100%; max-width: none; margin-inline: auto; }
-.exam-only .runner-grid { grid-template-columns: minmax(0, 1fr) 320px; }
+@media (min-width: 951px) {
+  .exam-only .runner-grid { grid-template-columns: minmax(0, 1fr) 320px; }
+}
 .exam-question + .exam-question { border-top: 1px solid var(--border, #d7dce4); margin-top: 28px; padding-top: 28px; }
 .exam-tools { border-top: 1px solid var(--border, #d7dce4); margin-top: 20px; padding-top: 16px; }
 .exam-tools .action-row { flex-wrap: wrap; }
