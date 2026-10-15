@@ -1121,6 +1121,36 @@ export function Exports({ user }: { user: SessionUser }) {
       ? "/api/v1/admin/exams?limit=100"
       : "/api/v1/exams/mine?limit=100",
   );
+  const staff = user.role !== "admin";
+  // Subject names for staff cards (their /mine rows carry no subject object).
+  const subjects = useResource<Envelope<Subject>>(
+    user,
+    "/api/v1/exams/subjects?limit=100",
+    staff,
+  );
+  const subjectById = new Map(
+    rowsOf(subjects.data).map((s) => [s.id, s as Subject]),
+  );
+  const examById = new Map(rowsOf(exams.data).map((e) => [e.id, e as Exam]));
+  // Per-exam export dialog for staff: the exact exam is shown, never a bare id.
+  const [exportExamId, setExportExamId] = useState("");
+  const [exportFormat, setExportFormat] = useState("csv");
+  const exportExam = exportExamId ? examById.get(exportExamId) : undefined;
+  function examSubject(e: Exam): string {
+    const s = e.subject ?? subjectById.get(e.subjectId);
+    return s ? `${s.code} · ${s.name}` : nameOf(e);
+  }
+  function examWindow(e: Exam): string {
+    return `${date(e.startTime)} · ${time(e.startTime)} – ${time(e.endTime)} · ${e.durationMinutes}${t(" min")}`;
+  }
+  function jobTitle(r: Entity): string {
+    const scope = String(r.scope ?? "results");
+    if ((scope === "exam" || scope === "quiz") && r.examId) {
+      const e = examById.get(String(r.examId));
+      if (e) return `${examSubject(e)} · ${t(label(e.type))} · ${date(e.startTime)}`;
+    }
+    return t(label(scope));
+  }
   async function download(r: Entity) {
     setDownloadError("");
     if (previewMode) {
@@ -1176,6 +1206,55 @@ export function Exports({ user }: { user: SessionUser }) {
       />
       <Feedback error={query.error} />
       <Feedback error={downloadError || undefined} />
+      {staff && (
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <h2>{t("Your exams & quizzes")}</h2>
+              <p>
+                {t(
+                  "Export results only for assessments you created. Pick one to export its results.",
+                )}
+              </p>
+            </div>
+          </div>
+          {exams.isPending ? (
+            <Loading />
+          ) : rowsOf(exams.data).length ? (
+            <div className="assessment-list">
+              {rowsOf(exams.data).map((e) => (
+                <div key={e.id} className="upcoming-row">
+                  <div>
+                    <b>{examSubject(e as Exam)}</b>
+                    <small>
+                      {t(label((e as Exam).type))} · {examWindow(e as Exam)}
+                    </small>
+                  </div>
+                  <Badge value={(e as Exam).status} />
+                  <button
+                    className="secondary"
+                    onClick={() => {
+                      action.reset();
+                      setExportFormat("csv");
+                      setExportExamId(e.id);
+                    }}
+                  >
+                    <Download size={15} />
+                    {t(" Export results ")}
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <Empty
+              title={t("No exams of your own yet")}
+              text={t(
+                "Assessments you create appear here with a one-click results export.",
+              )}
+            />
+          )}
+        </section>
+      )}
       {query.isPending ? (
         <Loading />
       ) : query.data?.rows.length ? (
@@ -1193,7 +1272,12 @@ export function Exports({ user }: { user: SessionUser }) {
             <tbody>
               {query.data.rows.map((r) => (
                 <tr key={r.id}>
-                  <td>{t(label(r.scope ?? "Results"))}</td>
+                  <td>
+                    <b>{jobTitle(r)}</b>
+                    <small>
+                      {t("Requested")} {date(r.createdAt)}
+                    </small>
+                  </td>
                   <td>{date(r.createdAt)}</td>
                   <td>
                     {String(
@@ -1238,7 +1322,79 @@ export function Exports({ user }: { user: SessionUser }) {
           text={t("Create an export to download assessment records.")}
         />
       )}
-      {modal && (
+      {staff ? (
+        exportExam && (
+          <Dialog
+            title={t("Export results")}
+            onClose={() => setExportExamId("")}
+          >
+            <div className="exam-summary">
+              <div>
+                <Badge value={exportExam.status} />
+                <h2>{examSubject(exportExam)}</h2>
+                <p>
+                  {t(label(exportExam.type))} · {examWindow(exportExam)}
+                </p>
+              </div>
+            </div>
+            <p className="dialog-copy">
+              {t(
+                "This export contains only this assessment's results — nothing else.",
+              )}
+            </p>
+            <form
+              className="fields-form"
+              onSubmit={(e) => {
+                e.preventDefault();
+                action.mutate(
+                  {
+                    path: "/api/v1/exports",
+                    body: {
+                      scope:
+                        exportExam.type === "ta_quiz" ? "quiz" : "exam",
+                      examId: exportExam.id,
+                      format: exportFormat,
+                    },
+                  },
+                  { onSuccess: () => setExportExamId("") },
+                );
+              }}
+            >
+              <div className="field">
+                <label htmlFor="export-format">{t("Format")}</label>
+                <select
+                  id="export-format"
+                  value={exportFormat}
+                  onChange={(e) => setExportFormat(e.target.value)}
+                >
+                  <option value="csv">CSV</option>
+                  <option value="xlsx">XLSX</option>
+                </select>
+              </div>
+              <Feedback error={action.error} />
+              <div className="dialog-actions">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setExportExamId("")}
+                >
+                  {t(" Cancel ")}
+                </button>
+                <button
+                  type="submit"
+                  className="primary"
+                  disabled={action.isPending}
+                >
+                  {action.isPending
+                    ? t("Creating…")
+                    : t("Create export")}
+                </button>
+              </div>
+            </form>
+          </Dialog>
+        )
+      ) : (
+        modal && (
         <Dialog title={t("Create export")} onClose={() => setModal(false)}>
           <FieldsForm
             fields={[
@@ -1280,6 +1436,7 @@ export function Exports({ user }: { user: SessionUser }) {
             submitLabel={t("Create export")}
           />
         </Dialog>
+        )
       )}
     </>
   );

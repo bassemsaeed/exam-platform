@@ -35,16 +35,20 @@ exportsJobs.post("/", async (req, res) => {
   let termId = body.termId;
   let sectionIds = body.sectionIds ?? [];
 
+  // Staff (doctor/ta) may ONLY export results for exams/quizzes they created —
+  // no subject-wide ("all") exports and no other author's exams. Admins keep
+  // every scope via /admin/exports oversight.
+  if (a.role !== "admin" && body.scope === "all") {
+    return res.status(403).json({ error: "staff may only export their own exams and quizzes" });
+  }
+
   if (body.scope === "exam" || body.scope === "quiz") {
     if (!body.examId) return res.status(422).json({ error: "examId required for exam|quiz scope" });
     const exam = await prisma.exam.findUnique({ where: { id: body.examId } });
     if (!exam) return res.status(404).json({ error: "exam not found" });
     if (a.role === "doctor") {
-      const ok =
-        exam.createdBy === a.userId ||
-        (await prisma.doctorAssignment.count({ where: { doctorId: a.userId, subjectId: exam.subjectId, termId: exam.termId } }));
-      if (!ok) return res.status(403).json({ error: "not your exam" });
-      if (exam.createdBy !== a.userId && !(await hasPermission(a.userId, a.role, "view_all_grades"))) {
+      if (exam.createdBy !== a.userId) return res.status(403).json({ error: "not your exam" });
+      if (!(await hasPermission(a.userId, a.role, "view_all_grades"))) {
         return res.status(403).json({ error: "forbidden", need: "view_all_grades" });
       }
     } else if (a.role === "ta") {
