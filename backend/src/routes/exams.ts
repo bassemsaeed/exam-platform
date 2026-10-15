@@ -163,6 +163,7 @@ exams.post("/", async (req, res) => {
       notesForDoctorEnabled: z.boolean().default(false),
       examToolsEnabled: z.boolean().default(true),
       maxReentries: z.number().int().min(0).max(20).default(3),
+      resultsReleased: z.boolean().default(false),
       difficultyMix: mixInput.optional(),
       // Manual blueprint: hand-picked question IDs in author order (sampling
       // bypassed). Either this or a non-empty difficultyMix is required.
@@ -269,6 +270,7 @@ exams.post("/", async (req, res) => {
         notesForDoctorEnabled: body.notesForDoctorEnabled,
         examToolsEnabled: body.examToolsEnabled,
         maxReentries: body.maxReentries,
+        resultsReleased: body.resultsReleased,
         difficultyMix: mix,
         manualQuestionIds: manual.length ? manual : Prisma.DbNull,
         questionSource: a.role === "ta" ? source : "own",
@@ -305,6 +307,46 @@ async function creatorPermissionError(userId: string, role: string): Promise<{ e
   }
   return { error: "forbidden" };
 }
+
+// GET /exams/live — "happening now" strip: the caller's exams whose window is
+// currently open, each with live headcounts. Admin sees everything; staff see
+// only their own creations. Powers the proctoring overview; read-only.
+exams.get("/live", async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  if (a.role === "student") return res.status(403).json({ error: "forbidden" });
+  const now = new Date();
+  const staleCutoff = new Date(now.getTime() - config.heartbeat.staleMs);
+  const exams = await prisma.exam.findMany({
+    where: {
+      status: "approved",
+      startTime: { lte: now },
+      endTime: { gte: now },
+      ...(a.role === "admin" ? {} : { createdBy: a.userId }),
+    },
+    select: {
+      id: true,
+      type: true,
+      status: true,
+      startTime: true,
+      endTime: true,
+      durationMinutes: true,
+      resultsReleased: true,
+      subject: { select: { code: true, name: true } },
+    },
+    orderBy: { endTime: "asc" },
+  });
+  const rows = await Promise.all(
+    exams.map(async (e) => {
+      const [inProgress, stale, submitted] = await Promise.all([
+        prisma.studentExam.count({ where: { examId: e.id, status: "in_progress" } }),
+        prisma.studentExam.count({ where: { examId: e.id, status: "in_progress", OR: [{ lastHeartbeatAt: null }, { lastHeartbeatAt: { lt: staleCutoff } }] } }),
+        prisma.studentExam.count({ where: { examId: e.id, status: { in: ["submitted", "auto_submitted"] } } }),
+      ]);
+      return { ...e, inProgress, stale, submitted };
+    }),
+  );
+  res.json({ now, rows });
+});
 
 exams.get("/:id", async (req, res) => {
   const a = req as unknown as AuthedRequest;
@@ -373,7 +415,7 @@ exams.get("/:id/blueprint", async (req, res) => {
 exams.patch("/:id", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const body = z
-    .object({ notesEnabled: z.boolean().optional(), notesForDoctorEnabled: z.boolean().optional(), examToolsEnabled: z.boolean().optional(), maxReentries: z.number().int().min(0).max(20).optional(), startTime: z.string().datetime().optional(), endTime: z.string().datetime().optional(), durationMinutes: z.number().int().positive().optional(), difficultyMix: mixInput.optional() })
+    .object({ notesEnabled: z.boolean().optional(), notesForDoctorEnabled: z.boolean().optional(), examToolsEnabled: z.boolean().optional(), maxReentries: z.number().int().min(0).max(20).optional(), resultsReleased: z.boolean().optional(), startTime: z.string().datetime().optional(), endTime: z.string().datetime().optional(), durationMinutes: z.number().int().positive().optional(), difficultyMix: mixInput.optional() })
     .parse(req.body);
   // NOTE: hand-picked blueprints lock at creation (sittings may reference
   // exact IDs) — PATCH covers window/duration/mix only, and mix patches on a
@@ -431,6 +473,76 @@ exams.delete("/:id", async (req, res) => {
   await prisma.exam.delete({ where: { id: own.exam.id } });
   await audit(a.userId, "exam.delete", "exam", own.exam.id);
   res.json({ ok: true });
+});
+
+// POST /exams/:id/release {released} — publish or hide grades for students.
+// Works ANYTIME (before, during, after the window): releasing is a visibility
+// switch, not an edit. Creator (or admin) only; staff see nothing extra.
+exams.post("/:id/release", async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  const { released } = z.object({ released: z.boolean() }).parse(req.body);
+  const own = await ownExamOrAdmin(a.userId, a.role, String(req.params.id));
+  if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
+  const row = await prisma.exam.update({ where: { id: own.exam.id }, data: { resultsReleased: released } });
+  await audit(a.userId, released ? "exam.release" : "exam.unrelease", "exam", row.id);
+  res.json({ ok: true, resultsReleased: row.resultsReleased });
+});
+
+// GET /exams/:id/analytics — per-question performance for the author:
+// attempts, correct answers, % correct, average award. Same visibility as
+// results (creators + permitted staff); correct answers never leave the server.
+exams.get("/:id/analytics", async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  if (a.role === "student") return res.status(403).json({ error: "forbidden" });
+  const exam = await prisma.exam.findUnique({ where: { id: String(req.params.id) }, select: { id: true, subjectId: true, termId: true, createdBy: true } });
+  if (!exam) return res.status(404).json({ error: "not found" });
+  if (a.role !== "admin" && exam.createdBy !== a.userId) {
+    if (a.role === "doctor") {
+      const assigned = await prisma.doctorAssignment.count({ where: { doctorId: a.userId, subjectId: exam.subjectId, termId: exam.termId } });
+      if (!assigned || !(await hasPermission(a.userId, a.role, "view_all_grades"))) {
+        return res.status(403).json({ error: "not your subject" });
+      }
+    } else if (a.role === "ta") {
+      return res.status(403).json({ error: "not your quiz" });
+    }
+  }
+  if (a.role === "ta" && exam.createdBy === a.userId && !(await hasPermission(a.userId, a.role, "view_own_grades"))) {
+    return res.status(403).json({ error: "forbidden", need: "view_own_grades" });
+  }
+  const rows = await prisma.studentExamQuestion.findMany({
+    where: { studentExam: { examId: exam.id, status: { in: ["submitted", "auto_submitted"] } } },
+    select: {
+      questionId: true,
+      selectedAnswer: true,
+      gradeAwarded: true,
+      question: { select: { text: true, questionType: true, difficulty: true, grade: true, correctAnswer: true } },
+    },
+  });
+  const byQ = new Map<string, { text: string; type: string; difficulty: string; grade: number; attempts: number; correct: number; awardSum: number }>();
+  for (const r of rows) {
+    let g = byQ.get(r.questionId);
+    if (!g) {
+      g = { text: r.question.text, type: r.question.questionType, difficulty: r.question.difficulty, grade: Number(r.question.grade ?? 0), attempts: 0, correct: 0, awardSum: 0 };
+      byQ.set(r.questionId, g);
+    }
+    g.attempts++;
+    if (r.selectedAnswer !== null && r.selectedAnswer === r.question.correctAnswer) g.correct++;
+    g.awardSum += Number(r.gradeAwarded ?? 0);
+  }
+  const questions = [...byQ].map(([questionId, g]) => ({
+    questionId,
+    text: g.text,
+    type: g.type,
+    difficulty: g.difficulty,
+    grade: g.grade,
+    attempts: g.attempts,
+    correct: g.correct,
+    pctCorrect: g.attempts ? Math.round((g.correct / g.attempts) * 100) : 0,
+    avgAward: g.attempts ? Number((g.awardSum / g.attempts).toFixed(2)) : 0,
+  })).sort((x, y) => x.pctCorrect - y.pctCorrect);
+  const submitted = await prisma.studentExam.count({ where: { examId: exam.id, status: { in: ["submitted", "auto_submitted"] } } });
+  await audit(a.userId, "exam.analytics", "exam", exam.id, { submitted });
+  res.json({ examId: exam.id, submitted, questions });
 });
 
 // GET /exams/:id/results — doctor: all groups w/ TA names; TA: own groups only.

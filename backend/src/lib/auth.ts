@@ -101,5 +101,10 @@ export const auth = betterAuth({
       departmentId: { type: "string", required: false, input: false },
     },
   },
-  session: { expiresIn: 60 * 60 * config.sessionHours }, // lab day default — forces daily re-login
+  session: {
+    expiresIn: 60 * 60 * config.sessionHours, // lab day default — forces daily re-login
+    // Sliding window for ACTIVE users: hourly activity pushes expiry out, so a
+    // long exam day never kills a session mid-attempt. Idle users still expire.
+    updateAge: 60 * 60 * 6,
+  },
 });

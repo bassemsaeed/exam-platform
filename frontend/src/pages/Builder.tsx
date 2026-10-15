@@ -136,7 +136,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
   const [subject, setSubject] = useState("");
   const [duration, setDuration] = useState(45);
   const [notesEnabled, setNotesEnabled] = useState(false);
-  const [examToolsEnabled, setExamToolsEnabled] = useState(true);
+  const [resultsReleased, setResultsReleased] = useState(false);  const [examToolsEnabled, setExamToolsEnabled] = useState(true);
   const [notesForDoctorEnabled, setNotesForDoctorEnabled] = useState(false);
   const [maxReentries, setMaxReentries] = useState(3);
   const [startLocal, setStartLocal] = useState("");
@@ -279,7 +279,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
           startTime,
           endTime,
           durationMinutes: duration,
-          notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries,
+          notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, resultsReleased,
           targetScope: scope,
           ...(scope === "sections" ? { targetSections: sectionSel } : {}),
           ...(scope === "student_list"
@@ -374,6 +374,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
             </div>
 <div className="field">
   <label><input type="checkbox" checked={notesEnabled} onChange={(e) => setNotesEnabled(e.target.checked)} /> {t("Allow student notes")}</label>
+  <label><input type="checkbox" checked={resultsReleased} onChange={(e) => setResultsReleased(e.target.checked)} /> {t("Show grades to students immediately")}</label>
   <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
   <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>
   <label>{t("Maximum re-entries (excluding the first entry)")}
@@ -877,7 +878,7 @@ export function QuestionSheet({
 // Modern replacement for the generic edit-window dialog: smart date popovers
 // + duration stepper instead of native datetime-local inputs.
 export function EditExamWindow({
-  notesEnabled: initialNotes = false, notesForDoctorEnabled: initialDoctorNotes = false, examToolsEnabled: initialExamTools = true, maxReentries: initialReentries = 3,
+  notesEnabled: initialNotes = false, notesForDoctorEnabled: initialDoctorNotes = false, examToolsEnabled: initialExamTools = true, maxReentries: initialReentries = 3, resultsReleased: initialReleased = false,
   startTime,
   endTime,
   durationMinutes,
@@ -892,6 +893,7 @@ export function EditExamWindow({
   notesForDoctorEnabled?: boolean;
   examToolsEnabled?: boolean;
   maxReentries?: number;
+  resultsReleased?: boolean;
   busy?: boolean;
   error?: unknown;
   onSubmit: (body: Record<string, unknown>) => void;
@@ -910,6 +912,7 @@ export function EditExamWindow({
   const [examToolsEnabled, setExamToolsEnabled] = useState(initialExamTools ?? true);
   const [notesForDoctorEnabled, setNotesForDoctorEnabled] = useState(initialDoctorNotes);
   const [maxReentries, setMaxReentries] = useState(initialReentries);
+  const [resultsReleased, setResultsReleased] = useState(initialReleased);
   const [err, setErr] = useState("");
   function save() {
     const a = new Date(start).getTime();
@@ -924,7 +927,7 @@ export function EditExamWindow({
       startTime: new Date(start).toISOString(),
       endTime: new Date(end).toISOString(),
       durationMinutes: dur,
-      notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries,
+      notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, resultsReleased,
     });
   }
   return (
@@ -962,6 +965,7 @@ export function EditExamWindow({
       </div>
 <div className="field">
   <label><input type="checkbox" checked={notesEnabled} onChange={(e) => setNotesEnabled(e.target.checked)} /> {t("Allow student notes")}</label>
+  <label><input type="checkbox" checked={resultsReleased} onChange={(e) => setResultsReleased(e.target.checked)} /> {t("Show grades to students immediately")}</label>
   <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
   <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>
   <label>{t("Maximum re-entries (excluding the first entry)")}

@@ -18,10 +18,12 @@ export interface Subject extends Entity {
   code: string;
 }
 export interface Exam extends Entity {
+  createdBy?: string;
   notesEnabled?: boolean;
   notesForDoctorEnabled?: boolean;
   examToolsEnabled?: boolean;
   maxReentries?: number;
+  resultsReleased?: boolean;
   subjectId: string;
   subject?: Subject;
   type: string;
@@ -51,6 +53,8 @@ export interface SittingQuestion extends Question {
 }
 export interface Sitting {
   entryToken?: string;
+  entriesUsed?: number;
+  resultsReleased?: boolean;
   notesEnabled?: boolean;
   notesForDoctorEnabled?: boolean;
   examToolsEnabled?: boolean;

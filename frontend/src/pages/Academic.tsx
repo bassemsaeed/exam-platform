@@ -10,6 +10,7 @@ import {
   Download,
   ShieldCheck,
   RefreshCw,
+  Radio,
 } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { api, type SessionUser } from "../lib/api";
@@ -75,6 +76,21 @@ export function Exams({ user }: { user: SessionUser }) {
       .toLowerCase()
       .includes(search.toLowerCase()),
   );
+  // Proctoring overview: the staffer's exams whose window is open right now,
+  // with live headcounts. Students never see this; admins see everything.
+  const liveNow = useResource<{
+    now: string;
+    rows: {
+      id: string;
+      type: string;
+      status: string;
+      endTime: string;
+      subject: { code: string; name: string };
+      inProgress: number;
+      stale: number;
+      submitted: number;
+    }[];
+  }>(user, "/api/v1/exams/live", !student, 30000);
   return (
     <>
       <PageTitle
@@ -93,6 +109,38 @@ export function Exams({ user }: { user: SessionUser }) {
           )
         }
       />
+      {!student && !!liveNow.data?.rows.length && (
+        <section className="panel">
+          <div className="panel-heading">
+            <div>
+              <h2>{t("Happening now")}</h2>
+              <p>{t("Your assessments with the window open right now.")}</p>
+            </div>
+          </div>
+          <div className="assessment-list">
+            {liveNow.data.rows.map((e) => (
+              <Link key={e.id} to={`/exams/${e.id}`}>
+                <span className="assessment-icon">
+                  <Radio size={17} />
+                </span>
+                <div>
+                  <b>
+                    {e.subject.code} · {e.subject.name}
+                  </b>
+                  <small>
+                    {t(label(e.type))} · {t("ends")} {time(e.endTime)} ·{" "}
+                    {e.inProgress} {t("taking")} · {e.submitted}{" "}
+                    {t("submitted")}
+                    {e.stale > 0 &&
+                      ` · ${e.stale} ${t("stale connection")}`}
+                  </small>
+                </div>
+                <Badge value={e.inProgress > 0 ? "in_progress" : "approved"} />
+              </Link>
+            ))}
+          </div>
+        </section>
+      )}
       <div className="toolbar">
         <SearchBox
           value={search}
@@ -295,7 +343,23 @@ export function ExamDetail({ user }: { user: SessionUser }) {
     `/api/v1/admin/exams/${id}/compensations`,
     admin && tab === "adjustments",
   );
+  const analytics = useResource<{
+    examId: string;
+    submitted: number;
+    questions: {
+      questionId: string;
+      text: string;
+      type: string;
+      difficulty: string;
+      grade: number;
+      attempts: number;
+      correct: number;
+      pctCorrect: number;
+      avgAward: number;
+    }[];
+  }>(user, `/api/v1/exams/${id}/analytics`, tab === "analytics");
   const e = query.data?.exam;
+  const canSeeAnalytics = admin || (!!e && e.createdBy === user.id);
   function send(body: Record<string, unknown>) {
     if (operation === "edit") {
       action.mutate(
@@ -374,6 +438,30 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                     {t(" Manage entry code ")}
                   </button>
                 )}
+                {(admin || e.createdBy === user.id) && (
+                  <button
+                    className="secondary"
+                    disabled={action.isPending}
+                    title={
+                      e.resultsReleased
+                        ? t("Grades are visible to students")
+                        : t("Grades are hidden until you publish them")
+                    }
+                    onClick={() =>
+                      action.mutate(
+                        {
+                          path: `/api/v1/${admin ? "admin/" : ""}exams/${id}/release`,
+                          body: { released: !e.resultsReleased },
+                        },
+                        { onSuccess: () => query.refetch() },
+                      )
+                    }
+                  >
+                    {e.resultsReleased
+                      ? t(" Unpublish grades ")
+                      : t(" Publish grades ")}
+                  </button>
+                )}
                 <button
                   className="secondary"
                   onClick={() => setOperation("edit")}
@@ -401,14 +489,18 @@ export function ExamDetail({ user }: { user: SessionUser }) {
             </section>
             <Feedback error={action.error} />
             <div className="tabs">
-              {["blueprint", ...(admin ? ["live", "adjustments"] : [])].map(
+              {["blueprint", ...(admin ? ["live", "adjustments"] : []), ...(canSeeAnalytics ? ["analytics"] : [])].map(
                 (tabKey) => (
                   <button
                     key={tabKey}
                     className={tab === tabKey ? "active" : ""}
                     onClick={() => setTab(tabKey)}
                   >
-                    {tabKey === "live" ? t("Live monitor") : t(label(tabKey))}
+                    {tabKey === "live"
+                      ? t("Live monitor")
+                      : tabKey === "analytics"
+                        ? t("Question performance")
+                        : t(label(tabKey))}
                   </button>
                 ),
               )}
@@ -544,6 +636,67 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                 )}
               </section>
             )}
+            {tab === "analytics" && canSeeAnalytics && (
+              <section className="panel">
+                <div className="panel-heading">
+                  <div>
+                    <h2>{t("Question performance")}</h2>
+                    <p>
+                      {t(
+                        "How each question behaved across graded attempts. Low bars deserve a second look.",
+                      )}
+                    </p>
+                  </div>
+                  {typeof analytics.data?.submitted === "number" && (
+                    <span className="subtle">
+                      {t("{0} graded attempts", {
+                        "0": analytics.data.submitted,
+                      })}
+                    </span>
+                  )}
+                </div>
+                <Feedback error={analytics.error} />
+                {analytics.isPending ? (
+                  <Loading />
+                ) : analytics.data?.questions.length ? (
+                  analytics.data.questions.map((q) => (
+                    <div className="question-preview" key={q.questionId}>
+                      <span>
+                        {q.attempts}
+                        {t(" tries")}
+                      </span>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <b>{q.text}</b>
+                        <small>
+                          {t(label(q.type))} · {t(label(q.difficulty))} ·{" "}
+                          {q.grade} {t("marks")} · {t("avg")} {q.avgAward}
+                        </small>
+                        <div
+                          className="run-progress"
+                          role="img"
+                          aria-label={t("{0}% correct", {
+                            "0": q.pctCorrect,
+                          })}
+                        >
+                          <i style={{ width: `${q.pctCorrect}%` }} />
+                        </div>
+                      </div>
+                      <span className="badge">
+                        {q.pctCorrect}
+                        {t("% correct")}
+                      </span>
+                    </div>
+                  ))
+                ) : (
+                  <Empty
+                    title={t("No graded attempts yet")}
+                    text={t(
+                      "Performance appears after students submit this assessment.",
+                    )}
+                  />
+                )}
+              </section>
+            )}
           </>
         )
       )}
@@ -599,6 +752,7 @@ export function ExamDetail({ user }: { user: SessionUser }) {
               notesForDoctorEnabled={e.notesForDoctorEnabled}
               examToolsEnabled={e.examToolsEnabled}
               maxReentries={e.maxReentries}
+              resultsReleased={e.resultsReleased}
               busy={action.isPending}
               error={action.error}
               onSubmit={send}
@@ -1022,10 +1176,14 @@ export function Results({ user }: { user: SessionUser }) {
                     </td>
                     <td>{date(r.submittedAt)}</td>
                     <td>
-                      <strong>
-                        {r.totalGrade}/{r.totalMarks ?? "—"}
-                      </strong>
-                      {t(" marks ")}
+                      {r.exam.resultsReleased === false ? (
+                        <Badge value="awaiting release" />
+                      ) : (
+                        <strong>
+                          {r.totalGrade ?? "—"}/{r.totalMarks ?? "—"}
+                        </strong>
+                      )}
+                      {r.exam.resultsReleased !== false && t(" marks ")}
                     </td>
                     <td>
                       <Badge value={r.status} />

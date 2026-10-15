@@ -326,6 +326,9 @@ model Exam {
   notesForDoctorEnabled Boolean @default(false) @map("notes_for_doctor_enabled")
   examToolsEnabled Boolean @default(true) @map("exam_tools_enabled")
   maxReentries Int @default(3) @map("max_reentries")
+  // Grade visibility: false hides scores from students (submit + results show
+  // "awaiting release") until staff publish. Staff always see real grades.
+  resultsReleased Boolean @default(false) @map("results_released")
   difficultyMix   Json       @db.JsonB @map("difficulty_mix")
   manualQuestionIds Json?     @map("manual_question_ids") // hand-picked blueprint (author order); null = auto-sample by mix
   questionSource  String?    @map("question_source") // TA quiz: shared|mine. Doctor: own (implicit).

@@ -16,6 +16,23 @@ import { requireAuth, requirePermission, requireRole, type AuthedRequest } from 
 import { idempotency } from "../middleware/idempotency.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 import { requireSeb } from "../middleware/seb.js";
+import { shuffled } from "../lib/shuffle.js";
+
+// Per-student display order: questions and MCQ options are shuffled with a
+// seed derived from the sitting id, so every attempt sees a stable but
+// student-unique order (refresh-safe, no two students match). Grading is
+// order-independent (answers are stored/compared by option VALUE), so this
+// only affects presentation, never scores.
+function shuffleSittingQuestions<
+  T extends { questionId: string; options: unknown },
+>(sittingId: string, questions: T[]): T[] {
+  return shuffled(questions, `q:${sittingId}`).map((q) => ({
+    ...q,
+    options: Array.isArray(q.options)
+      ? shuffled(q.options, `o:${sittingId}:${q.questionId}`)
+      : q.options,
+  }));
+}
 
 export const student: RouterType = Router();
 student.use(requireAuth);
@@ -52,15 +69,21 @@ student.get("/results", requireRole("student"), async (req, res) => {
           startTime: true,
           endTime: true,
           durationMinutes: true,
+          resultsReleased: true,
           subject: { select: { code: true, name: true } },
         },
       },
     },
   });
+  // Grade release: unreleased exams expose status/timing only — scores and
+  // mark totals stay hidden until staff publish.
   res.json(rows.map((r) => ({
     ...r,
     questions: undefined,
-    totalMarks: r.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0),
+    totalGrade: r.exam.resultsReleased ? r.totalGrade : null,
+    totalMarks: r.exam.resultsReleased
+      ? r.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0)
+      : null,
   })));
 });
 
@@ -318,7 +341,7 @@ student.get(
     if (!exam) return res.status(404).json({ error: "exam not found" });
     const existing = await prisma.studentExam.findUnique({
       where: { examId_studentId: { examId: exam.id, studentId: a.userId } },
-      select: { status: true },
+      select: { status: true, entryTokens: true },
     });
     if (!existing) {
       const eligibility = await examEligibility(exam, a.userId);
@@ -336,6 +359,8 @@ student.get(
       subject: exam.subject,
       durationMinutes: exam.durationMinutes,
       maxReentries: exam.maxReentries,
+      entriesUsed: existing ? existing.entryTokens.length : 0,
+      resultsReleased: exam.resultsReleased,
       startTime: exam.startTime,
       endTime: exam.endTime,
       requiresCode: !!exam.accessCodeHash,
@@ -464,13 +489,17 @@ student.post(
         notesForDoctor: existing.notesForDoctor,
         notes: existing.notes,
         maxReentries: exam.maxReentries,
+        entriesUsed: existing.entryTokens.includes(admission.issued)
+          ? existing.entryTokens.length
+          : existing.entryTokens.length + 1,
+        resultsReleased: exam.resultsReleased,
         id: existing.id,
         examId: existing.examId,
         status: existing.status,
         startedAt: existing.startedAt,
         durationMinutes: exam.durationMinutes,
         remainingSeconds,
-        questions: existing.questions.map((q) => ({
+        questions: shuffleSittingQuestions(existing.id, existing.questions.map((q) => ({
           id: q.id,
           questionId: q.questionId,
           questionType: q.question.questionType,
@@ -481,7 +510,7 @@ student.post(
           imageUrl: q.question.imageUrl,
           selectedAnswer: q.selectedAnswer,
           isFlagged: q.isFlagged,
-        })),
+        }))),
       });
     }
 
@@ -574,13 +603,15 @@ student.post(
         notesForDoctor: created.notesForDoctor,
         notes: created.notes,
         maxReentries: exam.maxReentries,
+        entriesUsed: 1,
+        resultsReleased: exam.resultsReleased,
         id: created.id,
         examId: created.examId,
         status: created.status,
         startedAt: created.startedAt,
         durationMinutes: exam.durationMinutes,
         remainingSeconds,
-        questions: created.questions.map((q) => ({
+        questions: shuffleSittingQuestions(created.id, created.questions.map((q) => ({
           id: q.id,
           questionId: q.questionId,
           questionType: q.question.questionType,
@@ -591,7 +622,7 @@ student.post(
           imageUrl: q.question.imageUrl,
           selectedAnswer: q.selectedAnswer,
           isFlagged: q.isFlagged,
-        })),
+        }))),
       });
     } catch (e) {
       // Parallel start collision: return the winner's instance
@@ -649,13 +680,17 @@ student.post(
           notesForDoctor: raceInstance.notesForDoctor,
           notes: raceInstance.notes,
           maxReentries: exam.maxReentries,
+          entriesUsed: raceInstance.entryTokens.includes(raceAdmission.issued)
+            ? raceInstance.entryTokens.length
+            : raceInstance.entryTokens.length + 1,
+          resultsReleased: exam.resultsReleased,
           id: raceInstance.id,
           examId: raceInstance.examId,
           status: raceInstance.status,
           startedAt: raceInstance.startedAt,
           durationMinutes: exam.durationMinutes,
           remainingSeconds: Math.max(0, Math.floor((maxEndTime - Date.now()) / 1000)),
-          questions: raceInstance.questions.map((q) => ({
+          questions: shuffleSittingQuestions(raceInstance.id, raceInstance.questions.map((q) => ({
             id: q.id,
             questionId: q.questionId,
             questionType: q.question.questionType,
@@ -666,7 +701,7 @@ student.post(
             imageUrl: q.question.imageUrl,
             selectedAnswer: q.selectedAnswer,
             isFlagged: q.isFlagged,
-          })),
+          }))),
         });
       }
       throw e;
@@ -866,8 +901,11 @@ student.post(
       return res.json({
         ok: true,
         status: se.status,
-        totalGrade: se.totalGrade,
-        totalMarks: se.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0),
+        resultsReleased: se.exam.resultsReleased,
+        totalGrade: se.exam.resultsReleased ? se.totalGrade : null,
+        totalMarks: se.exam.resultsReleased
+          ? se.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0)
+          : null,
         submittedAt: se.submittedAt,
       });
     }
@@ -881,8 +919,11 @@ student.post(
       return res.json({
         ok: true,
         status: updated?.status ?? "auto_submitted",
-        totalGrade: updated?.totalGrade ?? 0,
-        totalMarks: se.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0),
+        resultsReleased: se.exam.resultsReleased,
+        totalGrade: se.exam.resultsReleased ? (updated?.totalGrade ?? 0) : null,
+        totalMarks: se.exam.resultsReleased
+          ? se.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0)
+          : null,
         submittedAt: updated?.submittedAt,
       });
     }
@@ -936,7 +977,7 @@ student.post(
     if (finalized.outcome === "race") {
       // Lost the race (or already submitted): return the canonical row.
       const current = await prisma.studentExam.findUniqueOrThrow({ where: { id: se.id } });
-      return res.json({ ok: true, status: current.status, totalGrade: current.totalGrade, totalMarks: se.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0), submittedAt: current.submittedAt });
+      return res.json({ ok: true, status: current.status, resultsReleased: se.exam.resultsReleased, totalGrade: se.exam.resultsReleased ? current.totalGrade : null, totalMarks: se.exam.resultsReleased ? se.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0) : null, submittedAt: current.submittedAt });
     }
     const row = await prisma.studentExam.findUniqueOrThrow({ where: { id: se.id } });
 
@@ -950,8 +991,11 @@ student.post(
     res.json({
       ok: true,
       status: row.status,
-      totalGrade: row.totalGrade,
-      totalMarks: se.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0),
+      resultsReleased: se.exam.resultsReleased,
+      totalGrade: se.exam.resultsReleased ? row.totalGrade : null,
+      totalMarks: se.exam.resultsReleased
+        ? se.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0)
+        : null,
       submittedAt: row.submittedAt,
     });
   },

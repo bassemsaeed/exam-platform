@@ -97,8 +97,11 @@ function Calculator() {
   const [inv, setInv] = useState(false);
   const [expr, setExpr] = useState("");
   const [ans, setAns] = useState(0);
-  const [hist, setHist] = useState<{ expr: string; out: string }[]>([]);
+  const [hist, setHist] = useState<{ expr: string; out: string; value: number | null }[]>([]);
   const [done, setDone] = useState<null | { expr: string; out: string }>(null);
+  // Exact decimal of the last base conversion (fractional parts don't survive
+  // integer bases — the readout keeps showing the true value until next edit).
+  const [pinnedDec, setPinnedDec] = useState<string | null>(null);
   // Live preview while typing; errors stay silent until = is pressed.
   const live = useMemo(() => {
     if (!expr.trim()) return null;
@@ -108,6 +111,7 @@ function Calculator() {
   const shownExpr = done ? done.expr : expr || "0";
   const shownOut = done ? done.out : (live ?? "");
   function smartInsert(text: string, continues: boolean) {
+    setPinnedDec(null);
     if (done && !continues) {
       setDone(null);
       setExpr(text);
@@ -124,10 +128,11 @@ function Calculator() {
     setExpr((old) => old + text);
   }
   function press(key: string) {
-    if (key === "C") { setExpr(""); setDone(null); return; }
+    if (key === "C") { setExpr(""); setDone(null); setPinnedDec(null); return; }
     if (key === "⌫") {
-      if (done) { setDone(null); setExpr(""); return; }
+      if (done) { setDone(null); setExpr(""); setPinnedDec(null); return; }
       setExpr((old) => old.slice(0, -1));
+      setPinnedDec(null);
       return;
     }
     if (key === "=") {
@@ -136,7 +141,7 @@ function Calculator() {
       if (typeof r === "number") {
         const out = formatValue(r, base);
         setAns(clean(r));
-        setHist((h) => [{ expr, out }, ...h].slice(0, 5));
+        setHist((h) => [{ expr, out, value: clean(r) }, ...h].slice(0, 5));
         setDone({ expr, out });
       } else {
         setDone({ expr, out: `Error: ${r.error}` });
@@ -171,13 +176,40 @@ function Calculator() {
   const digitOk = (d: string): boolean =>
     base === 10 || (base === 16 ? /^[0-9A-Fa-f]$/.test(d) : base === 8 ? /^[0-7]$/.test(d) : /^[01]$/.test(d));
   // Decimal value of whatever is showing, for the base-conversion readout.
+  // A pinned exact value (from a base switch) wins until the next edit.
   const decReadout = (() => {
     if (base === 10 || done?.out?.startsWith("Error")) return null;
+    if (pinnedDec) return `= ${pinnedDec}`;
     const src = done ? done.expr : expr;
     if (!src.trim()) return null;
     const r = evaluate(src, base, angle, ans);
     return typeof r === "number" ? `= ${formatValue(r, 10)}` : null;
   })();
+  // Switching bases converts the current value instead of erasing it.
+  // Unparseable text can't convert, so it clears (nothing valid to keep).
+  function convertBase(nb: NumBase) {
+    if (nb === base) return;
+    let value: number | null = null;
+    if (done && !done.out.startsWith("Error")) value = ans;
+    else if (expr.trim()) {
+      const r = evaluate(expr, base, angle, ans);
+      if (typeof r === "number") value = r;
+    } else {
+      setBase(nb);
+      setDone(null);
+      setPinnedDec(null);
+      return;
+    }
+    setBase(nb);
+    setDone(null);
+    if (value === null) {
+      setExpr("");
+      setPinnedDec(null);
+      return;
+    }
+    setExpr(nb === 10 ? trimNum(value) : formatValue(value, nb));
+    setPinnedDec(Number.isInteger(value) ? null : formatValue(value, 10));
+  }
   function onKey(e: { key: string; stopPropagation: () => void }) {
     const k = e.key;
     const map: Record<string, string> = { "*": "×", "/": "÷", Enter: "=", Escape: "C", Backspace: "⌫" };
@@ -205,7 +237,7 @@ function Calculator() {
     <div className="calc-modes" role="group" aria-label={t("Calculator modes")}>
       {([["DEC", 10], ["HEX", 16], ["OCT", 8], ["BIN", 2]] as [string, NumBase][]).map(([label, b]) => (
         <button key={label} type="button" className={base === b ? "on" : ""} aria-pressed={base === b}
-          onClick={() => { setBase(b); setExpr(""); setDone(null); }}>
+          onClick={() => convertBase(b)}>
           {label}
         </button>
       ))}
@@ -249,7 +281,7 @@ function Calculator() {
     {hist.length > 0 && <ol className="calc-history" aria-label={t("History")}>
       {hist.map((h, i) => (
         <li key={`${h.expr}-${i}`}>
-          <button type="button" title={t("Reuse result")} onClick={() => { setDone(null); setExpr(h.out); }}>
+          <button type="button" title={t("Reuse result")} onClick={() => { setDone(null); setPinnedDec(null); setExpr(h.value === null ? h.out : formatValue(h.value, base)); }}>
             <span dir="ltr">{h.expr} =</span> <b dir="ltr">{h.out}</b>
           </button>
         </li>

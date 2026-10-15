@@ -11,10 +11,12 @@ import {
   ChevronRight,
 } from "lucide-react";
 import type { SessionUser } from "../lib/api";
+import { authClient } from "../lib/auth-client";
 import {
   request,
   previewMode,
   invalidateResources,
+  useResource,
   type Sitting,
 } from "../lib/platform";
 import { apiUrl, sebHeaders } from "../lib/seb";
@@ -42,15 +44,38 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
   const [hbError, setHbError] = useState<unknown>(null);
   const [notice, setNotice] = useState("");
   const [result, setResult] = useState<{
-    totalGrade: number;
-    totalMarks?: number;
+    totalGrade: number | null;
+    totalMarks?: number | null;
     status: string;
+    resultsReleased?: boolean;
   } | null>(null);
   const [queued, setQueued] = useState(0);
   const [retryAnswers, setRetryAnswers] = useState<
     Record<string, string | null>
   >({});
   const readiness = useExamReadiness(user, id, !sitting && !result);
+  // Session-expiry guard during an active attempt: poll session truth every
+  // minute; under 20 minutes left, offer a one-click refresh (sliding
+  // sessions extend on getSession) so work is never lost to a logout.
+  const sessionWatch = useResource<SessionUser>(
+    user,
+    "/api/v1/me",
+    !!sitting && !result,
+    60000,
+  );
+  const [extending, setExtending] = useState(false);
+  const sessionMs = sessionWatch.data?.sessionExpiresAt
+    ? new Date(sessionWatch.data.sessionExpiresAt).getTime() - Date.now()
+    : null;
+  async function staySignedIn() {
+    setExtending(true);
+    try {
+      await authClient.getSession();
+      await invalidateResources(user.id, ["/api/v1/me"]);
+    } finally {
+      setExtending(false);
+    }
+  }
   useEffect(() => {
     if (readiness.query.data?.submitted) onActivity(null);
   }, [readiness.query.data?.submitted]);
@@ -109,9 +134,10 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
   const finish = useMutation({
     mutationFn: () =>
       request<{
-        totalGrade: number;
-        totalMarks?: number;
+        totalGrade: number | null;
+        totalMarks?: number | null;
         status: string;
+        resultsReleased?: boolean;
       }>(
         `/api/v1/student/exams/${id}/submit`,
         "POST",
@@ -141,6 +167,16 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
       setRetryAnswers((prev) => {
         const next = { ...prev };
         delete next[v.questionId];
+        try {
+          const raw = sessionStorage.getItem(`pending-answers-${user.id}-${id}`);
+          if (raw) {
+            const draft = JSON.parse(raw) as Record<string, string | null>;
+            delete draft[v.questionId];
+            sessionStorage.setItem(`pending-answers-${user.id}-${id}`, JSON.stringify(draft));
+          }
+        } catch {
+          /* memory only */
+        }
         return next;
       }),
     onError: (err, v) => {
@@ -182,6 +218,17 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
   const queue = useRef<Promise<unknown>>(Promise.resolve());
   const choose = useCallback(
     (questionId: string, selectedAnswer: string | null) => {
+      // Refresh-proof drafts: every optimistic answer lands in sessionStorage
+      // first, so a reload replays whatever the server never confirmed.
+      try {
+        const raw = sessionStorage.getItem(`pending-answers-${user.id}-${id}`);
+        const draft = raw ? (JSON.parse(raw) as Record<string, string | null>) : {};
+        if (selectedAnswer === null) delete draft[questionId];
+        else draft[questionId] = selectedAnswer;
+        sessionStorage.setItem(`pending-answers-${user.id}-${id}`, JSON.stringify(draft));
+      } catch {
+        /* memory only */
+      }
       setSitting((s) =>
         s
           ? {
@@ -199,8 +246,27 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
         .catch(() => {})
         .finally(() => setQueued((n) => n - 1));
     },
-    [answer],
+    [answer, user.id, id],
   );
+  // Replay refresh-proof drafts once per attempt: anything the server never
+  // confirmed (differs from the loaded sitting) goes back through the queue.
+  const draftReplayed = useRef("");
+  useEffect(() => {
+    if (!sitting || draftReplayed.current === sitting.id) return;
+    draftReplayed.current = sitting.id;
+    let draft: Record<string, string | null> = {};
+    try {
+      const raw = sessionStorage.getItem(`pending-answers-${user.id}-${id}`);
+      if (raw) draft = JSON.parse(raw) as Record<string, string | null>;
+    } catch {
+      return;
+    }
+    const server = new Map(sitting.questions.map((q) => [q.questionId, q.selectedAnswer]));
+    for (const [questionId, value] of Object.entries(draft)) {
+      if (!server.has(questionId)) continue;
+      if ((server.get(questionId) ?? null) !== value) choose(questionId, value);
+    }
+  }, [sitting, choose, user.id, id]);
   useEffect(() => {
     if (!sitting || result) return;
     const timer = setInterval(
@@ -366,10 +432,20 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
         <section className="panel submitted-panel">
           <CheckCircle2 size={46} />
           <h2>{t("Submission complete")}</h2>
-          <p>{t("Your grade")}</p>
-          <strong>
-            {result.totalGrade}/{result.totalMarks ?? "—"} <small>{t("marks")}</small>
-          </strong>
+          {result.resultsReleased === false ? (
+            <p>
+              {t(
+                "Your attempt has been recorded. Your grade will appear here and in Results after your doctor publishes it.",
+              )}
+            </p>
+          ) : (
+            <>
+              <p>{t("Your grade")}</p>
+              <strong>
+                {result.totalGrade ?? "—"}/{result.totalMarks ?? "—"} <small>{t("marks")}</small>
+              </strong>
+            </>
+          )}
           <Link className="button primary" to="/results">
             {t(" View my results ")}
           </Link>
@@ -415,7 +491,8 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
           >
             <ReadinessChecklist {...readiness} user={user} />
             <div className="exam-rules">
-              {readiness.query.data?.maxReentries !== undefined && <p>{t("Maximum re-entries: {0}. Refreshing or reopening the exam counts as a re-entry.", { "0": readiness.query.data.maxReentries })}</p>}
+              {readiness.query.data?.maxReentries !== undefined && <p>{readiness.query.data.entriesUsed ? t("You have used {0} of {1} entries. Refreshing or reopening the exam counts as a re-entry.", { "0": Math.min(readiness.query.data.entriesUsed, readiness.query.data.maxReentries + 1), "1": readiness.query.data.maxReentries + 1 }) : t("Maximum re-entries: {0}. Refreshing or reopening the exam counts as a re-entry.", { "0": readiness.query.data.maxReentries })}</p>}
+              <p className="subtle">{t("Question and answer order is shuffled uniquely for every student.")}</p>
               <h3>{t("Exam rules")}</h3>
               <p>
                 {t(
@@ -468,6 +545,22 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
     );
   return (
     <>
+      {sessionMs !== null && sessionMs < 20 * 60 * 1000 && (
+        <div className="error-banner" role="alert">
+          <span>
+            {t("Your sign-in expires in {0} minutes. Extend it now so your answers keep saving.", {
+              "0": Math.max(1, Math.ceil(sessionMs / 60000)),
+            })}
+          </span>
+          <button
+            className="secondary"
+            disabled={extending}
+            onClick={() => void staySignedIn()}
+          >
+            {extending ? t("Extending…") : t("Stay signed in")}
+          </button>
+        </div>
+      )}
       <div className="runner-heading">
         <div>
           <span className="page-kicker">{t("ASSESSMENT IN PROGRESS")}</span>
@@ -483,6 +576,15 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
             {sitting.questions.filter((q) => q.isFlagged).length}
             {t(" flagged ")}
           </p>
+          {sitting.maxReentries !== undefined &&
+            sitting.entriesUsed !== undefined && (
+              <p className="subtle" role="status">
+                {t("Entry {0} of {1}", {
+                  "0": Math.min(sitting.entriesUsed, sitting.maxReentries + 1),
+                  "1": sitting.maxReentries + 1,
+                })}
+              </p>
+            )}
           <div
             className="run-progress"
             role="progressbar"

@@ -139,7 +139,12 @@ app.get(
       },
     });
     if (!me) return res.status(401).json({ error: "unauthenticated" });
-    res.json(me);
+    // Current session expiry so the client can warn before a mid-exam
+    // logout. updateAge (auth.ts) slides it on getSession calls while active.
+    const session = await auth.api
+      .getSession({ headers: fromNodeHeaders(req.headers) })
+      .catch(() => null);
+    res.json({ ...me, sessionExpiresAt: session?.session?.expiresAt ?? null });
   },
 );
 app.use("/api/v1/admin/users", adminUsers);

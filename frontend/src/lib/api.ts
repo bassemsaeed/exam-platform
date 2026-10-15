@@ -14,6 +14,7 @@ export interface SessionUser {
   name: string;
   email: string;
   role: Role;
+  sessionExpiresAt?: string | null;
 }
 
 export class ApiError extends Error {
