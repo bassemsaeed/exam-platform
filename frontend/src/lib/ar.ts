@@ -1,5 +1,10 @@
 export const arabic: Record<string, string> = {
   "Calculator": "آلة حاسبة",
+  "Calculator modes": "أوضاع الآلة الحاسبة",
+  "Toggle degrees / radians": "التبديل بين الدرجات والراديان",
+  "History": "السجل",
+  "Reuse result": "إعادة استخدام النتيجة",
+  "Inverse functions": "الدوال العكسية",
   "Maximum re-entries: {0}. Refreshing or reopening the exam counts as a re-entry.": "الحد الأقصى لإعادة الدخول: {0}. يُحتسب تحديث الصفحة أو إعادة فتح الامتحان كإعادة دخول.",
   "Notes": "ملاحظات",
   "Exam tools": "أدوات الامتحان",

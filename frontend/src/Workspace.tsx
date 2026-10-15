@@ -437,7 +437,7 @@ function Overview({ user }: { user: SessionUser }) {
           </span>
         </div>
       )}
-      <AccountGuide user={user} />
+      {!student && <AccountGuide user={user} />}
       <div className="stat-grid">
         {[
           [

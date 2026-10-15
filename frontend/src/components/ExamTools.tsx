@@ -1,7 +1,14 @@
-﻿import { useEffect, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useRef, useState } from "react";
 import { request, type Sitting } from "../lib/platform";
 import { useT } from "../lib/i18n";
 import { Feedback } from "./ui";
+import {
+  evaluate,
+  formatValue,
+  clean,
+  type NumBase,
+  type AngleMode,
+} from "../lib/calculator";
 
 export function ExamTools({ userId, examId, sitting, disabled }: {
   userId: string; examId: string; sitting: Sitting; disabled: boolean;
@@ -85,48 +92,173 @@ export function ExamTools({ userId, examId, sitting, disabled }: {
 
 function Calculator() {
   const t = useT();
-  const [display, setDisplay] = useState("0");
-  const [stored, setStored] = useState<number | null>(null);
-  const [operator, setOperator] = useState<string | null>(null);
-  const [fresh, setFresh] = useState(true);
-  function press(key: string) {
-    if (key === "C") { setDisplay("0"); setStored(null); setOperator(null); setFresh(true); return; }
-    if (/^[0-9.]$/.test(key)) {
-      setDisplay((old) => {
-        if (fresh || old === "Error") return key === "." ? "0." : key;
-        if (key === "." && old.includes(".")) return old;
-        return old.length < 16 ? (old === "0" && key !== "." ? key : old + key) : old;
-      });
-      setFresh(false); return;
+  const [base, setBase] = useState<NumBase>(10);
+  const [angle, setAngle] = useState<AngleMode>("deg");
+  const [inv, setInv] = useState(false);
+  const [expr, setExpr] = useState("");
+  const [ans, setAns] = useState(0);
+  const [hist, setHist] = useState<{ expr: string; out: string }[]>([]);
+  const [done, setDone] = useState<null | { expr: string; out: string }>(null);
+  // Live preview while typing; errors stay silent until = is pressed.
+  const live = useMemo(() => {
+    if (!expr.trim()) return null;
+    const r = evaluate(expr, base, angle, ans);
+    return typeof r === "number" ? formatValue(r, base) : null;
+  }, [expr, base, angle, ans]);
+  const shownExpr = done ? done.expr : expr || "0";
+  const shownOut = done ? done.out : (live ?? "");
+  function smartInsert(text: string, continues: boolean) {
+    if (done && !continues) {
+      setDone(null);
+      setExpr(text);
+      return;
     }
-    if (key === "±") { setDisplay(String(-Number(display))); return; }
-    if (key === "√") {
-      const r = Math.sqrt(Number(display));
-      if (!Number.isFinite(r)) { setDisplay("Error"); setStored(null); setOperator(null); setFresh(true); return; }
-      setDisplay(String(Number(r.toPrecision(12)))); setFresh(true); return;
+    if (done && continues) {
+      // Continue with the previous answer when it parses in this base.
+      const continued = base === 10 ? `${trimNum(ans)}${text}` : text;
+      setDone(null);
+      setExpr(continued);
+      return;
     }
-    if (key === "%") {
-      setDisplay(String(Number((Number(display) / 100).toPrecision(12)))); setFresh(true); return;
-    }
-    const value = Number(display);
-    let result = value;
-    if (stored !== null && operator && !fresh) {
-      result =
-        operator === "+" ? stored + value :
-        operator === "-" ? stored - value :
-        operator === "×" ? stored * value :
-        operator === "÷" ? stored / value :
-        operator === "^" ? Math.pow(stored, value) : value;
-    }
-    if (!Number.isFinite(result)) { setDisplay("Error"); setStored(null); setOperator(null); setFresh(true); return; }
-    setDisplay(String(Number(result.toPrecision(12))));
-    setStored(key === "=" ? null : result);
-    setOperator(key === "=" ? null : key); setFresh(true);
+    setDone(null);
+    setExpr((old) => old + text);
   }
-  return <div className="exam-calculator" aria-label={t("Calculator")}>
-    <output aria-live="polite" dir="ltr">{display}</output>
-    <div className="calculator-keys" dir="ltr">
-      {["7", "8", "9", "÷", "4", "5", "6", "×", "1", "2", "3", "-", "0", ".", "=", "+", "C", "±", "√", "^", "%"].map((key) => <button key={key} type="button" onClick={() => press(key)}>{key}</button>)}
+  function press(key: string) {
+    if (key === "C") { setExpr(""); setDone(null); return; }
+    if (key === "⌫") {
+      if (done) { setDone(null); setExpr(""); return; }
+      setExpr((old) => old.slice(0, -1));
+      return;
+    }
+    if (key === "=") {
+      if (!expr.trim()) return;
+      const r = evaluate(expr, base, angle, ans);
+      if (typeof r === "number") {
+        const out = formatValue(r, base);
+        setAns(clean(r));
+        setHist((h) => [{ expr, out }, ...h].slice(0, 5));
+        setDone({ expr, out });
+      } else {
+        setDone({ expr, out: `Error: ${r.error}` });
+      }
+      return;
+    }
+    if (key === "±") {
+      if (done) return;
+      // Negate the trailing number, else append a minus.
+      setExpr((old) => {
+        const m = old.match(/(\d+\.?\d*(E[+-]?\d+)?)\s*$/i);
+        if (!m) return old + "-";
+        const num = m[1];
+        const head = old.slice(0, old.length - num.length);
+        const neg = head.match(/-\s*$/);
+        if (neg) return head.slice(0, -1) + num;
+        return `${head}-${num}`;
+      });
+      return;
+    }
+    if (key === "x²") return smartInsert(done ? "ans^2" : "^2", true);
+    if (key === "xʸ") return smartInsert("^", true);
+    if (key === "1/x") return smartInsert("recip(", false);
+    if (key === "√") return smartInsert("sqrt(", false);
+    if (key === "EXP") return smartInsert("E", true);
+    if (key === "Ans") return smartInsert("ans", false);
+    if (key === "π") return smartInsert("pi", false);
+    if (["sin", "cos", "tan", "asin", "acos", "atan", "log", "ln"].includes(key))
+      return smartInsert(`${key}(`, false);
+    smartInsert(key, /^[+\-*/^!%)]$/.test(key));
+  }
+  const digitOk = (d: string): boolean =>
+    base === 10 || (base === 16 ? /^[0-9A-Fa-f]$/.test(d) : base === 8 ? /^[0-7]$/.test(d) : /^[01]$/.test(d));
+  // Decimal value of whatever is showing, for the base-conversion readout.
+  const decReadout = (() => {
+    if (base === 10 || done?.out?.startsWith("Error")) return null;
+    const src = done ? done.expr : expr;
+    if (!src.trim()) return null;
+    const r = evaluate(src, base, angle, ans);
+    return typeof r === "number" ? `= ${formatValue(r, 10)}` : null;
+  })();
+  function onKey(e: { key: string; stopPropagation: () => void }) {
+    const k = e.key;
+    const map: Record<string, string> = { "*": "×", "/": "÷", Enter: "=", Escape: "C", Backspace: "⌫" };
+    if (k === "Enter" || k === "Escape" || k === "Backspace") {
+      e.stopPropagation();
+      press(map[k]);
+      return;
+    }
+    let key: string | null = null;
+    if (/^[0-9a-fA-F]$/.test(k) && digitOk(k.toUpperCase()) && (base === 10 || base === 16 || /^[01]$/.test(k) || /^[0-7]$/.test(k))) {
+      if (base === 10 || digitOk(k.toUpperCase())) key = k.toUpperCase();
+    } else if (".+-^%()!".includes(k)) {
+      key = k === "." && base !== 10 ? null : k;
+    } else if (k === "*" || k === "/") {
+      key = map[k];
+    }
+    if (key) {
+      e.stopPropagation();
+      press(key);
+    }
+  }
+  const dec = base === 10;
+  const hexDigits = ["A", "B", "C", "D", "E", "F"];
+  return <div className="exam-calculator" aria-label={t("Calculator")} onKeyDown={onKey}>
+    <div className="calc-modes" role="group" aria-label={t("Calculator modes")}>
+      {([["DEC", 10], ["HEX", 16], ["OCT", 8], ["BIN", 2]] as [string, NumBase][]).map(([label, b]) => (
+        <button key={label} type="button" className={base === b ? "on" : ""} aria-pressed={base === b}
+          onClick={() => { setBase(b); setExpr(""); setDone(null); }}>
+          {label}
+        </button>
+      ))}
+      {dec && (
+        <button type="button" className="calc-angle" aria-pressed={angle === "rad"}
+          title={t("Toggle degrees / radians")}
+          onClick={() => setAngle((a) => (a === "deg" ? "rad" : "deg"))}>
+          {angle === "deg" ? t("DEG") : t("RAD")}
+        </button>
+      )}
     </div>
+    <div className="calc-display" aria-live="polite" dir="ltr" tabIndex={0}>
+      <div className="calc-expr">{shownExpr}</div>
+      <output className="calc-out">{shownOut}{decReadout ? <span className="calc-dec"> ({t("DEC")} {decReadout.slice(2)})</span> : null}</output>
+    </div>
+    {dec ? (
+      <div className="calculator-keys calc-sci" dir="ltr">
+        {(inv ? ["asin", "acos", "atan", "√"] : ["sin", "cos", "tan", "√"]).map((key) => <button key={key} type="button" className="calc-fn" onClick={() => press(key)}>{key}</button>)}
+        {["log", "ln", "x²", "xʸ"].map((key) => <button key={key} type="button" className="calc-fn" onClick={() => press(key)}>{key}</button>)}
+        {["π", "e", "1/x", "!"].map((key) => <button key={key} type="button" className="calc-fn" onClick={() => press(key)}>{key}</button>)}
+        <button type="button" className="calc-fn" onClick={() => setInv((v) => !v)} aria-pressed={inv} title={t("Inverse functions")}>INV</button>
+        {["(", ")", "C", "⌫"].map((key) => <button key={key} type="button" className="calc-fn" onClick={() => press(key)}>{key}</button>)}
+        {["7", "8", "9", "÷", "4", "5", "6", "×", "1", "2", "3", "−", "0", ".", "EXP", "+", "%", "±", "Ans", "="].map((key) => <button key={key} type="button" className={key === "=" ? "calc-eq" : ""} onClick={() => press(key)}>{key}</button>)}
+      </div>
+    ) : (
+      <div className="calculator-keys" dir="ltr">
+        {base === 16 && hexDigits.map((d) => <button key={d} type="button" onClick={() => press(d)}>{d}</button>)}
+        {["7", "8", "9", "÷", "4", "5", "6", "×", "1", "2", "3", "−", "0", "C", "⌫", "+", "(", ")", "Ans", "="].map((key) => (
+          <button
+            key={key}
+            type="button"
+            className={key === "=" ? "calc-eq" : ""}
+            disabled={!(key === "=" || key === "C" || key === "⌫" || key === "Ans" || "+−×÷()".includes(key) || digitOk(key))}
+            onClick={() => press(key === "Ans" ? "Ans" : key)}
+          >
+            {key}
+          </button>
+        ))}
+      </div>
+    )}
+    {hist.length > 0 && <ol className="calc-history" aria-label={t("History")}>
+      {hist.map((h, i) => (
+        <li key={`${h.expr}-${i}`}>
+          <button type="button" title={t("Reuse result")} onClick={() => { setDone(null); setExpr(h.out); }}>
+            <span dir="ltr">{h.expr} =</span> <b dir="ltr">{h.out}</b>
+          </button>
+        </li>
+      ))}
+    </ol>}
   </div>;
+}
+
+/** Shortest decimal text that re-parses to the same value. */
+function trimNum(n: number): string {
+  return formatValue(n, 10);
 }

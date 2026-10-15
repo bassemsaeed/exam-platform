@@ -44,6 +44,7 @@ import {
   SearchBox,
 } from "../components/ui";
 import { EditExamWindow, QuestionSheet } from "./Builder";
+import { AccountGuide } from "./Enhancements";
 import { Combo, MultiPicker } from "../components/builder";
 const opts = (values: string[]) =>
   values.map((value) => ({ value, label: label(value) }));
@@ -1453,6 +1454,7 @@ export function Profile({ user }: { user: SessionUser }) {
         title={t("My account")}
         description={t("Your university profile and account security.")}
       />
+      {user.role === "student" && <AccountGuide user={user} />}
       <div className="profile-grid">
         <section className="panel">
           <h2>{t("Profile details")}</h2>
