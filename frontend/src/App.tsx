@@ -5,7 +5,7 @@ import {
 } from "./lib/demo-auth";
 import { AccountHelp } from "./pages/Enhancements";
 import { useT } from "./lib/i18n";
-import { BrowserRouter, HashRouter } from "react-router-dom";
+import { BrowserRouter, HashRouter, Navigate, useLocation, useNavigate } from "react-router-dom";
 import Workspace from "./Workspace";
 import { Preferences } from "./components/Preferences";
 import {
@@ -161,6 +161,10 @@ function Modal({
 }
 function Login() {
   const t = useT();
+  const navigate = useNavigate();
+  const location = useLocation();
+  // Deep link to restore after sign-in (unauthenticated visits land on /login).
+  const from = (location.state as { from?: string } | null)?.from;
   const [username, setUsername] = useState(() => {
     try {
       return localStorage.getItem(savedUsernameKey) ?? "";
@@ -220,6 +224,9 @@ function Login() {
       return user;
     },
     onSuccess: (user) => {
+      // Navigate FIRST, before the cache update re-renders Workspace:
+      // otherwise the catch-all route bounces /login to / and wins the race.
+      navigate(from && from.startsWith("/") ? from : "/", { replace: true });
       // Never persist a password or cache an authenticated identity on disk.
       try {
         if (remember) localStorage.setItem(savedUsernameKey, username.trim());
@@ -247,6 +254,8 @@ function Login() {
       setUser(null);
       login.reset();
       setLogoutError("");
+      // Never linger on a protected URL after sign-out.
+      navigate("/login", { replace: true });
     },
     onError: () =>
       setLogoutError("We couldn’t sign you out. Please try again."),
@@ -295,6 +304,10 @@ function Login() {
         </div>
       </main>
     );
+  // Any unauthenticated visit (deep link, expired session, post-logout)
+  // normalizes to /login instead of rendering the form at a stale URL.
+  if (!session.data && !session.isPending && location.pathname !== "/login")
+    return <Navigate to="/login" replace state={{ from: location.pathname }} />;
   return (
     <main className="login-layout">
       <header className="site-header">

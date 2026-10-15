@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { Bell, CheckCircle2, LifeBuoy, ShieldCheck } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import type { SessionUser } from "../lib/api";
@@ -177,7 +177,9 @@ export function AccountHelp({
 }
 export function AccountGuide({ user }: { user: SessionUser }) {
   const t = useT();
+  const location = useLocation();
   const [show, setShow] = useState(false);
+  const onProfile = location.pathname === "/profile";
   return (
     <>
       <section className="account-guide">
@@ -193,9 +195,11 @@ export function AccountGuide({ user }: { user: SessionUser }) {
         <button className="secondary" onClick={() => setShow(true)}>
           {t("Account help")}
         </button>
-        <Link className="text-button" to="/profile">
-          {t("Review my profile")}
-        </Link>
+        {!onProfile && (
+          <Link className="text-button" to="/profile">
+            {t("Review my profile")}
+          </Link>
+        )}
       </section>
       {show && <AccountHelp onClose={() => setShow(false)} />}
       <span className="sr-only">

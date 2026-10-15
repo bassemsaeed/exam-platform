@@ -1,5 +1,4 @@
 import {
-  AccountGuide,
   SupportQueue,
   Notifications,
   NotificationLink,
@@ -437,7 +436,6 @@ function Overview({ user }: { user: SessionUser }) {
           </span>
         </div>
       )}
-      {!student && <AccountGuide user={user} />}
       <div className="stat-grid">
         {[
           [

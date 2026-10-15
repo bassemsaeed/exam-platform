@@ -566,6 +566,9 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                   </button>
                 </div>
                 <Feedback error={live.error} />
+                {live.isPending ? (
+                  <Loading />
+                ) : (
                 <div className="table-wrap">
                   <table>
                     <thead>
@@ -595,7 +598,8 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                     </tbody>
                   </table>
                 </div>
-                {!live.data?.rows.length && (
+                )}
+                {!live.data?.rows.length && !live.isPending && (
                   <Empty
                     title={t("No active sittings")}
                     text={t("Students appear here when they start.")}
@@ -625,7 +629,9 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                   </button>
                 </div>
                 <Feedback error={comp.error} />
-                {comp.data?.length ? (
+                {comp.isPending ? (
+                  <Loading />
+                ) : comp.data?.length ? (
                   comp.data.map((r) => (
                     <div className="question-preview" key={r.id}>
                       {String(r.reason)} · {t(label(r.adjustmentType))}
@@ -1612,7 +1618,7 @@ export function Profile({ user }: { user: SessionUser }) {
         title={t("My account")}
         description={t("Your university profile and account security.")}
       />
-      {user.role === "student" && <AccountGuide user={user} />}
+      {<AccountGuide user={user} />}
       <div className="profile-grid">
         <section className="panel">
           <h2>{t("Profile details")}</h2>
@@ -1638,7 +1644,9 @@ export function Profile({ user }: { user: SessionUser }) {
         </section>
         <section className="panel">
           <h2>{t("Change password")}</h2>
-          {profile.data?.canChangePassword === false ? (
+          {profile.isPending ? (
+            <Loading />
+          ) : profile.data?.canChangePassword === false ? (
             <p className="subtle">
               {t(
                 " Your password is managed by your administrator. Contact your faculty to request a reset. ",
