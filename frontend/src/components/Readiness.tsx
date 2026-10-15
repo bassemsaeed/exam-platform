@@ -18,6 +18,7 @@ import { Feedback } from "./ui";
 export interface ReadinessData {
   subject: { name: string; code: string };
   durationMinutes: number;
+  maxReentries?: number;
   startTime: string;
   endTime: string;
   requiresCode: boolean;

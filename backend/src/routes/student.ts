@@ -20,7 +20,7 @@ import { requireSeb } from "../middleware/seb.js";
 export const student: RouterType = Router();
 student.use(requireAuth);
 
-// GET /api/v1/student/me — identity + current-term context for the frontend.
+// GET /api/v1/student/me â€” identity + current-term context for the frontend.
 student.get("/me", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const me = await prisma.user.findUnique({
@@ -31,7 +31,7 @@ student.get("/me", async (req, res) => {
   res.json({ ...me, term });
 });
 
-// GET /api/v1/student/results — my own graded sittings (no SEB: dashboard
+// GET /api/v1/student/results â€” my own graded sittings (no SEB: dashboard
 // data, no live content, never any correct answers).
 student.get("/results", requireRole("student"), async (req, res) => {
   const a = req as unknown as AuthedRequest;
@@ -43,6 +43,8 @@ student.get("/results", requireRole("student"), async (req, res) => {
       status: true,
       totalGrade: true,
       submittedAt: true,
+      notesForDoctor: true,
+      questions: { select: { question: { select: { grade: true } } } },
       exam: {
         select: {
           id: true,
@@ -55,10 +57,14 @@ student.get("/results", requireRole("student"), async (req, res) => {
       },
     },
   });
-  res.json(rows);
+  res.json(rows.map((r) => ({
+    ...r,
+    questions: undefined,
+    totalMarks: r.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0),
+  })));
 });
 
-// POST /api/v1/student/change-password — students blocked by canChangePassword=false.
+// POST /api/v1/student/change-password â€” students blocked by canChangePassword=false.
 student.post("/change-password", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const me = await prisma.user.findUnique({ where: { id: a.userId }, select: { role: true, canChangePassword: true } });
@@ -84,7 +90,7 @@ student.post("/change-password", async (req, res) => {
   res.json(r);
 });
 
-// GET /api/v1/student/exams — enrolled + in-window + section match (current term).
+// GET /api/v1/student/exams â€” enrolled + in-window + section match (current term).
 student.get("/exams", requireSeb, async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const term = await prisma.term.findFirst({ where: { isCurrent: true }, select: { id: true } });
@@ -109,7 +115,7 @@ student.get("/exams", requireSeb, async (req, res) => {
         { targetSections: { some: { sectionId: { in: sectionIds } } } },
         { targetStudents: { some: { studentId: a.userId } } },
       ],
-      // Submitted stays locked and disappears (resume lives in start → existing instance).
+      // Submitted stays locked and disappears (resume lives in start â†’ existing instance).
       instances: { none: { studentId: a.userId, status: { in: ["submitted", "auto_submitted"] } } },
     },
     select: { id: true, subjectId: true, type: true, startTime: true, endTime: true, durationMinutes: true, accessCodeHash: true, subject: { select: { id: true, name: true, code: true } } },
@@ -119,7 +125,7 @@ student.get("/exams", requireSeb, async (req, res) => {
   res.json(exams.map(({ accessCodeHash, ...rest }) => ({ ...rest, requiresCode: accessCodeHash !== null })));
 });
 
-// GET /student/exams/upcoming — approved, eligible, but the window hasn't
+// GET /student/exams/upcoming â€” approved, eligible, but the window hasn't
 // opened yet. Same gates as the live list (minus the open-window filter) so
 // the bell's "Upcoming exam" always has a matching card somewhere.
 student.get("/exams/upcoming", requireSeb, async (req, res) => {
@@ -157,7 +163,7 @@ student.get("/exams/upcoming", requireSeb, async (req, res) => {
 // Grading with live compensations: correctness first, then the exam's
 // compensation rows overlay per question (full_credit / set-capped /
 // delta-capped). Mid-exam voids therefore survive submit instead of being
-// recomputed away — and a delta never freezes an unanswered NULL row.
+// recomputed away â€” and a delta never freezes an unanswered NULL row.
 // Targeted rows (non-empty studentIds) apply only to their students: late
 // submitters get the same scope the live SQL applied to early ones.
 interface CompRow {
@@ -196,7 +202,7 @@ function gradeWithCompensation(
 // Helper: auto-submit exam on wall-clock expiry. Accepts null answers and scores them 0.
 // Runs once per instance (callers check status first); emits the submitted event
 // + audit so expiry is as observable as a manual submit.
-// Exported for the background sweeper (no import cycle: worker → route only).
+// Exported for the background sweeper (no import cycle: worker â†’ route only).
 export async function autoSubmitExam(studentExamId: string) {
   const computed = await prisma.$transaction(async (tx) => {
     const se = await tx.studentExam.findUnique({
@@ -329,6 +335,7 @@ student.get(
     res.json({
       subject: exam.subject,
       durationMinutes: exam.durationMinutes,
+      maxReentries: exam.maxReentries,
       startTime: exam.startTime,
       endTime: exam.endTime,
       requiresCode: !!exam.accessCodeHash,
@@ -359,6 +366,8 @@ student.post(
   async (req, res) => {
     const a = req as unknown as AuthedRequest;
     const examId = String(req.params.id);
+    const { entryToken } = z.object({ entryToken: z.string().uuid().optional() }).parse(req.body ?? {});
+    const token = entryToken ?? crypto.randomUUID();
 
     const exam = await prisma.exam.findUnique({
       where: { id: examId },
@@ -372,7 +381,7 @@ student.post(
     // Resume FIRST: a disconnected student reconnecting after exam.endTime must
     // still reach their instance (auto-submit + grade) instead of being bounced
     // by the window gate with the row stranded in_progress. Approval / window /
-    // eligibility below gate NEW starts only — disconnect != submit.
+    // eligibility below gate NEW starts only â€” disconnect != submit.
     // DB clock: expiry is decided against the same NOW() the sweeper uses, so
     // app/DB skew cannot strand or prematurely kill instances.
     const now = (await dbNow()).getTime();
@@ -413,9 +422,22 @@ student.post(
         return res.status(409).json({ error: "exam duration expired, auto-submitted" });
       }
 
+      const admitted = await prisma.$queryRaw<{ id: string }[]>`
+        UPDATE student_exam SET entry_tokens = CASE WHEN ${token} = ANY(entry_tokens)
+          THEN entry_tokens ELSE array_append(entry_tokens, ${token}) END
+        WHERE id = ${existing.id}::uuid AND status = 'in_progress'
+          AND (${token} = ANY(entry_tokens) OR cardinality(entry_tokens) < ${exam.maxReentries + 1})
+        RETURNING id`;
+      if (!admitted.length) return res.status(403).json({ error: "Exam re-entry limit reached. Contact your doctor." });
       // Resume: return existing questions and wall-clock remaining seconds
       const remainingSeconds = Math.max(0, Math.floor((maxEndTime - now) / 1000));
       return res.json({
+        notesEnabled: exam.notesEnabled,
+        notesForDoctorEnabled: exam.notesForDoctorEnabled,
+        examToolsEnabled: exam.examToolsEnabled,
+        notesForDoctor: existing.notesForDoctor,
+        notes: existing.notes,
+        maxReentries: exam.maxReentries,
         id: existing.id,
         examId: existing.examId,
         status: existing.status,
@@ -474,6 +496,7 @@ student.post(
             examId: exam.id,
             studentId: a.userId,
             status: "in_progress",
+            entryTokens: [token],
             startedAt: started,
             lastHeartbeatAt: started,
             questions: {
@@ -515,6 +538,12 @@ student.post(
       const remainingSeconds = Math.max(0, Math.floor((maxEndTime - Date.now()) / 1000));
 
       return res.status(201).json({
+        notesEnabled: exam.notesEnabled,
+        notesForDoctorEnabled: exam.notesForDoctorEnabled,
+        examToolsEnabled: exam.examToolsEnabled,
+        notesForDoctor: created.notesForDoctor,
+        notes: created.notes,
+        maxReentries: exam.maxReentries,
         id: created.id,
         examId: created.examId,
         status: created.status,
@@ -558,8 +587,20 @@ student.post(
             },
           },
         });
+        const admitted = await prisma.$queryRaw<{ id: string }[]>`
+          UPDATE student_exam SET entry_tokens = CASE WHEN ${token} = ANY(entry_tokens)
+            THEN entry_tokens ELSE array_append(entry_tokens, ${token}) END
+          WHERE id = ${raceInstance.id}::uuid AND status = 'in_progress'
+            AND (${token} = ANY(entry_tokens) OR cardinality(entry_tokens) < ${exam.maxReentries + 1}) RETURNING id`;
+        if (!admitted.length) return res.status(403).json({ error: "Exam re-entry limit reached. Contact your doctor." });
         const maxEndTime = Math.min(exam.endTime.getTime(), raceInstance.startedAt!.getTime() + exam.durationMinutes * 60_000);
         return res.json({
+          notesEnabled: exam.notesEnabled,
+          notesForDoctorEnabled: exam.notesForDoctorEnabled,
+          examToolsEnabled: exam.examToolsEnabled,
+          notesForDoctor: raceInstance.notesForDoctor,
+          notes: raceInstance.notes,
+          maxReentries: exam.maxReentries,
           id: raceInstance.id,
           examId: raceInstance.examId,
           status: raceInstance.status,
@@ -727,7 +768,7 @@ student.patch("/exams/:id/flag", requireRole("student"), requirePermission("take
 });
 
 // POST /api/v1/student/exams/:id/heartbeat
-// Updates last_heartbeat_at only — NEVER extends or pauses the wall-clock timer!
+// Updates last_heartbeat_at only â€” NEVER extends or pauses the wall-clock timer!
 student.post("/exams/:id/heartbeat", requireRole("student"), requirePermission("take_exam"), requireSeb, rateLimit(config.studentRateLimit.heartbeatMax, config.studentRateLimit.heartbeatWindowMs, "student:heartbeat"), async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const examId = String(req.params.id);
@@ -778,6 +819,7 @@ student.post(
         ok: true,
         status: se.status,
         totalGrade: se.totalGrade,
+        totalMarks: se.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0),
         submittedAt: se.submittedAt,
       });
     }
@@ -845,7 +887,7 @@ student.post(
     if (finalized.outcome === "race") {
       // Lost the race (or already submitted): return the canonical row.
       const current = await prisma.studentExam.findUniqueOrThrow({ where: { id: se.id } });
-      return res.json({ ok: true, status: current.status, totalGrade: current.totalGrade, submittedAt: current.submittedAt });
+      return res.json({ ok: true, status: current.status, totalGrade: current.totalGrade, totalMarks: se.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0), submittedAt: current.submittedAt });
     }
     const row = await prisma.studentExam.findUniqueOrThrow({ where: { id: se.id } });
 
@@ -860,12 +902,13 @@ student.post(
       ok: true,
       status: row.status,
       totalGrade: row.totalGrade,
+      totalMarks: se.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0),
       submittedAt: row.submittedAt,
     });
   },
 );
 
-// GET /api/v1/student/exams/:id/events — Server-Sent Events stream
+// GET /api/v1/student/exams/:id/events â€” Server-Sent Events stream
 // Replays missed events from Last-Event-ID and fans out live broadcasts.
 // NOTE: browsers' EventSource cannot send the SEB header, so the frontend must
 // use fetch + ReadableStream with explicit headers (which also lets it send
@@ -927,4 +970,30 @@ student.get("/exams/:id/events", requireRole("student"), requirePermission("take
     clearInterval(pingInterval);
     unsubscribeExamEvents(examId, onEvent);
   });
+});
+
+student.patch("/exams/:id/notes", requireRole("student"), requirePermission("take_exam"), requireSeb, async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  const { notes } = z.object({ notes: z.string().max(20000) }).parse(req.body);
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    UPDATE student_exam se SET notes = ${notes} FROM exam e
+    WHERE se.exam_id = e.id AND e.id = ${String(req.params.id)}::uuid
+      AND se.student_id = ${a.userId} AND se.status = 'in_progress'
+      AND e.notes_enabled = true AND e.status = 'approved' AND NOW() < e.end_time
+      AND NOW() < se.started_at + (e.duration_minutes || ' minutes')::interval RETURNING se.id`;
+  if (!rows.length) return res.status(403).json({ error: "Notes are unavailable for this attempt." });
+  res.json({ ok: true });
+});
+
+student.patch("/exams/:id/notes-for-doctor", requireRole("student"), requirePermission("take_exam"), requireSeb, async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  const { notes } = z.object({ notes: z.string().max(20000) }).parse(req.body);
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    UPDATE student_exam se SET notes_for_doctor = ${notes} FROM exam e
+    WHERE se.exam_id = e.id AND e.id = ${String(req.params.id)}::uuid
+      AND se.student_id = ${a.userId} AND se.status = 'in_progress'
+      AND e.notes_for_doctor_enabled = true AND e.status = 'approved' AND NOW() < e.end_time
+      AND NOW() < se.started_at + (e.duration_minutes || ' minutes')::interval RETURNING se.id`;
+  if (!rows.length) return res.status(403).json({ error: "Doctor notes are unavailable for this attempt." });
+  res.json({ ok: true });
 });

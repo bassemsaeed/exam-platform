@@ -64,3 +64,17 @@ Accessibility updates include larger supporting text, improved contrast, visible
 The single preview sign-in account (`alex.morgan`) uses `Preview123!` until changed. Profile changes verify the current password, then persist a salted PBKDF2 verifier on this device; login reads that same verifier. Passwords are never stored in plaintext. The preview role selector still shares this one demo sign-in account. Resetting Alex’s password in the demo admin UI updates the same verifier. Reset demo or the explicit reset button on the login screen restores the original credentials. The credential-fill button stops filling the original password after a change.
 
 The real application continues to use Better Auth and PostgreSQL; demo credentials never participate in real API authentication. `pnpm test:password` checks wrong-current-password rejection, logout/reload persistence, old/new login behavior, administrator reset, and restoring demo defaults. It also verifies and restores the seeded `doc4` password against the real backend.
+
+## Exam experience
+
+The student exam route hides portal navigation, notifications, account controls, logout, and the footer. Only the light/dark theme toggle remains in the header. Once started, the attempt pins in-app navigation to its exam route until submission or a terminal start response. Browser refresh still requires resuming the attempt; server time continues while disconnected.
+
+Each page contains up to four questions. The final page has a Submit assessment button, and every manual submission requires confirmation. All questions must be answered and answer saves completed before manual submission; expiry still auto-submits partial attempts.
+
+A basic calculator is available inside the runner. Creators can enable private, ungraded scratch notes and set the maximum number of re-entries before the exam opens. Notes default to disabled; re-entries default to three, excluding the initial entry. Each refreshed or newly loaded exam page uses a fresh entry token; repeated start requests from the same mounted page reuse their token. Heartbeat and announcement reconnections do not consume entries. PostgreSQL enforces the cap atomically, including concurrent requests. Notes autosave to the server and keep a tab-local recovery copy while editing.
+
+The question bank requires selecting a subject in the top filter before fetching questions. Images can be attached while creating or editing questions. The existing raster-image upload endpoint validates file contents. If image upload fails after question creation, retry reuses the created question ID.
+
+Apply backend migrations before running this version: `pnpm --filter backend exec prisma migrate deploy`.
+
+Verification: `pnpm test:exam-experience` runs browser checks with mocked API responses against `FRONTEND_URL` (default `http://127.0.0.1:5189`). Set `CHROMIUM_EXECUTABLE_PATH` if necessary. After building the backend and starting a local seeded API, `pnpm --filter backend test:exam-experience` checks re-entry limits, concurrent admission, and note enforcement against PostgreSQL using temporary records that it removes afterward.

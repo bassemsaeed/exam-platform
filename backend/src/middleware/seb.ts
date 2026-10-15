@@ -38,28 +38,7 @@ async function activeRawKeys(): Promise<string[]> {
 }
 
 export async function requireSeb(req: Request, res: Response, next: NextFunction) {
-  const sent = req.header(config.seb.header);
-  if (!sent) return res.status(403).json({ error: "Please open this exam from Safe Exam Browser." });
-
-  const raws = await activeRawKeys();
-  if (raws.length === 0) return res.status(500).json({ error: "SEB keys not configured" });
-
-  // req.protocol respects trust-proxy setting in index.ts — must be https
-  // behind TLS-terminating proxies or every hash mismatches.
-  // Host is client-supplied: validate its shape and fall back to the
-  // configured public URL when missing/invalid instead of hashing garbage.
-  const rawHost = req.get("host");
-  const host = rawHost && /^[A-Za-z0-9.:-]+$/.test(rawHost) ? rawHost : null;
-  const base = host ? `${req.protocol}://${host}` : config.authUrl.replace(/\/+$/, "");
-  const url = `${base}${req.originalUrl}`;
-  if (!/^[0-9a-fA-F]+$/.test(sent) || sent.length % 2 !== 0) {
-    return res.status(403).json({ error: "Please open this exam from Safe Exam Browser." });
-  }
-  const got = Buffer.from(sent, "hex");
-  const ok = raws.some((raw) => {
-    const expect = createHash("sha256").update(url + raw).digest();
-    return got.length === expect.length && timingSafeEqual(got, expect);
-  });
-  if (!ok) return res.status(403).json({ error: "Please open this exam from Safe Exam Browser." });
-  next();
+  // Safe Exam Browser is no longer required: exams can be opened in a normal
+  // browser. Keep this middleware as a pass-through for existing route wiring.
+  return next();
 }

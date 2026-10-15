@@ -3396,3 +3396,17 @@ input[type="datetime-local"],
   background: #263d4e;
   color: #bfd3e2;
 }
+
+/* The exam route exposes only the assessment and its display theme. */
+.workspace.exam-only .workspace-main { margin-inline: 0; margin-left: 0; margin-right: 0; }
+.exam-only .workspace-header { justify-content: flex-end; }
+.exam-only .header-tools .icon-button { display: inline-flex; align-items: center; justify-content: center; }
+.exam-only .workspace-content { width: 100%; max-width: 1500px; margin-inline: auto; }
+.exam-question + .exam-question { border-top: 1px solid var(--border, #d7dce4); margin-top: 28px; padding-top: 28px; }
+.exam-tools { border-top: 1px solid var(--border, #d7dce4); margin-top: 20px; padding-top: 16px; }
+.exam-tools .action-row { flex-wrap: wrap; }
+.exam-tools textarea { width: 100%; resize: vertical; }
+.exam-calculator { margin-top: 16px; }
+.exam-calculator output { display: block; padding: 12px; text-align: right; font-size: 1.5rem; overflow-wrap: anywhere; }
+.calculator-keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.subject-filter { margin-bottom: 20px; padding: 20px; }

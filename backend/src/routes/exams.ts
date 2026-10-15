@@ -159,6 +159,10 @@ exams.post("/", async (req, res) => {
       startTime: z.string().datetime(),
       endTime: z.string().datetime(),
       durationMinutes: z.number().int().positive(),
+      notesEnabled: z.boolean().default(false),
+      notesForDoctorEnabled: z.boolean().default(false),
+      examToolsEnabled: z.boolean().default(true),
+      maxReentries: z.number().int().min(0).max(20).default(3),
       difficultyMix: mixInput.optional(),
       // Manual blueprint: hand-picked question IDs in author order (sampling
       // bypassed). Either this or a non-empty difficultyMix is required.
@@ -261,6 +265,10 @@ exams.post("/", async (req, res) => {
         startTime: start,
         endTime: end,
         durationMinutes: body.durationMinutes,
+        notesEnabled: body.notesEnabled,
+        notesForDoctorEnabled: body.notesForDoctorEnabled,
+        examToolsEnabled: body.examToolsEnabled,
+        maxReentries: body.maxReentries,
         difficultyMix: mix,
         manualQuestionIds: manual.length ? manual : Prisma.DbNull,
         questionSource: a.role === "ta" ? source : "own",
@@ -365,7 +373,7 @@ exams.get("/:id/blueprint", async (req, res) => {
 exams.patch("/:id", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const body = z
-    .object({ startTime: z.string().datetime().optional(), endTime: z.string().datetime().optional(), durationMinutes: z.number().int().positive().optional(), difficultyMix: mixInput.optional() })
+    .object({ notesEnabled: z.boolean().optional(), notesForDoctorEnabled: z.boolean().optional(), examToolsEnabled: z.boolean().optional(), maxReentries: z.number().int().min(0).max(20).optional(), startTime: z.string().datetime().optional(), endTime: z.string().datetime().optional(), durationMinutes: z.number().int().positive().optional(), difficultyMix: mixInput.optional() })
     .parse(req.body);
   // NOTE: hand-picked blueprints lock at creation (sittings may reference
   // exact IDs) — PATCH covers window/duration/mix only, and mix patches on a
@@ -478,9 +486,9 @@ exams.get("/:id/results", async (req, res) => {
     const ids = memberships.map((m) => m.student.id);
     const grades = await prisma.studentExam.findMany({
       where: { examId: exam.id, studentId: { in: ids } },
-      select: { studentId: true, status: true, totalGrade: true, submittedAt: true },
+      select: { studentId: true, status: true, totalGrade: true, submittedAt: true, notesForDoctor: true, questions: { select: { question: { select: { grade: true } } } } },
     });
-    const byId = new Map(grades.map((g) => [g.studentId, g]));
+    const byId = new Map(grades.map((g) => [g.studentId, { ...g, totalMarks: g.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0), questions: undefined }]));
     groups.push({ sectionId: s.id, sectionName: s.name, taName: s.ta.name, total, rows: memberships.map((m) => ({ ...m.student, exam: byId.get(m.student.id) ?? null })) });
   }
   await audit(a.userId, "results.view", "exam", exam.id, { groups: groups.length, limit: q.limit });

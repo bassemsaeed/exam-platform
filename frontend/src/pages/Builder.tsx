@@ -135,6 +135,10 @@ export function ExamWizard({ user }: { user: SessionUser }) {
   const [step, setStep] = useState(0);
   const [subject, setSubject] = useState("");
   const [duration, setDuration] = useState(45);
+  const [notesEnabled] = useState(false);
+  const [examToolsEnabled, setExamToolsEnabled] = useState(true);
+  const [notesForDoctorEnabled, setNotesForDoctorEnabled] = useState(false);
+  const [maxReentries, setMaxReentries] = useState(3);
   const [startLocal, setStartLocal] = useState("");
   const [endLocal, setEndLocal] = useState("");
   const [scope, setScope] = useState(user.role === "ta" ? "sections" : "subject");
@@ -158,6 +162,9 @@ export function ExamWizard({ user }: { user: SessionUser }) {
     )
       return;
     if (typeof d.subject === "string") setSubject(d.subject);
+        if (typeof d.examToolsEnabled === "boolean") setExamToolsEnabled(d.examToolsEnabled);
+    if (typeof d.notesForDoctorEnabled === "boolean") setNotesForDoctorEnabled(d.notesForDoctorEnabled);
+    if (typeof d.maxReentries === "number") setMaxReentries(d.maxReentries);
     if (typeof d.duration === "number") setDuration(d.duration);
     if (typeof d.startLocal === "string") setStartLocal(d.startLocal);
     if (typeof d.endLocal === "string") setEndLocal(d.endLocal);
@@ -185,14 +192,14 @@ export function ExamWizard({ user }: { user: SessionUser }) {
       sessionStorage.setItem(
         DRAFT_KEY(user.id),
         JSON.stringify({
-          subject, duration, startLocal, endLocal, scope, sectionSel,
+          subject, duration, notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel,
           pickedStudents, source, manual, mix, picked, step,
         }),
       );
     } catch {
       // storage full/blocked: builder still works, just not resumable
     }
-  }, [user.id, subject, duration, startLocal, endLocal, scope, sectionSel, pickedStudents, source, manual, mix, picked, step ]);
+  }, [user.id, subject, duration, notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel, pickedStudents, source, manual, mix, picked, step ]);
 
   const sections = useResource<Envelope<Entity>>(
     user,
@@ -272,6 +279,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
           startTime,
           endTime,
           durationMinutes: duration,
+          notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries,
           targetScope: scope,
           ...(scope === "sections" ? { targetSections: sectionSel } : {}),
           ...(scope === "student_list"
@@ -364,6 +372,13 @@ export function ExamWizard({ user }: { user: SessionUser }) {
                 ariaLabel={t("Subject")}
               />
             </div>
+<div className="field">
+  <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
+  <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>
+  <label>{t("Maximum re-entries (excluding the first entry)")}
+    <input type="number" min={0} max={20} value={maxReentries} onChange={(e) => setMaxReentries(Number(e.target.value))} required />
+  </label>
+</div>
             <div className="field">
               <span className="field-label">{t("Duration")}</span>
               <div className="stepper">
@@ -861,6 +876,7 @@ export function QuestionSheet({
 // Modern replacement for the generic edit-window dialog: smart date popovers
 // + duration stepper instead of native datetime-local inputs.
 export function EditExamWindow({
+  notesEnabled: initialNotes = false, notesForDoctorEnabled: initialDoctorNotes = false, examToolsEnabled: initialExamTools = true, maxReentries: initialReentries = 3,
   startTime,
   endTime,
   durationMinutes,
@@ -871,6 +887,10 @@ export function EditExamWindow({
   startTime: string;
   endTime: string;
   durationMinutes: number;
+  notesEnabled?: boolean;
+  notesForDoctorEnabled?: boolean;
+  examToolsEnabled?: boolean;
+  maxReentries?: number;
   busy?: boolean;
   error?: unknown;
   onSubmit: (body: Record<string, unknown>) => void;
@@ -885,6 +905,10 @@ export function EditExamWindow({
   const [start, setStart] = useState(() => toLocal(startTime));
   const [end, setEnd] = useState(() => toLocal(endTime));
   const [dur, setDur] = useState(durationMinutes);
+  const [notesEnabled] = useState(initialNotes);
+  const [examToolsEnabled, setExamToolsEnabled] = useState(initialExamTools ?? true);
+  const [notesForDoctorEnabled, setNotesForDoctorEnabled] = useState(initialDoctorNotes);
+  const [maxReentries, setMaxReentries] = useState(initialReentries);
   const [err, setErr] = useState("");
   function save() {
     const a = new Date(start).getTime();
@@ -899,6 +923,7 @@ export function EditExamWindow({
       startTime: new Date(start).toISOString(),
       endTime: new Date(end).toISOString(),
       durationMinutes: dur,
+      notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries,
     });
   }
   return (
@@ -934,6 +959,13 @@ export function EditExamWindow({
           ))}
         </div>
       </div>
+<div className="field">
+  <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
+  <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>
+  <label>{t("Maximum re-entries (excluding the first entry)")}
+    <input type="number" min={0} max={20} value={maxReentries} onChange={(e) => setMaxReentries(Number(e.target.value))} required />
+  </label>
+</div>
       <Feedback error={err || error} />
       <div className="dialog-actions">
         <button type="button" className="primary" disabled={busy} onClick={save}>

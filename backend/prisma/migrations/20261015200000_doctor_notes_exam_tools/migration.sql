@@ -1,0 +1,3 @@
+﻿ALTER TABLE "exam" ADD COLUMN IF NOT EXISTS "notes_for_doctor_enabled" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "exam" ADD COLUMN IF NOT EXISTS "exam_tools_enabled" BOOLEAN NOT NULL DEFAULT true;
+ALTER TABLE "student_exam" ADD COLUMN IF NOT EXISTS "notes_for_doctor" TEXT NOT NULL DEFAULT '';

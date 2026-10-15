@@ -467,9 +467,19 @@ export async function demoRequest<T>(
       });
     }
     if (operation === "start") {
+      const exam = db.exams.find((e) => e.id === examId);
+      if (!exam) throw new ApiError(404, "exam not found");
+      const tokens = ((sitting as unknown as Entity)?.entryTokens ?? []) as string[];
+      const token = String(b.entryToken ?? crypto.randomUUID());
+      if (!tokens.includes(token) && tokens.length >= Number(exam.maxReentries ?? 3) + 1)
+        throw new ApiError(403, "Exam re-entry limit reached. Contact your doctor.");
       if (!sitting) {
         sitting = {
           id: "sit-" + examId,
+          notesEnabled: Boolean(exam.notesEnabled),
+          notesForDoctorEnabled: Boolean(exam.notesForDoctorEnabled),
+          examToolsEnabled: exam.examToolsEnabled !== false,
+          notesForDoctor: "",
           examId,
           status: "in_progress",
           remainingSeconds: 2700,
@@ -491,6 +501,9 @@ export async function demoRequest<T>(
         sitting = db.sittings[db.sittings.length - 1] as unknown as Sitting;
         save();
       }
+      if (!tokens.includes(token)) tokens.push(token);
+      (sitting as unknown as Entity).entryTokens = tokens;
+      save();
       if (sitting.status !== "in_progress")
         throw new ApiError(409, "Exam already submitted");
       return result({
@@ -505,6 +518,14 @@ export async function demoRequest<T>(
       });
     }
     if (!sitting) throw new ApiError(404, "Start the exam first");
+    if (operation === "notes") {
+      if (!sitting.notesEnabled || sitting.status !== "in_progress" || Number((sitting as unknown as Entity).deadline) <= Date.now()) throw new ApiError(403, "Notes are unavailable for this attempt.");
+      sitting.notes = String(b.notes ?? "").slice(0, 20000); save(); return result({ ok: true });
+    }
+    if (operation === "notes-for-doctor") {
+      if (!sitting.notesForDoctorEnabled || sitting.status !== "in_progress" || Number((sitting as unknown as Entity).deadline) <= Date.now()) throw new ApiError(403, "Doctor notes are unavailable for this attempt.");
+      sitting.notesForDoctor = String(b.notes ?? "").slice(0, 20000); save(); return result({ ok: true });
+    }
     if (operation === "heartbeat")
       return result({
         remainingSeconds: Math.max(
@@ -538,15 +559,25 @@ export async function demoRequest<T>(
             : 0),
         0,
       );
+      const totalMarks = sitting.questions.reduce(
+        (s: number, q: Question) => s + Number(q.grade ?? 0),
+        0,
+      );
       db.results.unshift({
         id: crypto.randomUUID(),
         exam: db.exams.find((e) => e.id === examId),
         status: "submitted",
         totalGrade: grade,
+        totalMarks,
         submittedAt: iso(),
       });
       save();
-      return result({ ok: true, status: "submitted", totalGrade: grade });
+      return result({
+        ok: true,
+        status: "submitted",
+        totalGrade: grade,
+        totalMarks,
+      });
     }
   }
   if (resource === "exams" && id === "subjects")

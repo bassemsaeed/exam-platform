@@ -1,7 +1,7 @@
 import { useExamReadiness, ReadinessChecklist } from "../components/Readiness";
 import { useT } from "../lib/i18n";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams, Link } from "react-router-dom";
+import { useParams, Link } from "react-router-dom";
 import { useMutation } from "@tanstack/react-query";
 import {
   Flag,
@@ -18,11 +18,13 @@ import {
   type Sitting,
 } from "../lib/platform";
 import { apiUrl, sebHeaders } from "../lib/seb";
+import { ApiError } from "../lib/api";
+import { ExamTools } from "../components/ExamTools";
 import { Feedback, Confirm, PageTitle } from "../components/ui";
-export function ExamRunner({ user }: { user: SessionUser }) {
+export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity: (path: string | null) => void }) {
   const t = useT();
   const { id } = useParams();
-  const navigate = useNavigate();
+  const [entryToken] = useState(() => crypto.randomUUID());
   const [sitting, setSitting] = useState<Sitting | null>(null);
   const [code, setCode] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
@@ -35,6 +37,7 @@ export function ExamRunner({ user }: { user: SessionUser }) {
   const [notice, setNotice] = useState("");
   const [result, setResult] = useState<{
     totalGrade: number;
+    totalMarks?: number;
     status: string;
   } | null>(null);
   const [queued, setQueued] = useState(0);
@@ -42,6 +45,9 @@ export function ExamRunner({ user }: { user: SessionUser }) {
     Record<string, string | null>
   >({});
   const readiness = useExamReadiness(user, id, !sitting && !result);
+  useEffect(() => {
+    if (readiness.query.data?.submitted) onActivity(null);
+  }, [readiness.query.data?.submitted]);
   const deadline = useRef(0);
   const latest = useRef(sitting);
   latest.current = sitting;
@@ -74,12 +80,17 @@ export function ExamRunner({ user }: { user: SessionUser }) {
     mutationFn: () =>
       request<Sitting>(`/api/v1/student/exams/${id}/start`, "POST", {
         accessCode: code,
+        entryToken,
       }),
+    onError: (err) => {
+      if (err instanceof ApiError && (err.status === 409 || (err.status === 403 && err.message.includes("re-entry limit")))) onActivity(null);
+    },
     onSuccess: (s) => {
       void invalidateResources(user.id, [
         `/api/v1/student/exams/${id}/readiness`,
       ]);
       setSitting(s);
+      onActivity(`/exams/${id}/take`);
       deadline.current = Date.now() + s.remainingSeconds * 1000;
       setRemaining(s.remainingSeconds);
       setError(null);
@@ -89,6 +100,7 @@ export function ExamRunner({ user }: { user: SessionUser }) {
     mutationFn: () =>
       request<{
         totalGrade: number;
+        totalMarks?: number;
         status: string;
       }>(
         `/api/v1/student/exams/${id}/submit`,
@@ -98,6 +110,7 @@ export function ExamRunner({ user }: { user: SessionUser }) {
       ),
     onSuccess: (r) => {
       setResult(r);
+      onActivity(null);
       setConfirm(false);
       void invalidateResources(user.id, ["/api/v1/student"]);
     },
@@ -215,7 +228,7 @@ export function ExamRunner({ user }: { user: SessionUser }) {
     };
   }, [!!sitting, !!result, id]);
   useEffect(() => {
-    // Timeout auto-submit: submit even with unanswered questions — the server
+    // Timeout auto-submit: submit even with unanswered questions â€” the server
     // finalizes partial attempts. Manual button still requires all answered.
     if (sitting && remaining === 0 && !result && !finish.isPending)
       finish.mutate();
@@ -300,7 +313,9 @@ export function ExamRunner({ user }: { user: SessionUser }) {
       clearTimeout(retry);
     };
   }, [!!sitting, !!result, id]);
-  const q = sitting?.questions[index];
+  const pageSize = 4;
+  const pageStart = Math.floor(index / pageSize) * pageSize;
+  const lastPage = !!sitting && pageStart + pageSize >= sitting.questions.length;
   const answered =
     sitting?.questions.filter((q) => q.selectedAnswer !== null).length ?? 0;
   const unsaved = Object.keys(retryAnswers).length;
@@ -343,7 +358,7 @@ export function ExamRunner({ user }: { user: SessionUser }) {
           <h2>{t("Submission complete")}</h2>
           <p>{t("Your grade")}</p>
           <strong>
-            {result.totalGrade} <small>{t("marks")}</small>
+            {result.totalGrade}/{result.totalMarks ?? "—"} <small>{t("marks")}</small>
           </strong>
           <Link className="button primary" to="/results">
             {t(" View my results ")}
@@ -374,7 +389,7 @@ export function ExamRunner({ user }: { user: SessionUser }) {
                   "This is a demo assessment. No university results are affected.",
                 )
               : t(
-                  "Safe Exam Browser is required. Use your university’s browser configuration.",
+                  "You can open and take this exam in your normal browser. Follow your exam rules and instructions.",
                 )}
           </p>
           <form
@@ -390,6 +405,7 @@ export function ExamRunner({ user }: { user: SessionUser }) {
           >
             <ReadinessChecklist {...readiness} user={user} />
             <div className="exam-rules">
+              {readiness.query.data?.maxReentries !== undefined && <p>{t("Maximum re-entries: {0}. Refreshing or reopening the exam counts as a re-entry.", { "0": readiness.query.data.maxReentries })}</p>}
               <h3>{t("Exam rules")}</h3>
               <p>
                 {t(
@@ -431,7 +447,7 @@ export function ExamRunner({ user }: { user: SessionUser }) {
                   !code.trim())
               }
             >
-              {start.isPending ? t("Opening exam…") : t("Start or resume exam")}
+              {start.isPending ? t("Opening examâ€¦") : t("Start or resume exam")}
             </button>
           </form>
           <Link className="back-link" to="/exams">
@@ -512,8 +528,8 @@ export function ExamRunner({ user }: { user: SessionUser }) {
       )}
       <div className="runner-grid">
         <section className="panel question-panel">
-          {q && (
-            <>
+          {sitting.questions.slice(pageStart, pageStart + pageSize).map((q, offset) => (
+            <article id={`exam-question-${q.questionId}`} key={q.questionId} className={`exam-question ${index === pageStart + offset ? "focused-question" : ""}`} onFocus={() => setIndex(pageStart + offset)} onClick={() => setIndex(pageStart + offset)}>
               <div className="question-meta">
                 <span>
                   {q.grade}
@@ -533,7 +549,7 @@ export function ExamRunner({ user }: { user: SessionUser }) {
                   {q.isFlagged ? t("Flagged for review") : t("Flag for review")}
                 </button>
               </div>
-              <h2>{q.text}</h2>
+              <h2>{pageStart + offset + 1}. {q.text}</h2>
               {q.imageUrl && (
                 <img
                   className="question-image"
@@ -567,37 +583,18 @@ export function ExamRunner({ user }: { user: SessionUser }) {
               <button
                 className="text-button"
                 onClick={() => choose(q.questionId, null)}
-                disabled={!q.selectedAnswer || finish.isPending}
+                disabled={!q.selectedAnswer || finish.isPending || remaining === 0}
               >
                 {t(" Clear answer ")}
               </button>
-              <div className="runner-controls">
-                <button
-                  className="secondary"
-                  disabled={index === 0}
-                  onClick={() => setIndex(index - 1)}
-                >
-                  <ChevronLeft size={15} />
-                  {t(" Previous ")}
-                </button>
-                <span className="save-status">
-                  {queued > 0
-                    ? t("Saving…")
-                    : unsaved
-                      ? t("Save needed")
-                      : t("Answers synced")}
-                </span>
-                <button
-                  className="primary"
-                  disabled={index === sitting.questions.length - 1}
-                  onClick={() => setIndex(index + 1)}
-                >
-                  {t(" Next ")}
-                  <ChevronRight size={15} />
-                </button>
-              </div>
-            </>
-          )}
+            </article>
+          ))}
+          <div className="runner-controls">
+            <button className="secondary" disabled={pageStart === 0} onClick={() => setIndex(Math.max(0, pageStart - pageSize))}><ChevronLeft size={15} />{t("Previous")}</button>
+            <span className="save-status" role="status">{queued ? t("Saving…") : unsaved ? t("Save needed") : t("Answers synced")}</span>
+            {lastPage ? <button className="primary" disabled={answered < sitting.questions.length || queued > 0 || unsaved > 0 || finish.isPending || remaining === 0} onClick={() => setConfirm(true)}>{t("Submit assessment")}</button>
+              : <button className="primary" onClick={() => setIndex(pageStart + pageSize)}>{t("Next")}<ChevronRight size={15} /></button>}
+          </div>
         </section>
         <aside className="panel question-nav">
           <h2>{t("Question navigator")}</h2>
@@ -610,7 +607,7 @@ export function ExamRunner({ user }: { user: SessionUser }) {
                   "0": i + 1,
                   "1": q.isFlagged ? t(", flagged") : "",
                 })}
-                onClick={() => setIndex(i)}
+                onClick={() => { setIndex(i); setTimeout(() => document.getElementById(`exam-question-${q.questionId}`)?.scrollIntoView({ block: "center", behavior: "smooth" }), 0); }}
               >
                 {i + 1}
               </button>
@@ -634,12 +631,10 @@ export function ExamRunner({ user }: { user: SessionUser }) {
           </button>
           <p className="subtle">
             {t(
-              " Answer every question before submitting. You cannot change your answers afterward. ",
+              "Answer every question before submitting. You cannot change your answers afterward.",
             )}
           </p>
-          <button className="text-button" onClick={() => navigate("/exams")}>
-            {t(" Leave and resume later ")}
-          </button>
+          {sitting.examToolsEnabled !== false && <ExamTools userId={user.id} examId={id!} sitting={sitting} disabled={remaining === 0 || finish.isPending} />}
         </aside>
       </div>
       {confirm && (
@@ -656,7 +651,7 @@ export function ExamRunner({ user }: { user: SessionUser }) {
           onClose={() => setConfirm(false)}
           busy={finish.isPending}
           error={finish.error}
-          onConfirm={() => finish.mutate()}
+          onConfirm={() => { if (!queued && !unsaved && answered === sitting.questions.length && !finish.isPending) finish.mutate(); }}
         />
       )}
     </>

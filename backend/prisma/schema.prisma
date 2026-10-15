@@ -322,6 +322,10 @@ model Exam {
   startTime       DateTime   @db.Timestamptz(6) @map("start_time")
   endTime         DateTime   @db.Timestamptz(6) @map("end_time")
   durationMinutes Int        @map("duration_minutes")
+  notesEnabled Boolean @default(false) @map("notes_enabled")
+  notesForDoctorEnabled Boolean @default(false) @map("notes_for_doctor_enabled")
+  examToolsEnabled Boolean @default(true) @map("exam_tools_enabled")
+  maxReentries Int @default(3) @map("max_reentries")
   difficultyMix   Json       @db.JsonB @map("difficulty_mix")
   manualQuestionIds Json?     @map("manual_question_ids") // hand-picked blueprint (author order); null = auto-sample by mix
   questionSource  String?    @map("question_source") // TA quiz: shared|mine. Doctor: own (implicit).
@@ -377,6 +381,9 @@ model StudentExam {
   startedAt        DateTime?        @db.Timestamptz(6) @map("started_at")
   submittedAt      DateTime?        @db.Timestamptz(6) @map("submitted_at")
   totalGrade       Decimal?         @db.Decimal(10, 2) @map("total_grade")
+  entryTokens String[] @default([]) @map("entry_tokens")
+  notes String @default("")
+  notesForDoctor String @default("") @map("notes_for_doctor")
   lastHeartbeatAt  DateTime?        @db.Timestamptz(6) @map("last_heartbeat_at")
 
   exam      Exam                  @relation(fields: [examId], references: [id], onDelete: Cascade)

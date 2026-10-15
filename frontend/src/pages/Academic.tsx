@@ -594,6 +594,10 @@ export function ExamDetail({ user }: { user: SessionUser }) {
               startTime={e.startTime}
               endTime={e.endTime}
               durationMinutes={e.durationMinutes}
+              notesEnabled={e.notesEnabled}
+              notesForDoctorEnabled={e.notesForDoctorEnabled}
+              examToolsEnabled={e.examToolsEnabled}
+              maxReentries={e.maxReentries}
               busy={action.isPending}
               error={action.error}
               onSubmit={send}
@@ -709,13 +713,16 @@ export function QuestionBank({ user }: { user: SessionUser }) {
     "/api/v1/exams/subjects?limit=100",
   );
   const [subject, setSubject] = useState("");
-  const selectedSubject = subject || rowsOf(subjects.data)[0]?.id || "";
+  const selectedSubject = subject;
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [difficulty, setDifficulty] = useState("");
   const [edit, setEdit] = useState<Question | "new" | null>(null);
   const [remove, setRemove] = useState<Question | null>(null);
   const [uploadError, setUploadError] = useState("");
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imageBusy, setImageBusy] = useState(false);
+  const [createdQuestion, setCreatedQuestion] = useState<Question | null>(null);
   const query = useResource<Envelope<Question>>(
     user,
     `/api/v1/question-bank?subject_id=${selectedSubject}&page=${page}&limit=10&search=${encodeURIComponent(search)}${difficulty ? "&difficulty=" + difficulty : ""}`,
@@ -741,6 +748,8 @@ export function QuestionBank({ user }: { user: SessionUser }) {
               onClick={() => {
                 action.reset();
                 setUploadError("");
+                setImageFile(null);
+                setCreatedQuestion(null);
                 setEdit("new");
               }}
             >
@@ -751,7 +760,8 @@ export function QuestionBank({ user }: { user: SessionUser }) {
         }
       />
       <Feedback error={subjects.error} />
-      <div className="toolbar">
+      <section className="panel subject-filter">
+        <h2>{t("Subject")}</h2>
         <Combo
           value={selectedSubject}
           options={rowsOf(subjects.data).map((s) => ({
@@ -765,6 +775,8 @@ export function QuestionBank({ user }: { user: SessionUser }) {
           placeholder="Search subjects…"
           ariaLabel={t("Subject")}
         />
+      </section>
+      <div className="toolbar">
         <SearchBox
           value={search}
           onChange={(s) => {
@@ -791,7 +803,7 @@ export function QuestionBank({ user }: { user: SessionUser }) {
         />
       </div>
       <Feedback error={query.error} />
-      {query.isPending && selectedSubject ? (
+      {(query.isPending || query.isPlaceholderData) && selectedSubject ? (
         <Loading />
       ) : query.data?.rows.length ? (
         <section className="panel">
@@ -835,6 +847,8 @@ export function QuestionBank({ user }: { user: SessionUser }) {
                   onClick={() => {
                     action.reset();
                     setUploadError("");
+                    setImageFile(null);
+                    setCreatedQuestion(null);
                     setEdit(q);
                   }}
                 >
@@ -860,64 +874,38 @@ export function QuestionBank({ user }: { user: SessionUser }) {
           text={t("Choose a subject, adjust your filters, or add a question.")}
         />
       )}
-      <Pagination data={query.data} page={page} setPage={setPage} />
+      <Pagination data={query.isPlaceholderData ? undefined : query.data} page={page} setPage={setPage} />
       {edit && (
         <QuestionSheet
           initial={edit === "new" ? {} : edit}
           subjectLocked={edit === "new"}
-          busy={action.isPending}
-          error={action.error}
+          busy={action.isPending || imageBusy}
+          error={uploadError || action.error}
           onClose={() => setEdit(null)}
-          onSubmit={(body) =>
-            action.mutate(
-              {
-                path:
-                  "/api/v1/question-bank" +
-                  (edit === "new" ? "" : "/" + edit.id),
-                method: edit === "new" ? "POST" : "PATCH",
-                body: {
-                  ...body,
-                  ...(edit === "new" ? { subjectId: selectedSubject } : {}),
-                },
-              },
-              { onSuccess: () => setEdit(null) },
-            )
-          }
-          imageUpload={
-            edit !== "new" ? (
-              <div className="field">
-                <label htmlFor="qs-image">{t("Question image")}</label>
-                <input
-                  id="qs-image"
-                  type="file"
-                  accept="image/png,image/jpeg,image/webp,image/gif"
-                  onChange={async (e) => {
-                    const f = e.target.files?.[0];
-                    if (!f) return;
-                    setUploadError("");
-                    const data = new FormData();
-                    data.set("image", f);
-                    try {
-                      if (previewMode)
-                        throw new Error(
-                          "Image uploads require the connected backend.",
-                        );
-                      await api.upload(
-                        "/api/v1/question-bank/" + edit.id + "/image",
-                        data,
-                      );
-                      await query.refetch();
-                    } catch (err) {
-                      setUploadError(
-                        err instanceof Error ? err.message : "Upload failed",
-                      );
-                    }
-                  }}
-                />
-                <Feedback error={uploadError || undefined} />
-              </div>
-            ) : undefined
-          }
+          onSubmit={async (body) => {
+            setImageBusy(true); setUploadError("");
+            try {
+              const q = await action.mutateAsync({
+                path: "/api/v1/question-bank" + (createdQuestion ? "/" + createdQuestion.id : edit === "new" ? "" : "/" + edit.id),
+                method: edit === "new" && !createdQuestion ? "POST" : "PATCH",
+                body: { ...body, ...(edit === "new" ? { subjectId: selectedSubject } : {}) },
+              });
+              // Retain the created ID if upload fails, so retry cannot create a duplicate.
+              setCreatedQuestion(q);
+              if (imageFile) {
+                if (previewMode) throw new Error("Image uploads require the connected backend.");
+                const data = new FormData(); data.set("image", imageFile);
+                await api.upload(`/api/v1/question-bank/${q.id}/image`, data);
+              }
+              await query.refetch(); setEdit(null); setImageFile(null); setCreatedQuestion(null);
+            } catch (err) { setUploadError(err instanceof Error ? err.message : "Upload failed"); }
+            finally { setImageBusy(false); }
+          }}
+          imageUpload={<div className="field">
+            <label htmlFor="qs-image">{t("Attach question image")}</label>
+            <input id="qs-image" type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imageBusy} onChange={(e) => setImageFile(e.target.files?.[0] ?? null)} />
+            {imageFile && <p>{imageFile.name}</p>}
+          </div>}
         />
       )}
       {remove && (
@@ -928,7 +916,7 @@ export function QuestionBank({ user }: { user: SessionUser }) {
           )}
           onClose={() => setRemove(null)}
           error={action.error}
-          busy={action.isPending}
+          busy={action.isPending || imageBusy}
           onConfirm={() =>
             action.mutate(
               { path: "/api/v1/question-bank/" + remove.id, method: "DELETE" },
@@ -1033,7 +1021,9 @@ export function Results({ user }: { user: SessionUser }) {
                     </td>
                     <td>{date(r.submittedAt)}</td>
                     <td>
-                      <strong>{r.totalGrade}</strong>
+                      <strong>
+                        {r.totalGrade}/{r.totalMarks ?? "—"}
+                      </strong>
                       {t(" marks ")}
                     </td>
                     <td>
@@ -1079,7 +1069,10 @@ export function Results({ user }: { user: SessionUser }) {
                     <tr key={r.id}>
                       <td>{r.name}</td>
                       <td>{r.username}</td>
-                      <td>{String((r.exam as Entity)?.totalGrade ?? "—")}</td>
+                      <td>
+                        {String((r.exam as Entity)?.totalGrade ?? "-")}/
+                        {String((r.exam as Entity)?.totalMarks ?? "-")}
+                      </td>
                       <td>
                         <Badge
                           value={(r.exam as Entity)?.status ?? "not_started"}
@@ -1153,7 +1146,8 @@ export function Exports({ user }: { user: SessionUser }) {
       const href = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = href;
-      a.download = `export-${r.id}.csv`;
+      const downloadFormat = String(r.format ?? (r.params as Entity)?.format ?? "csv");
+      a.download = `export-${r.id}.${downloadFormat === "xlsx" ? "xlsx" : "csv"}`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -1271,7 +1265,7 @@ export function Exports({ user }: { user: SessionUser }) {
                 key: "format",
                 label: "Format",
                 required: true,
-                options: opts(previewMode ? ["csv"] : ["csv", "xlsx"]),
+                options: opts(["csv", "xlsx"]),
                 value: "csv",
               },
             ]}

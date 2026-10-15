@@ -1,4 +1,17 @@
 export const arabic: Record<string, string> = {
+  "Calculator": "آلة حاسبة",
+  "Maximum re-entries: {0}. Refreshing or reopening the exam counts as a re-entry.": "الحد الأقصى لإعادة الدخول: {0}. يُحتسب تحديث الصفحة أو إعادة فتح الامتحان كإعادة دخول.",
+  "Notes": "ملاحظات",
+  "Exam tools": "أدوات الامتحان",
+  "Allow student notes": "السماح بملاحظات الطالب",
+  "Maximum re-entries (excluding the first entry)": "الحد الأقصى لإعادة الدخول (باستثناء الدخول الأول)",
+  "Private scratch notes (not graded)": "ملاحظات شخصية للمسودة (لا تُقيّم)",
+  "Notes saved": "تم حفظ الملاحظات",
+  "Notes not yet saved": "لم تُحفظ الملاحظات بعد",
+  "Attach question image": "إرفاق صورة للسؤال",
+  "Exam re-entry limit reached. Contact your doctor.": "تم الوصول إلى الحد الأقصى لإعادة الدخول. تواصل مع أستاذ المادة.",
+  "Notes are unavailable for this attempt.": "الملاحظات غير متاحة لهذه المحاولة.",
+
   "October 6 University": "جامعة ٦ أكتوبر",
   "OCTOBER 6 UNIVERSITY": "جامعة ٦ أكتوبر",
   "October 6 University exam portal": "بوابة امتحانات جامعة ٦ أكتوبر",

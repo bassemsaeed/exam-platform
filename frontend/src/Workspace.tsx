@@ -82,6 +82,17 @@ export default function Workspace({
   const t = useT();
   const [open, setOpen] = useState(false);
   const location = useLocation();
+  const [activeExam, setActiveExam] = useState<string | null>(() => {
+    try { return sessionStorage.getItem(`active-exam-${user.id}`); } catch { return null; }
+  });
+  function examActivity(path: string | null) {
+    setActiveExam(path);
+    try {
+      if (path) sessionStorage.setItem(`active-exam-${user.id}`, path);
+      else sessionStorage.removeItem(`active-exam-${user.id}`);
+    } catch { /* navigation remains locked in memory */ }
+  }
+  const examOnly = user.role === "student" && (!!activeExam || /^\/exams\/[^/]+\/take$/.test(location.pathname));
   const [mobile, setMobile] = useState(
     () => window.matchMedia("(max-width: 760px)").matches,
   );
@@ -160,7 +171,8 @@ export default function Workspace({
     queryClient.setQueryData(sessionKey, next);
   }
   return (
-    <div className={`workspace ${compact ? "compact" : ""}`}>
+    <div className={`workspace ${compact ? "compact" : ""} ${examOnly ? "exam-only" : ""}`}>
+      {activeExam && location.pathname !== activeExam && <Navigate to={activeExam} replace />}
       <a
         href="#main-content"
         className="skip-link"
@@ -171,7 +183,7 @@ export default function Workspace({
       >
         {t("Skip to main content")}
       </a>
-      <aside
+      {!examOnly && <aside
         id="portal-sidebar"
         inert={mobile && !open}
         className={`sidebar ${open ? "open" : ""}`}
@@ -214,8 +226,8 @@ export default function Workspace({
             <LogOut size={17} />
           </button>
         </div>
-      </aside>
-      {open && (
+      </aside>}
+      {!examOnly && open && (
         <button
           className="sidebar-overlay"
           aria-label={t("Close menu")}
@@ -224,7 +236,7 @@ export default function Workspace({
       )}
       <div className="workspace-main">
         <header className="workspace-header">
-          <div>
+          {!examOnly && <div>
             <button
               aria-expanded={open}
               aria-controls="portal-sidebar"
@@ -239,9 +251,10 @@ export default function Workspace({
               <span className="header-slash">/</span>{" "}
               <b>{t("Examination Portal")}</b>
             </span>
-          </div>
+          </div>}
           <div className="header-tools">
-            <Preferences />
+            <Preferences themeOnly={examOnly} />
+            {!examOnly && <>
             <NotificationLink
               user={user}
               enabled={!location.pathname.endsWith("/take")}
@@ -275,11 +288,12 @@ export default function Workspace({
             >
               <LogOut size={17} />
             </button>
+            </>}
           </div>
         </header>
         <div className="workspace-content" id="main-content" tabIndex={-1}>
           <Feedback error={logoutError} />
-          <Routes>
+          <Routes location={activeExam ?? location}>
             <Route path="/" element={<Overview user={user} />} />
             <Route
               path="/notifications"
@@ -308,7 +322,7 @@ export default function Workspace({
             {user.role === "student" && (
               <Route
                 path="/exams/:id/take"
-                element={<ExamRunner user={user} />}
+                element={<ExamRunner user={user} onActivity={examActivity} />}
               />
             )}
             <Route path="/results" element={<Results user={user} />} />
@@ -328,7 +342,7 @@ export default function Workspace({
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>
-        <footer className="workspace-footer">
+        {!examOnly && <footer className="workspace-footer">
           <span>
             © {new Date().getFullYear()}
             {t(" October 6 University")}
@@ -361,7 +375,7 @@ export default function Workspace({
               </button>
             )}
           </div>
-        </footer>
+        </footer>}
       </div>
     </div>
   );

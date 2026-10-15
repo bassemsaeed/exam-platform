@@ -18,6 +18,10 @@ export interface Subject extends Entity {
   code: string;
 }
 export interface Exam extends Entity {
+  notesEnabled?: boolean;
+  notesForDoctorEnabled?: boolean;
+  examToolsEnabled?: boolean;
+  maxReentries?: number;
   subjectId: string;
   subject?: Subject;
   type: string;
@@ -46,6 +50,12 @@ export interface SittingQuestion extends Question {
   isFlagged: boolean;
 }
 export interface Sitting {
+  notesEnabled?: boolean;
+  notesForDoctorEnabled?: boolean;
+  examToolsEnabled?: boolean;
+  notes?: string;
+  notesForDoctor?: string;
+  maxReentries?: number;
   id: string;
   examId: string;
   remainingSeconds: number;
@@ -55,6 +65,7 @@ export interface Sitting {
 export interface StudentResult extends Entity {
   status: string;
   totalGrade: number;
+  totalMarks?: number;
   submittedAt: string;
   exam: Exam;
 }

@@ -17,7 +17,7 @@ function applyPreferences() {
 // Apply saved settings before React paints; no flash or route remount on switching.
 applyPreferences();
 useUIStore.subscribe(applyPreferences);
-export function Preferences() {
+export function Preferences({ themeOnly = false }: { themeOnly?: boolean }) {
   const t = useT();
   const theme = useUIStore((s) => s.theme);
   const language = useUIStore((s) => s.language);
@@ -28,6 +28,21 @@ export function Preferences() {
     return () => systemTheme.removeEventListener("change", applyPreferences);
   }, []);
   const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : Monitor;
+  if (themeOnly) {
+    const dark = theme === "dark" || (theme === "system" && systemTheme.matches);
+    return (
+      <button
+        type="button"
+        className="icon-button"
+        aria-label={t("Theme")}
+        aria-pressed={dark}
+        title={t(dark ? "Light" : "Dark")}
+        onClick={() => setTheme(dark ? "light" : "dark")}
+      >
+        {dark ? <Sun size={18} /> : <Moon size={18} />}
+      </button>
+    );
+  }
   return (
     <div className="display-preferences">
       <label className="preference-control">
@@ -42,7 +57,7 @@ export function Preferences() {
           <option value="dark">{t("Dark")}</option>
         </select>
       </label>
-      <label className="preference-control">
+      {!themeOnly && <label className="preference-control">
         <Languages size={16} aria-hidden="true" />
         <select
           aria-label={t("Language")}
@@ -56,7 +71,7 @@ export function Preferences() {
             العربية
           </option>
         </select>
-      </label>
+      </label>}
     </div>
   );
 }

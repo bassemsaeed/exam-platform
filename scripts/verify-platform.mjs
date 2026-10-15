@@ -40,7 +40,7 @@ try {
   await page.getByRole("button", { name: "Start or resume exam" }).click();
   await page.getByRole("heading", { name: "Question 1 of 6" }).waitFor();
   await page.getByRole("radio").first().check();
-  await page.getByRole("button", { name: "Flag for review" }).click();
+  await page.getByRole("button", { name: "Flag for review" }).first().click();
   await page.getByRole("button", { name: "Flagged for review" }).waitFor();
   await page.getByText("Answers synced", { exact: true }).waitFor();
   await page.reload();
@@ -52,10 +52,13 @@ try {
   await page.getByRole("button", { name: "Start or resume exam" }).click();
   await page.getByRole("heading", { name: "Question 1 of 6" }).waitFor();
   assert.equal(await page.getByRole("radio").first().isChecked(), true);
-  for (let i = 0; i < 6; i++) {
-    if (i > 0)
-      await page.getByRole("button", { name: "Next", exact: true }).click();
-    await page.getByRole("radio").first().check();
+  for (;;) {
+    for (const question of await page.locator(".exam-question").all())
+      await question.getByRole("radio").first().check();
+    await page.getByText("Answers synced", { exact: true }).waitFor();
+    const next = page.getByRole("button", { name: "Next", exact: true });
+    if (!(await next.count())) break;
+    await next.click();
   }
   await page.screenshot({
     path: shot("o6u-exam-runner.png"),
@@ -63,7 +66,7 @@ try {
   });
   await page
     .getByRole("button", { name: "Submit assessment", exact: true })
-    .click();
+    .first().click();
   await page.getByRole("button", { name: "Confirm", exact: true }).click();
   await page.getByRole("heading", { name: "Submission complete" }).waitFor();
   assert.match(await page.locator(".submitted-panel strong").innerText(), /10/);

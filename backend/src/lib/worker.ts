@@ -5,7 +5,7 @@ import { isLocalStorage, localUploadsDir, storage } from "./storage.js";
 import { autoSubmitExam } from "../routes/student.js";
 import type { ExportJob } from "../generated/prisma/client.js";
 import { createWriteStream } from "node:fs";
-import { mkdir, rename, rm } from "node:fs/promises";
+import { copyFile, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -245,7 +245,7 @@ async function processNextExportJob(): Promise<boolean> {
           const key = `exports/export-${job.id}.csv`;
           const dest = join(localUploadsDir(), key);
           await mkdir(dirname(dest), { recursive: true });
-          await rename(tmpPath, dest);
+          await copyFile(tmpPath, dest);
           await prisma.exportJob.update({
             where: { id: job.id },
             data: { status: "done", fileUrl: `/uploads/${key}`, params: { ...((job.params ?? {}) as object), fileKey: key, rows } },
@@ -273,6 +273,7 @@ async function processNextExportJob(): Promise<boolean> {
       await audit(job.requestedBy, "export.done", "export_job", job.id, { rows });
     }
   } catch (e) {
+    console.error("export job failed", job.id, e);
     await prisma.exportJob.update({ where: { id: job.id }, data: { status: "failed" } });
     await audit(job.requestedBy, "export.failed", "export_job", job.id, { error: e instanceof Error ? e.message : "failed" });
   }

@@ -29,7 +29,7 @@ try {
   await page.getByRole("radio").first().check();
   await page.getByText("Answers synced", { exact: true }).waitFor();
   if (await page.getByRole("button", { name: "Flag for review" }).count())
-    await page.getByRole("button", { name: "Flag for review" }).click();
+    await page.getByRole("button", { name: "Flag for review" }).first().click();
   await page.getByRole("button", { name: "Flagged for review" }).waitFor();
   await page.reload();
   await page
@@ -40,18 +40,17 @@ try {
   await page.getByRole("button", { name: "Start or resume exam" }).click();
   await page.locator(".question-panel").waitFor();
   assert.equal(await page.getByRole("radio").first().isChecked(), true);
-  while (
-    !(await page
-      .getByRole("button", { name: "Next", exact: true })
-      .isDisabled())
-  ) {
-    await page.getByRole("button", { name: "Next", exact: true }).click();
-    await page.getByRole("radio").first().check();
+  for (;;) {
+    for (const question of await page.locator(".exam-question").all())
+      await question.getByRole("radio").first().check();
     await page.getByText("Answers synced", { exact: true }).waitFor();
+    const next = page.getByRole("button", { name: "Next", exact: true });
+    if (!(await next.count())) break;
+    await next.click();
   }
   await page
     .getByRole("button", { name: "Submit assessment", exact: true })
-    .click();
+    .first().click();
   await page.getByRole("button", { name: "Confirm", exact: true }).click();
   await page.getByRole("heading", { name: "Submission complete" }).waitFor();
   await page.getByRole("link", { name: "View my results" }).click();

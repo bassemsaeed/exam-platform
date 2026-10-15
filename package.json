@@ -21,6 +21,7 @@
     "test:additions": "node scripts/verify-additions.mjs",
     "test:real-additions": "node scripts/verify-real-additions.mjs",
     "test:password": "node scripts/verify-password-change.mjs",
-    "test:real": "node scripts/verify-login.mjs && node scripts/verify-real-workflows.mjs && node scripts/verify-real-exam.mjs && node scripts/verify-real-additions.mjs && node scripts/verify-password-change.mjs"
+    "test:real": "node scripts/verify-login.mjs && node scripts/verify-real-workflows.mjs && node scripts/verify-real-exam.mjs && node scripts/verify-real-additions.mjs && node scripts/verify-password-change.mjs",
+    "test:exam-experience": "node scripts/verify-exam-experience.mjs"
   }
 }

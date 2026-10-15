@@ -1,7 +1,7 @@
 import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, extname, join, resolve } from "node:path";
+import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config } from "./config.js";
 
@@ -76,8 +76,10 @@ class LocalStorage implements Storage {
     // Path-traversal containment: subject codes / filenames are attacker-shaped
     // (admin input, Excel imports). Resolve and verify the destination stays
     // inside the uploads root before touching the filesystem.
-    const dest = resolve(join(this.dir, key));
-    if (dest !== resolve(this.dir) && !dest.startsWith(resolve(this.dir) + "/")) {
+    const root = resolve(this.dir);
+    const dest = resolve(join(root, key));
+    const rel = relative(root, dest);
+    if (rel.startsWith("..") || isAbsolute(rel)) {
       throw new Error("path traversal forbidden");
     }
     await mkdir(dirname(dest), { recursive: true });
@@ -87,8 +89,10 @@ class LocalStorage implements Storage {
 
   async delete(key: string): Promise<void> {
     if (key.includes("..")) throw new Error("path traversal forbidden");
-    const dest = resolve(join(this.dir, key));
-    if (dest !== resolve(this.dir) && !dest.startsWith(resolve(this.dir) + "/")) {
+    const root = resolve(this.dir);
+    const dest = resolve(join(root, key));
+    const rel = relative(root, dest);
+    if (rel.startsWith("..") || isAbsolute(rel)) {
       throw new Error("path traversal forbidden");
     }
     const { rm } = await import("node:fs/promises");
