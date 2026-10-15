@@ -11,6 +11,12 @@ export const arabic: Record<string, string> = {
   "Attach question image": "إرفاق صورة للسؤال",
   "Exam re-entry limit reached. Contact your doctor.": "تم الوصول إلى الحد الأقصى لإعادة الدخول. تواصل مع أستاذ المادة.",
   "Notes are unavailable for this attempt.": "الملاحظات غير متاحة لهذه المحاولة.",
+  "Allow student notes for the doctor": "السماح بملاحظات الطالب للأستاذ",
+  "Allow exam tools": "السماح بأدوات الامتحان",
+  "Notes for doctor": "ملاحظات للأستاذ",
+  "Notes for the doctor": "ملاحظات للأستاذ",
+  "Doctor notes are unavailable for this attempt.": "ملاحظات الأستاذ غير متاحة لهذه المحاولة.",
+  "Normal browser accepted — no locked browser required": "المتصفح العادي مقبول — لا يلزم متصفح مقفل",
 
   "October 6 University": "جامعة ٦ أكتوبر",
   "OCTOBER 6 UNIVERSITY": "جامعة ٦ أكتوبر",

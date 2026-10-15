@@ -96,11 +96,7 @@ export function ReadinessChecklist({
         ? "Offline"
         : query.isPending
           ? "Verifying with server…"
-          : data?.sebVerified || previewMode
-            ? previewMode && !data?.sebVerified
-              ? "Demo browser accepted"
-              : "Verified by server"
-            : "Open this exam in Safe Exam Browser",
+          : "Normal browser accepted — no locked browser required",
       state:
         !online || (!data && !query.isPending)
           ? "fail"

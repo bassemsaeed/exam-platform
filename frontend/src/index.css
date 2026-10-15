@@ -3401,7 +3401,8 @@ input[type="datetime-local"],
 .workspace.exam-only .workspace-main { margin-inline: 0; margin-left: 0; margin-right: 0; }
 .exam-only .workspace-header { justify-content: flex-end; }
 .exam-only .header-tools .icon-button { display: inline-flex; align-items: center; justify-content: center; }
-.exam-only .workspace-content { width: 100%; max-width: 1500px; margin-inline: auto; }
+.exam-only .workspace-content { width: 100%; max-width: none; margin-inline: auto; }
+.exam-only .runner-grid { grid-template-columns: minmax(0, 1fr) 320px; }
 .exam-question + .exam-question { border-top: 1px solid var(--border, #d7dce4); margin-top: 28px; padding-top: 28px; }
 .exam-tools { border-top: 1px solid var(--border, #d7dce4); margin-top: 20px; padding-top: 16px; }
 .exam-tools .action-row { flex-wrap: wrap; }
@@ -3409,4 +3410,35 @@ input[type="datetime-local"],
 .exam-calculator { margin-top: 16px; }
 .exam-calculator output { display: block; padding: 12px; text-align: right; font-size: 1.5rem; overflow-wrap: anywhere; }
 .calculator-keys { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.calculator-keys button { border: 1px solid #dfe8ef; background: #fff; border-radius: 7px; padding: 10px 0; font-size: 13px; color: #33566e; }
+.calculator-keys button:hover { border-color: #9db9cc; }
 .subject-filter { margin-bottom: 20px; padding: 20px; }
+
+/* Dark mode for the exam-taking tools. */
+[data-theme="dark"] :is(.exam-question + .exam-question, .exam-tools) {
+  border-color: #2a3e4e;
+}
+[data-theme="dark"] .exam-tools textarea {
+  background: #10202d;
+  border-color: #344b5c;
+  color: #d7e5ef;
+}
+[data-theme="dark"] .exam-calculator output {
+  background: #10202d;
+  border: 1px solid #2a3e4e;
+  border-radius: 7px;
+  color: #e0edf6;
+}
+[data-theme="dark"] .calculator-keys button {
+  background: #10202d;
+  border-color: #344b5c;
+  color: #c3d7e5;
+}
+[data-theme="dark"] .calculator-keys button:hover {
+  border-color: #2f86b8;
+}
+[data-theme="dark"] .subject-filter {
+  background: #14232f;
+  border: 1px solid #2a3e4e;
+  border-radius: 9px;
+}

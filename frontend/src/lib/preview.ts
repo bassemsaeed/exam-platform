@@ -452,6 +452,8 @@ export async function demoRequest<T>(
       return result({
         subject: db.subjects.find((s) => s.id === exam.subjectId),
         durationMinutes: exam.durationMinutes,
+        maxReentries: Number(exam.maxReentries ?? 3),
+        sebVerified: true,
         startTime: exam.startTime,
         endTime: exam.endTime,
         requiresCode: !!exam.hasAccessCode,
@@ -469,13 +471,29 @@ export async function demoRequest<T>(
     if (operation === "start") {
       const exam = db.exams.find((e) => e.id === examId);
       if (!exam) throw new ApiError(404, "exam not found");
-      const tokens = ((sitting as unknown as Entity)?.entryTokens ?? []) as string[];
-      const token = String(b.entryToken ?? crypto.randomUUID());
-      if (!tokens.includes(token) && tokens.length >= Number(exam.maxReentries ?? 3) + 1)
+      // Mirror the server's rotating-token admission (see student.ts).
+      const stored = ((sitting as unknown as Entity)?.entryTokens ?? []) as string[];
+      const presented = b.entryToken != null ? String(b.entryToken) : null;
+      const current = stored.length ? stored[stored.length - 1] : null;
+      const previous = stored.length >= 2 ? stored[stored.length - 2] : null;
+      let issued: string;
+      if (presented && presented === current) {
+        issued = current;
+      } else if (presented && presented === previous) {
+        issued = crypto.randomUUID();
+        stored.push(issued);
+      } else if (presented && stored.includes(presented)) {
+        throw new ApiError(403, "Re-entry token already used. Reopen the exam for a fresh entry.");
+      } else if (stored.length >= Number(exam.maxReentries ?? 3) + 1) {
         throw new ApiError(403, "Exam re-entry limit reached. Contact your doctor.");
+      } else {
+        issued = crypto.randomUUID();
+        stored.push(issued);
+      }
       if (!sitting) {
         sitting = {
           id: "sit-" + examId,
+          entryToken: issued,
           notesEnabled: Boolean(exam.notesEnabled),
           notesForDoctorEnabled: Boolean(exam.notesForDoctorEnabled),
           examToolsEnabled: exam.examToolsEnabled !== false,
@@ -501,13 +519,13 @@ export async function demoRequest<T>(
         sitting = db.sittings[db.sittings.length - 1] as unknown as Sitting;
         save();
       }
-      if (!tokens.includes(token)) tokens.push(token);
-      (sitting as unknown as Entity).entryTokens = tokens;
+      (sitting as unknown as Entity).entryTokens = stored;
       save();
       if (sitting.status !== "in_progress")
         throw new ApiError(409, "Exam already submitted");
       return result({
         ...sitting,
+        entryToken: issued,
         remainingSeconds: Math.max(
           0,
           Math.floor(

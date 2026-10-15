@@ -135,7 +135,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
   const [step, setStep] = useState(0);
   const [subject, setSubject] = useState("");
   const [duration, setDuration] = useState(45);
-  const [notesEnabled] = useState(false);
+  const [notesEnabled, setNotesEnabled] = useState(false);
   const [examToolsEnabled, setExamToolsEnabled] = useState(true);
   const [notesForDoctorEnabled, setNotesForDoctorEnabled] = useState(false);
   const [maxReentries, setMaxReentries] = useState(3);
@@ -373,10 +373,11 @@ export function ExamWizard({ user }: { user: SessionUser }) {
               />
             </div>
 <div className="field">
+  <label><input type="checkbox" checked={notesEnabled} onChange={(e) => setNotesEnabled(e.target.checked)} /> {t("Allow student notes")}</label>
   <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
   <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>
   <label>{t("Maximum re-entries (excluding the first entry)")}
-    <input type="number" min={0} max={20} value={maxReentries} onChange={(e) => setMaxReentries(Number(e.target.value))} required />
+    <input type="number" min={0} max={20} value={maxReentries} onChange={(e) => setMaxReentries(Math.min(20, Math.max(0, Number.isFinite(Number(e.target.value)) ? Number(e.target.value) : 0)))} required />
   </label>
 </div>
             <div className="field">
@@ -905,7 +906,7 @@ export function EditExamWindow({
   const [start, setStart] = useState(() => toLocal(startTime));
   const [end, setEnd] = useState(() => toLocal(endTime));
   const [dur, setDur] = useState(durationMinutes);
-  const [notesEnabled] = useState(initialNotes);
+  const [notesEnabled, setNotesEnabled] = useState(initialNotes);
   const [examToolsEnabled, setExamToolsEnabled] = useState(initialExamTools ?? true);
   const [notesForDoctorEnabled, setNotesForDoctorEnabled] = useState(initialDoctorNotes);
   const [maxReentries, setMaxReentries] = useState(initialReentries);
@@ -960,10 +961,11 @@ export function EditExamWindow({
         </div>
       </div>
 <div className="field">
+  <label><input type="checkbox" checked={notesEnabled} onChange={(e) => setNotesEnabled(e.target.checked)} /> {t("Allow student notes")}</label>
   <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
   <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>
   <label>{t("Maximum re-entries (excluding the first entry)")}
-    <input type="number" min={0} max={20} value={maxReentries} onChange={(e) => setMaxReentries(Number(e.target.value))} required />
+    <input type="number" min={0} max={20} value={maxReentries} onChange={(e) => setMaxReentries(Math.min(20, Math.max(0, Number.isFinite(Number(e.target.value)) ? Number(e.target.value) : 0)))} required />
   </label>
 </div>
       <Feedback error={err || error} />

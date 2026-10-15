@@ -50,6 +50,7 @@ export interface SittingQuestion extends Question {
   isFlagged: boolean;
 }
 export interface Sitting {
+  entryToken?: string;
   notesEnabled?: boolean;
   notesForDoctorEnabled?: boolean;
   examToolsEnabled?: boolean;

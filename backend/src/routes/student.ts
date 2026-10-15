@@ -345,6 +345,8 @@ student.get(
       serverTime: now,
       // Server-verified (this handler sits behind requireSeb): the checklist
       // must show THIS, never infer SEB from "data loaded" client-side.
+      // NOTE: requireSeb is currently a policy pass-through (normal browsers
+      // allowed), so sebVerified means "reached the server", not locked browser.
       sebVerified: true,
       attemptStatus: existing?.status ?? null,
       examStatus: exam.status,
@@ -422,16 +424,40 @@ student.post(
         return res.status(409).json({ error: "exam duration expired, auto-submitted" });
       }
 
-      const admitted = await prisma.$queryRaw<{ id: string }[]>`
-        UPDATE student_exam SET entry_tokens = CASE WHEN ${token} = ANY(entry_tokens)
-          THEN entry_tokens ELSE array_append(entry_tokens, ${token}) END
-        WHERE id = ${existing.id}::uuid AND status = 'in_progress'
-          AND (${token} = ANY(entry_tokens) OR cardinality(entry_tokens) < ${exam.maxReentries + 1})
-        RETURNING id`;
-      if (!admitted.length) return res.status(403).json({ error: "Exam re-entry limit reached. Contact your doctor." });
+      // Server-issued rotating entry tokens: the client presents the latest
+      // token it was issued; the server decides admission and rotates.
+      // - presented === current (last): idempotent retry, admit free.
+      // - presented === previous: admit once and rotate (retry-after-success
+      //   or second tab); the rotation consumes budget, so replays can't loop.
+      // - presented older than previous: 403 replay, never admitted.
+      // - unknown/absent (fresh device): admit iff budget remains, then issue.
+      // The row lock makes concurrent resumes serialize on this decision.
+      const admission = await prisma.$transaction(async (tx) => {
+        const rows = await tx.$queryRaw<{ tokens: string[]; status: string }[]>`
+          SELECT entry_tokens AS tokens, status FROM student_exam WHERE id = ${existing.id}::uuid FOR UPDATE`;
+        const held: string[] = rows[0]?.tokens ?? [];
+        if (rows[0]?.status !== "in_progress") return { outcome: "gone" as const };
+        const current = held.length ? held[held.length - 1] : null;
+        const previous = held.length >= 2 ? held[held.length - 2] : null;
+        if (token && token === current) return { outcome: "ok" as const, issued: current };
+        if (token && token === previous) {
+          const issued = crypto.randomUUID();
+          await tx.$executeRaw`UPDATE student_exam SET entry_tokens = array_append(entry_tokens, ${issued}) WHERE id = ${existing.id}::uuid`;
+          return { outcome: "ok" as const, issued };
+        }
+        if (token && held.includes(token)) return { outcome: "replay" as const };
+        if (held.length >= exam.maxReentries + 1) return { outcome: "limit" as const };
+        const issued = crypto.randomUUID();
+        await tx.$executeRaw`UPDATE student_exam SET entry_tokens = array_append(entry_tokens, ${issued}) WHERE id = ${existing.id}::uuid`;
+        return { outcome: "ok" as const, issued };
+      });
+      if (admission.outcome === "gone") return res.status(409).json({ error: "exam is no longer in progress" });
+      if (admission.outcome === "replay") return res.status(403).json({ error: "Re-entry token already used. Reopen the exam for a fresh entry." });
+      if (admission.outcome === "limit") return res.status(403).json({ error: "Exam re-entry limit reached. Contact your doctor." });
       // Resume: return existing questions and wall-clock remaining seconds
       const remainingSeconds = Math.max(0, Math.floor((maxEndTime - now) / 1000));
       return res.json({
+        entryToken: admission.issued,
         notesEnabled: exam.notesEnabled,
         notesForDoctorEnabled: exam.notesForDoctorEnabled,
         examToolsEnabled: exam.examToolsEnabled,
@@ -489,6 +515,9 @@ student.post(
     }
 
     try {
+      // The first entry token is server-issued: the client never chooses it,
+      // so the re-entry budget can't be pre-seeded from outside.
+      const issued = crypto.randomUUID();
       const created = await prisma.$transaction(async (tx) => {
         const started = await dbNow();
         const se = await tx.studentExam.create({
@@ -496,7 +525,7 @@ student.post(
             examId: exam.id,
             studentId: a.userId,
             status: "in_progress",
-            entryTokens: [token],
+            entryTokens: [issued],
             startedAt: started,
             lastHeartbeatAt: started,
             questions: {
@@ -538,6 +567,7 @@ student.post(
       const remainingSeconds = Math.max(0, Math.floor((maxEndTime - Date.now()) / 1000));
 
       return res.status(201).json({
+        entryToken: issued,
         notesEnabled: exam.notesEnabled,
         notesForDoctorEnabled: exam.notesForDoctorEnabled,
         examToolsEnabled: exam.examToolsEnabled,
@@ -587,14 +617,32 @@ student.post(
             },
           },
         });
-        const admitted = await prisma.$queryRaw<{ id: string }[]>`
-          UPDATE student_exam SET entry_tokens = CASE WHEN ${token} = ANY(entry_tokens)
-            THEN entry_tokens ELSE array_append(entry_tokens, ${token}) END
-          WHERE id = ${raceInstance.id}::uuid AND status = 'in_progress'
-            AND (${token} = ANY(entry_tokens) OR cardinality(entry_tokens) < ${exam.maxReentries + 1}) RETURNING id`;
-        if (!admitted.length) return res.status(403).json({ error: "Exam re-entry limit reached. Contact your doctor." });
+        // Same rotating-token admission as the resume path (see above).
+        const raceAdmission = await prisma.$transaction(async (tx) => {
+          const rows = await tx.$queryRaw<{ tokens: string[]; status: string }[]>`
+            SELECT entry_tokens AS tokens, status FROM student_exam WHERE id = ${raceInstance.id}::uuid FOR UPDATE`;
+          const held: string[] = rows[0]?.tokens ?? [];
+          if (rows[0]?.status !== "in_progress") return { outcome: "gone" as const };
+          const current = held.length ? held[held.length - 1] : null;
+          const previous = held.length >= 2 ? held[held.length - 2] : null;
+          if (token && token === current) return { outcome: "ok" as const, issued: current };
+          if (token && token === previous) {
+            const issued = crypto.randomUUID();
+            await tx.$executeRaw`UPDATE student_exam SET entry_tokens = array_append(entry_tokens, ${issued}) WHERE id = ${raceInstance.id}::uuid`;
+            return { outcome: "ok" as const, issued };
+          }
+          if (token && held.includes(token)) return { outcome: "replay" as const };
+          if (held.length >= exam.maxReentries + 1) return { outcome: "limit" as const };
+          const issued = crypto.randomUUID();
+          await tx.$executeRaw`UPDATE student_exam SET entry_tokens = array_append(entry_tokens, ${issued}) WHERE id = ${raceInstance.id}::uuid`;
+          return { outcome: "ok" as const, issued };
+        });
+        if (raceAdmission.outcome === "gone") return res.status(409).json({ error: "exam is no longer in progress" });
+        if (raceAdmission.outcome === "replay") return res.status(403).json({ error: "Re-entry token already used. Reopen the exam for a fresh entry." });
+        if (raceAdmission.outcome === "limit") return res.status(403).json({ error: "Exam re-entry limit reached. Contact your doctor." });
         const maxEndTime = Math.min(exam.endTime.getTime(), raceInstance.startedAt!.getTime() + exam.durationMinutes * 60_000);
         return res.json({
+          entryToken: raceAdmission.issued,
           notesEnabled: exam.notesEnabled,
           notesForDoctorEnabled: exam.notesForDoctorEnabled,
           examToolsEnabled: exam.examToolsEnabled,
@@ -834,6 +882,7 @@ student.post(
         ok: true,
         status: updated?.status ?? "auto_submitted",
         totalGrade: updated?.totalGrade ?? 0,
+        totalMarks: se.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0),
         submittedAt: updated?.submittedAt,
       });
     }
@@ -972,7 +1021,7 @@ student.get("/exams/:id/events", requireRole("student"), requirePermission("take
   });
 });
 
-student.patch("/exams/:id/notes", requireRole("student"), requirePermission("take_exam"), requireSeb, async (req, res) => {
+student.patch("/exams/:id/notes", requireRole("student"), requirePermission("take_exam"), requireSeb, rateLimit(config.studentRateLimit.answerMax, config.studentRateLimit.answerWindowMs, "student:notes"), async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const { notes } = z.object({ notes: z.string().max(20000) }).parse(req.body);
   const rows = await prisma.$queryRaw<{ id: string }[]>`
@@ -985,7 +1034,7 @@ student.patch("/exams/:id/notes", requireRole("student"), requirePermission("tak
   res.json({ ok: true });
 });
 
-student.patch("/exams/:id/notes-for-doctor", requireRole("student"), requirePermission("take_exam"), requireSeb, async (req, res) => {
+student.patch("/exams/:id/notes-for-doctor", requireRole("student"), requirePermission("take_exam"), requireSeb, rateLimit(config.studentRateLimit.answerMax, config.studentRateLimit.answerWindowMs, "student:doctor-notes"), async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const { notes } = z.object({ notes: z.string().max(20000) }).parse(req.body);
   const rows = await prisma.$queryRaw<{ id: string }[]>`

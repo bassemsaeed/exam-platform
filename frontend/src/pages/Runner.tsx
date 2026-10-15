@@ -24,7 +24,13 @@ import { Feedback, Confirm, PageTitle } from "../components/ui";
 export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity: (path: string | null) => void }) {
   const t = useT();
   const { id } = useParams();
-  const [entryToken] = useState(() => crypto.randomUUID());
+  // Server-issued entry token: persisted per exam so refreshes/resumes present
+  // the latest token the server issued (rotation consumes re-entry budget).
+  const tokenKey = `entry-token-${id}`;
+  const [entryToken, setEntryToken] = useState(() => {
+    try { return sessionStorage.getItem(tokenKey) ?? crypto.randomUUID(); }
+    catch { return crypto.randomUUID(); }
+  });
   const [sitting, setSitting] = useState<Sitting | null>(null);
   const [code, setCode] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
@@ -89,6 +95,10 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
       void invalidateResources(user.id, [
         `/api/v1/student/exams/${id}/readiness`,
       ]);
+      if (s.entryToken) {
+        setEntryToken(s.entryToken);
+        try { sessionStorage.setItem(tokenKey, s.entryToken); } catch { /* memory only */ }
+      }
       setSitting(s);
       onActivity(`/exams/${id}/take`);
       deadline.current = Date.now() + s.remainingSeconds * 1000;
@@ -447,7 +457,7 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
                   !code.trim())
               }
             >
-              {start.isPending ? t("Opening examâ€¦") : t("Start or resume exam")}
+              {start.isPending ? t("Opening exam…") : t("Start or resume exam")}
             </button>
           </form>
           <Link className="back-link" to="/exams">
@@ -537,7 +547,7 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
                 </span>
                 <button
                   className={`secondary ${q.isFlagged ? "flagged" : ""}`}
-                  disabled={flag.isPending}
+                  disabled={flag.isPending || remaining === 0}
                   onClick={() =>
                     flag.mutate({
                       questionId: q.questionId,
@@ -623,7 +633,8 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
               answered < sitting.questions.length ||
               unsaved > 0 ||
               queued > 0 ||
-              finish.isPending
+              finish.isPending ||
+              remaining === 0
             }
             onClick={() => setConfirm(true)}
           >
@@ -634,7 +645,7 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
               "Answer every question before submitting. You cannot change your answers afterward.",
             )}
           </p>
-          {sitting.examToolsEnabled !== false && <ExamTools userId={user.id} examId={id!} sitting={sitting} disabled={remaining === 0 || finish.isPending} />}
+          {(sitting.examToolsEnabled !== false || sitting.notesEnabled || sitting.notesForDoctorEnabled) && <ExamTools userId={user.id} examId={id!} sitting={sitting} disabled={remaining === 0 || finish.isPending} />}
         </aside>
       </div>
       {confirm && (
@@ -651,7 +662,7 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
           onClose={() => setConfirm(false)}
           busy={finish.isPending}
           error={finish.error}
-          onConfirm={() => { if (!queued && !unsaved && answered === sitting.questions.length && !finish.isPending) finish.mutate(); }}
+          onConfirm={() => { if (!queued && !unsaved && answered === sitting.questions.length && !finish.isPending && remaining > 0) finish.mutate(); }}
         />
       )}
     </>

@@ -54,27 +54,31 @@ export function ExamTools({ userId, examId, sitting, disabled }: {
     }, 700);
     return () => clearTimeout(timer);
   }, [doctorNotes, doctorSaved, doctorRetry, sitting.notesForDoctorEnabled, disabled, doctorKey, examId]);
+  // Calculator follows the exam-tools toggle; each notes box follows only its
+  // own flag, so disabling tools never hides an enabled notes box.
+  const calcOn = sitting.examToolsEnabled !== false;
+  if (!calcOn && !sitting.notesEnabled && !sitting.notesForDoctorEnabled) return null;
   return <section className="exam-tools">
     <h3>{t("Exam tools")}</h3>
     <div className="action-row">
-      <button className="secondary" aria-pressed={tool === "calculator"} onClick={() => setTool(tool === "calculator" ? null : "calculator")}>{t("Calculator")}</button>
-      {sitting.notesEnabled && <button className="secondary" aria-pressed={tool === "notes"} onClick={() => setTool(tool === "notes" ? null : "notes")}>{t("Notes")}</button>}
-      {sitting.notesForDoctorEnabled && <button className="secondary" aria-pressed={tool === "doctor-notes"} onClick={() => setTool(tool === "doctor-notes" ? null : "doctor-notes")}>{t("Notes for doctor")}</button>}
+      {calcOn && <button type="button" className="secondary" aria-pressed={tool === "calculator"} onClick={() => setTool(tool === "calculator" ? null : "calculator")}>{t("Calculator")}</button>}
+      {sitting.notesEnabled && <button type="button" className="secondary" aria-pressed={tool === "notes"} onClick={() => setTool(tool === "notes" ? null : "notes")}>{t("Notes")}</button>}
+      {sitting.notesForDoctorEnabled && <button type="button" className="secondary" aria-pressed={tool === "doctor-notes"} onClick={() => setTool(tool === "doctor-notes" ? null : "doctor-notes")}>{t("Notes for doctor")}</button>}
     </div>
-    {tool === "calculator" && <Calculator />}
+    {tool === "calculator" && calcOn && <Calculator />}
     {tool === "notes" && sitting.notesEnabled && <div className="field">
       <label htmlFor="exam-notes">{t("Private scratch notes (not graded)")}</label>
       <textarea id="exam-notes" rows={9} maxLength={20000} disabled={disabled} value={notes} onChange={(e) => setNotes(e.target.value)} />
       <small role="status">{notes === saved ? t("Notes saved") : t("Notes not yet saved")}</small>
       <Feedback error={error} />
-      {error != null && <button onClick={() => setRetry((n) => n + 1)}>{t("Retry saves")}</button>}
+      {error != null && <button type="button" onClick={() => setRetry((n) => n + 1)}>{t("Retry saves")}</button>}
     </div>}
     {tool === "doctor-notes" && sitting.notesForDoctorEnabled && <div className="field">
       <label htmlFor="exam-doctor-notes">{t("Notes for the doctor")}</label>
       <textarea id="exam-doctor-notes" rows={9} maxLength={20000} disabled={disabled} value={doctorNotes} onChange={(e) => setDoctorNotes(e.target.value)} />
       <small role="status">{doctorNotes === doctorSaved ? t("Notes saved") : t("Notes not yet saved")}</small>
       <Feedback error={doctorError} />
-      {doctorError != null && <button onClick={() => setDoctorRetry((n) => n + 1)}>{t("Retry saves")}</button>}
+      {doctorError != null && <button type="button" onClick={() => setDoctorRetry((n) => n + 1)}>{t("Retry saves")}</button>}
     </div>}
   </section>;
 }

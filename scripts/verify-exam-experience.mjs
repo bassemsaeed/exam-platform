@@ -125,10 +125,14 @@ async function bankTest() {
   assert.equal(created,1);assert.equal(patches,1);assert.equal(uploads,2);
   assert.equal(question.subjectId,'subject-test');
   await page.goto(base+'/exams/new',{waitUntil:'domcontentloaded'});
-  await page.getByLabel('Allow student notes').check();
+  // Exact labels: must hit the standalone controls, not substring-match others.
+  await page.getByLabel('Allow student notes',{exact:true}).check();
+  await page.getByLabel('Allow exam tools',{exact:true}).uncheck();
+  await page.getByLabel('Allow exam tools',{exact:true}).check();
   await page.getByLabel('Maximum re-entries (excluding the first entry)').fill('2');
+  assert.equal(await page.getByLabel('Maximum re-entries (excluding the first entry)').inputValue(),'2');
   await page.close();
-  console.log('PASS: subject-first bank, create-time image attachment, upload retry without duplicate, and doctor exam settings. API responses mocked.');
+  console.log('PASS: subject-first bank, create-time image attachment, upload retry without duplicate, and exam settings controls. API responses mocked.');
 }
 try {
   if (!process.env.BANK_ONLY) { await examTest(true); await examTest(false); } await bankTest();
