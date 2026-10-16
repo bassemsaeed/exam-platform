@@ -345,7 +345,24 @@ export function ExamDetail({ user }: { user: SessionUser }) {
   );
   const analytics = useResource<{
     examId: string;
+    assigned: number | null;
+    started: number;
+    absent: number | null;
     submitted: number;
+    inProgress: number;
+    avg: number;
+    median: number;
+    high: number;
+    low: number;
+    passRate: number;
+    passCount: number;
+    autoSubmitted: number;
+    rushSubmits: number;
+    avgMinutesUsed: number;
+    distribution: number[];
+    submitCurve: { t: string; n: number }[];
+    reentry: { single: { n: number; avg: number }; multi: { n: number; avg: number } };
+    sections: { sectionId: string; name: string; n: number; avg: number; passRate: number }[];
     questions: {
       questionId: string;
       text: string;
@@ -353,11 +370,19 @@ export function ExamDetail({ user }: { user: SessionUser }) {
       difficulty: string;
       grade: number;
       attempts: number;
+      answered: number;
+      skipped: number;
       correct: number;
       pctCorrect: number;
+      answerRate: number;
       avgAward: number;
+      flagged: number;
+      voidPassDelta: number;
+      options: { label: string; picks: number }[];
     }[];
+    prevTerm: { termName: string; avg: number; passRate: number; submitted: number } | null;
   }>(user, `/api/v1/exams/${id}/analytics`, tab === "analytics");
+  const [openQ, setOpenQ] = useState<string | null>(null);
   const e = query.data?.exam;
   const canSeeAnalytics = admin || (!!e && e.createdBy === user.id);
   function send(body: Record<string, unknown>) {
@@ -499,7 +524,7 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                     {tabKey === "live"
                       ? t("Live monitor")
                       : tabKey === "analytics"
-                        ? t("Question performance")
+                        ? t("Analytics")
                         : t(label(tabKey))}
                   </button>
                 ),
@@ -646,10 +671,10 @@ export function ExamDetail({ user }: { user: SessionUser }) {
               <section className="panel">
                 <div className="panel-heading">
                   <div>
-                    <h2>{t("Question performance")}</h2>
+                    <h2>{t("Analytics")}</h2>
                     <p>
                       {t(
-                        "How each question behaved across graded attempts. Low bars deserve a second look.",
+                        "Participation, scores, stuck areas, timing and trends — read-only.",
                       )}
                     </p>
                   </div>
@@ -664,35 +689,219 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                 <Feedback error={analytics.error} />
                 {analytics.isPending ? (
                   <Loading />
-                ) : analytics.data?.questions.length ? (
-                  analytics.data.questions.map((q) => (
-                    <div className="question-preview" key={q.questionId}>
-                      <span>
-                        {q.attempts}
-                        {t(" tries")}
-                      </span>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <b>{q.text}</b>
-                        <small>
-                          {t(label(q.type))} · {t(label(q.difficulty))} ·{" "}
-                          {q.grade} {t("marks")} · {t("avg")} {q.avgAward}
-                        </small>
-                        <div
-                          className="run-progress"
-                          role="img"
-                          aria-label={t("{0}% correct", {
-                            "0": q.pctCorrect,
-                          })}
-                        >
-                          <i style={{ width: `${q.pctCorrect}%` }} />
+                ) : analytics.data && analytics.data.submitted ? (
+                  <>
+                    <div className="stat-grid">
+                      <div className="stat-card">
+                        <div>
+                          {t("Participation")}
                         </div>
+                        <strong>
+                          {analytics.data.submitted}
+                          {analytics.data.assigned !== null &&
+                            ` / ${analytics.data.assigned}`}
+                        </strong>
+                        <small>
+                          {analytics.data.started} {t("started")}
+                          {analytics.data.absent !== null &&
+                            ` · ${analytics.data.absent} ${t("absent")}`}
+                          {analytics.data.inProgress > 0 &&
+                            ` · ${analytics.data.inProgress} ${t("taking now")}`}
+                        </small>
                       </div>
-                      <span className="badge">
-                        {q.pctCorrect}
-                        {t("% correct")}
+                      <div className="stat-card">
+                        <div>{t("Average score")}</div>
+                        <strong>{Math.round(analytics.data.avg)}%</strong>
+                        <small>
+                          {t("median")} {Math.round(analytics.data.median)}% ·{" "}
+                          {t("range")} {Math.round(analytics.data.low)}–
+                          {Math.round(analytics.data.high)}%
+                        </small>
+                      </div>
+                      <div className="stat-card">
+                        <div>{t("Pass rate")}</div>
+                        <strong>{Math.round(analytics.data.passRate)}%</strong>
+                        <small>
+                          {analytics.data.passCount} {t("passed")} ·{" "}
+                          {analytics.data.autoSubmitted} {t("auto-submitted")}
+                        </small>
+                      </div>
+                    </div>
+                    <h3 className="analytics-sub">{t("Score distribution")}</h3>
+                    <div
+                      className="dist-bars"
+                      role="img"
+                      aria-label={t("Score distribution")}
+                    >
+                      {analytics.data.distribution.map((n, i) => {
+                        const max = Math.max(1, ...analytics.data!.distribution);
+                        return (
+                          <div className="dist-bar" key={i}>
+                            <span style={{ height: `${(n / max) * 100}%` }} />
+                            <small>
+                              {i * 10}–{i * 10 + 10}
+                            </small>
+                            <b>{n}</b>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    <h3 className="analytics-sub">
+                      {t("Where they are stuck")}
+                    </h3>
+                    <p className="subtle">
+                      {t(
+                        "Worst first. Open a question for answer splits, option heat and void impact.",
+                      )}
+                    </p>
+                    {analytics.data.questions.map((q) => {
+                      const open = openQ === q.questionId;
+                      const maxPick = Math.max(1, ...q.options.map((o) => o.picks));
+                      return (
+                        <div className="analytics-q" key={q.questionId}>
+                          <button
+                            type="button"
+                            className="analytics-qhead"
+                            aria-expanded={open}
+                            onClick={() =>
+                              setOpenQ(open ? null : q.questionId)
+                            }
+                          >
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <b>{q.text}</b>
+                              <small>
+                                {t(label(q.type))} · {t(label(q.difficulty))} ·{" "}
+                                {q.answered}/{q.attempts} {t("answered")}
+                                {q.skipped > 0 &&
+                                  ` · ${q.skipped} ${t("skipped")}`}
+                                {q.flagged > 0 &&
+                                  ` · ${q.flagged} ${t("flagged")}`}
+                              </small>
+                              <div
+                                className="run-progress"
+                                role="img"
+                                aria-label={t("{0}% correct", {
+                                  "0": q.pctCorrect,
+                                })}
+                              >
+                                <i style={{ width: `${q.pctCorrect}%` }} />
+                              </div>
+                            </div>
+                            <span className="badge">
+                              {q.pctCorrect}
+                              {t("% correct")}
+                            </span>
+                          </button>
+                          {open && (
+                            <div className="analytics-qbody">
+                              <div className="heat">
+                                {q.options.map((o) => (
+                                  <div className="heat-row" key={o.label}>
+                                    <span dir="auto">{o.label}</span>
+                                    <span
+                                      className="heat-bar"
+                                      style={{
+                                        width: `${(o.picks / maxPick) * 100}%`,
+                                      }}
+                                    />
+                                    <b>{o.picks}</b>
+                                  </div>
+                                ))}
+                              </div>
+                              <p className="subtle">
+                                {t("Average award")}: {q.avgAward} / {q.grade}
+                                {q.voidPassDelta > 0 &&
+                                  ` · ${t("Voiding moves {0} across the pass line", { "0": q.voidPassDelta })}`}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                    {analytics.data.sections.length > 1 && (
+                      <>
+                        <h3 className="analytics-sub">
+                          {t("Sections compared")}
+                        </h3>
+                        {analytics.data.sections.map((s) => (
+                          <div className="question-preview" key={s.sectionId}>
+                            <span>
+                              {s.n} {t("tries")}
+                            </span>
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <b>{s.name}</b>
+                              <small>
+                                {t("avg")} {Math.round(s.avg)}% ·{" "}
+                                {Math.round(s.passRate)}% {t("passed")}
+                              </small>
+                              <div
+                                className="run-progress"
+                                role="img"
+                                aria-label={s.name}
+                              >
+                                <i style={{ width: `${s.avg}%` }} />
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                    <h3 className="analytics-sub">{t("Timing & retries")}</h3>
+                    <div className="mix-summary">
+                      <span>
+                        {t("Avg time used")}
+                        <b>
+                          {Math.round(analytics.data.avgMinutesUsed)}{" "}
+                          {t("min")}
+                        </b>
+                      </span>
+                      <span>
+                        {t("Rush submits")}
+                        <b>{analytics.data.rushSubmits}</b>
+                      </span>
+                      <span>
+                        {t("One entry")}
+                        <b>
+                          {analytics.data.reentry.single.n} ·{" "}
+                          {Math.round(analytics.data.reentry.single.avg)}%
+                        </b>
+                      </span>
+                      <span>
+                        {t("Re-entered")}
+                        <b>
+                          {analytics.data.reentry.multi.n} ·{" "}
+                          {Math.round(analytics.data.reentry.multi.avg)}%
+                        </b>
                       </span>
                     </div>
-                  ))
+                    <div
+                      className="dist-bars curve"
+                      role="img"
+                      aria-label={t("Submissions over time")}
+                    >
+                      {analytics.data.submitCurve.map((b, i) => {
+                        const max = Math.max(
+                          1,
+                          ...analytics.data!.submitCurve.map((x) => x.n),
+                        );
+                        return (
+                          <div className="dist-bar" key={i} title={String(b.n)}>
+                            <span style={{ height: `${(b.n / max) * 100}%` }} />
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {analytics.data.prevTerm && (
+                      <p className="subtle">
+                        {t("Last term ({0}): avg {1}%, pass {2}% across {3} attempts.", {
+                          "0": analytics.data.prevTerm.termName,
+                          "1": Math.round(analytics.data.prevTerm.avg),
+                          "2": Math.round(analytics.data.prevTerm.passRate),
+                          "3": analytics.data.prevTerm.submitted,
+                        })}
+                      </p>
+                    )}
+                  </>
                 ) : (
                   <Empty
                     title={t("No graded attempts yet")}

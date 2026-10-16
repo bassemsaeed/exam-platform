@@ -488,13 +488,24 @@ exams.post("/:id/release", async (req, res) => {
   res.json({ ok: true, resultsReleased: row.resultsReleased });
 });
 
-// GET /exams/:id/analytics — per-question performance for the author:
-// attempts, correct answers, % correct, average award. Same visibility as
-// results (creators + permitted staff); correct answers never leave the server.
+// GET /exams/:id/analytics — full exam intelligence for the author: hero
+// aggregates, score distribution, per-question answer/skip/correct splits
+// with option heatmaps and void impact, section comparison, submit timing,
+// re-entry split, previous-term memory, and assigned-vs-absent counts.
+// Same visibility as results (creators + permitted staff); correct answers
+// and per-student rows never leave the server — only aggregates.
 exams.get("/:id/analytics", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   if (a.role === "student") return res.status(403).json({ error: "forbidden" });
-  const exam = await prisma.exam.findUnique({ where: { id: String(req.params.id) }, select: { id: true, subjectId: true, termId: true, createdBy: true } });
+  const exam = await prisma.exam.findUnique({
+    where: { id: String(req.params.id) },
+    select: {
+      id: true, subjectId: true, termId: true, createdBy: true, type: true,
+      startTime: true, endTime: true, durationMinutes: true, targetScope: true,
+      targetSections: { select: { sectionId: true } },
+      targetStudents: { select: { studentId: true } },
+    },
+  });
   if (!exam) return res.status(404).json({ error: "not found" });
   if (a.role !== "admin" && exam.createdBy !== a.userId) {
     if (a.role === "doctor") {
@@ -509,40 +520,244 @@ exams.get("/:id/analytics", async (req, res) => {
   if (a.role === "ta" && exam.createdBy === a.userId && !(await hasPermission(a.userId, a.role, "view_own_grades"))) {
     return res.status(403).json({ error: "forbidden", need: "view_own_grades" });
   }
-  const rows = await prisma.studentExamQuestion.findMany({
-    where: { studentExam: { examId: exam.id, status: { in: ["submitted", "auto_submitted"] } } },
-    select: {
-      questionId: true,
-      selectedAnswer: true,
-      gradeAwarded: true,
-      question: { select: { text: true, questionType: true, difficulty: true, grade: true, correctAnswer: true } },
-    },
-  });
-  const byQ = new Map<string, { text: string; type: string; difficulty: string; grade: number; attempts: number; correct: number; awardSum: number }>();
-  for (const r of rows) {
-    let g = byQ.get(r.questionId);
-    if (!g) {
-      g = { text: r.question.text, type: r.question.questionType, difficulty: r.question.difficulty, grade: Number(r.question.grade ?? 0), attempts: 0, correct: 0, awardSum: 0 };
-      byQ.set(r.questionId, g);
-    }
-    g.attempts++;
-    if (r.selectedAnswer !== null && r.selectedAnswer === r.question.correctAnswer) g.correct++;
-    g.awardSum += Number(r.gradeAwarded ?? 0);
+
+  const PASS = 60;
+  const [sittings, memberships, sections] = await Promise.all([
+    prisma.studentExam.findMany({
+      where: { examId: exam.id },
+      select: {
+        id: true, studentId: true, status: true, startedAt: true, submittedAt: true,
+        totalGrade: true, entryTokens: true,
+        questions: {
+          select: {
+            questionId: true, selectedAnswer: true, gradeAwarded: true, isFlagged: true,
+            question: { select: { text: true, questionType: true, difficulty: true, grade: true, correctAnswer: true, options: true } },
+          },
+        },
+      },
+    }),
+    prisma.sectionMembership.findMany({
+      where: { section: { subjectId: exam.subjectId, termId: exam.termId } },
+      select: { studentId: true, sectionId: true },
+    }),
+    prisma.section.findMany({
+      where: { subjectId: exam.subjectId, termId: exam.termId },
+      select: { id: true, name: true },
+    }),
+  ]);
+  const graded = sittings.filter((s) => s.status === "submitted" || s.status === "auto_submitted");
+  const sectionOf = new Map<string, string>();
+  for (const m of memberships) if (!sectionOf.has(m.studentId)) sectionOf.set(m.studentId, m.sectionId);
+  const sectionName = new Map(sections.map((s) => [s.id, s.name]));
+  const pctOf = (s: (typeof graded)[number]): number | null => {
+    const total = s.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0);
+    if (!total) return null;
+    return (Number(s.totalGrade ?? 0) / total) * 100;
+  };
+
+  // Assigned vs started vs absent.
+  let assigned: number | null = null;
+  if (exam.targetScope === "student_list") assigned = exam.targetStudents.length;
+  else if (exam.targetScope === "sections") {
+    const ids = exam.targetSections.map((t) => t.sectionId);
+    assigned = await prisma.sectionMembership.count({ where: { sectionId: { in: ids } } });
+  } else {
+    assigned = await prisma.enrollment.count({ where: { subjectId: exam.subjectId, termId: exam.termId } });
   }
-  const questions = [...byQ].map(([questionId, g]) => ({
-    questionId,
-    text: g.text,
-    type: g.type,
-    difficulty: g.difficulty,
-    grade: g.grade,
-    attempts: g.attempts,
-    correct: g.correct,
-    pctCorrect: g.attempts ? Math.round((g.correct / g.attempts) * 100) : 0,
-    avgAward: g.attempts ? Number((g.awardSum / g.attempts).toFixed(2)) : 0,
-  })).sort((x, y) => x.pctCorrect - y.pctCorrect);
-  const submitted = await prisma.studentExam.count({ where: { examId: exam.id, status: { in: ["submitted", "auto_submitted"] } } });
-  await audit(a.userId, "exam.analytics", "exam", exam.id, { submitted });
-  res.json({ examId: exam.id, submitted, questions });
+  const startedIds = new Set(sittings.map((s) => s.studentId));
+
+  // Hero aggregates over graded sittings.
+  const pcts = graded.map(pctOf).filter((p): p is number => p !== null);
+  const avg = pcts.length ? pcts.reduce((x, y) => x + y, 0) / pcts.length : 0;
+  const sorted = [...pcts].sort((x, y) => x - y);
+  const median = sorted.length ? sorted[Math.floor((sorted.length - 1) / 2)] : 0;
+  const passCount = pcts.filter((p) => p >= PASS).length;
+  const autoSubmitted = graded.filter((s) => s.status === "auto_submitted").length;
+  let usedSum = 0, usedN = 0, rushSubmits = 0;
+  for (const s of graded) {
+    if (s.startedAt && s.submittedAt) {
+      const mins = (s.submittedAt.getTime() - s.startedAt.getTime()) / 60000;
+      usedSum += mins; usedN++;
+      if (mins < exam.durationMinutes * 0.25) rushSubmits++;
+    }
+  }
+  const distribution = Array.from({ length: 10 }, () => 0);
+  for (const p of pcts) distribution[Math.min(9, Math.floor(p / 10))]++;
+
+  // Submit curve: 12 buckets across the window.
+  const submitCurve: { t: string; n: number }[] = [];
+  {
+    const span = exam.endTime.getTime() - exam.startTime.getTime();
+    const buckets = Array.from({ length: 12 }, () => 0);
+    for (const s of graded) {
+      if (!s.submittedAt) continue;
+      const idx = Math.min(11, Math.max(0, Math.floor(((s.submittedAt.getTime() - exam.startTime.getTime()) / span) * 12)));
+      buckets[idx]++;
+    }
+    buckets.forEach((n, i) => {
+      submitCurve.push({ t: new Date(exam.startTime.getTime() + (span * (i + 1)) / 12).toISOString(), n });
+    });
+  }
+
+  // Re-entry split: one token vs several.
+  const single = graded.filter((s) => s.entryTokens.length <= 1);
+  const multi = graded.filter((s) => s.entryTokens.length > 1);
+  const avgPct = (rows: typeof graded): number => {
+    const ps = rows.map(pctOf).filter((p): p is number => p !== null);
+    return ps.length ? ps.reduce((x, y) => x + y, 0) / ps.length : 0;
+  };
+
+  // Section comparison.
+  const secAgg = new Map<string, number[]>();
+  for (const s of graded) {
+    const p = pctOf(s);
+    if (p === null) continue;
+    const sec = sectionOf.get(s.studentId);
+    if (!sec) continue;
+    const arr = secAgg.get(sec) ?? [];
+    arr.push(p);
+    secAgg.set(sec, arr);
+  }
+  const sectionRows = [...secAgg].map(([sectionId, ps]) => ({
+    sectionId,
+    name: sectionName.get(sectionId) ?? "?",
+    n: ps.length,
+    avg: ps.reduce((x, y) => x + y, 0) / ps.length,
+    passRate: (ps.filter((p) => p >= PASS).length / ps.length) * 100,
+  })).sort((x, y) => y.avg - x.avg);
+
+  // Per-question deep stats + option heatmap + void impact.
+  type QAgg = {
+    text: string; type: string; difficulty: string; grade: number;
+    attempts: number; answered: number; correct: number; awardSum: number; flagged: number;
+    picks: Map<string, number>;
+  };
+  const byQ = new Map<string, QAgg>();
+  for (const s of graded) {
+    for (const r of s.questions) {
+      let g = byQ.get(r.questionId);
+      if (!g) {
+        g = {
+          text: r.question.text, type: r.question.questionType, difficulty: r.question.difficulty,
+          grade: Number(r.question.grade ?? 0), attempts: 0, answered: 0, correct: 0, awardSum: 0, flagged: 0,
+          picks: new Map(),
+        };
+        byQ.set(r.questionId, g);
+      }
+      g.attempts++;
+      if (r.selectedAnswer !== null && r.selectedAnswer !== "") {
+        g.answered++;
+        g.picks.set(r.selectedAnswer, (g.picks.get(r.selectedAnswer) ?? 0) + 1);
+        if (r.selectedAnswer === r.question.correctAnswer) g.correct++;
+      }
+      g.awardSum += Number(r.gradeAwarded ?? 0);
+      if (r.isFlagged) g.flagged++;
+    }
+  }
+  // Void impact: passers if everyone got full marks on this question.
+  const passNow = new Set(
+    graded.filter((s) => (pctOf(s) ?? 0) >= PASS).map((s) => s.id),
+  );
+  const voidDelta = new Map<string, number>();
+  for (const [qid, g] of byQ) {
+    if (!g.grade) { voidDelta.set(qid, 0); continue; }
+    let now = 0;
+    for (const s of graded) {
+      const row = s.questions.find((q) => q.questionId === qid);
+      const total = s.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0);
+      if (!total) continue;
+      const lifted = (Number(s.totalGrade ?? 0) - Number(row?.gradeAwarded ?? 0) + g.grade) / total * 100;
+      if (lifted >= PASS && !passNow.has(s.id)) now++;
+    }
+    voidDelta.set(qid, now);
+  }
+  const questions = [...byQ].map(([questionId, g]) => {
+    const labels = new Set<string>();
+    for (const s of graded) {
+      const row = s.questions.find((q) => q.questionId === questionId);
+      const opts = row?.question.options;
+      if (Array.isArray(opts)) for (const o of opts) labels.add(String(o));
+    }
+    for (const k of g.picks.keys()) labels.add(k);
+    return {
+      questionId,
+      text: g.text,
+      type: g.type,
+      difficulty: g.difficulty,
+      grade: g.grade,
+      attempts: g.attempts,
+      answered: g.answered,
+      skipped: g.attempts - g.answered,
+      correct: g.correct,
+      pctCorrect: g.attempts ? Math.round((g.correct / g.attempts) * 100) : 0,
+      answerRate: g.attempts ? Math.round((g.answered / g.attempts) * 100) : 0,
+      avgAward: g.attempts ? Number((g.awardSum / g.attempts).toFixed(2)) : 0,
+      flagged: g.flagged,
+      voidPassDelta: voidDelta.get(questionId) ?? 0,
+      options: [...labels].map((label) => ({ label, picks: g.picks.get(label) ?? 0 })),
+    };
+  }).sort((x, y) => x.pctCorrect - y.pctCorrect);
+
+  // Previous-term memory: same subject, latest other term with submissions.
+  let prevTerm: { termName: string; avg: number; passRate: number; submitted: number } | null = null;
+  {
+    const terms = await prisma.term.findMany({
+      where: { id: { not: exam.termId } },
+      select: { id: true, name: true, endsOn: true },
+      orderBy: { endsOn: "desc" },
+    });
+    for (const t of terms) {
+      const prev = await prisma.studentExam.findMany({
+        where: { exam: { subjectId: exam.subjectId, termId: t.id }, status: { in: ["submitted", "auto_submitted"] } },
+        select: {
+          totalGrade: true,
+          questions: { select: { gradeAwarded: true, question: { select: { grade: true } } } },
+        },
+        take: 5000,
+      });
+      if (!prev.length) continue;
+      const ps: number[] = [];
+      for (const s of prev) {
+        const total = s.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0);
+        if (total) ps.push((Number(s.totalGrade ?? 0) / total) * 100);
+      }
+      if (!ps.length) continue;
+      prevTerm = {
+        termName: t.name,
+        avg: ps.reduce((x, y) => x + y, 0) / ps.length,
+        passRate: (ps.filter((p) => p >= PASS).length / ps.length) * 100,
+        submitted: prev.length,
+      };
+      break;
+    }
+  }
+
+  await audit(a.userId, "exam.analytics", "exam", exam.id, { submitted: graded.length });
+  res.json({
+    examId: exam.id,
+    assigned,
+    started: startedIds.size,
+    absent: assigned === null ? null : Math.max(0, assigned - startedIds.size),
+    submitted: graded.length,
+    inProgress: sittings.filter((s) => s.status === "in_progress").length,
+    avg, median,
+    high: sorted.length ? sorted[sorted.length - 1] : 0,
+    low: sorted.length ? sorted[0] : 0,
+    passRate: pcts.length ? (passCount / pcts.length) * 100 : 0,
+    passCount,
+    autoSubmitted,
+    rushSubmits,
+    avgMinutesUsed: usedN ? usedSum / usedN : 0,
+    distribution,
+    submitCurve,
+    reentry: {
+      single: { n: single.length, avg: avgPct(single) },
+      multi: { n: multi.length, avg: avgPct(multi) },
+    },
+    sections: sectionRows,
+    questions,
+    prevTerm,
+  });
 });
 
 // GET /exams/:id/results — doctor: all groups w/ TA names; TA: own groups only.

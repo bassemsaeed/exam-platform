@@ -3508,3 +3508,160 @@ input[type="datetime-local"],
   border: 1px solid #2a3e4e;
   border-radius: 9px;
 }
+
+/* Analytics dashboard: hero cards reuse .stat-grid; bars and heat are pure CSS. */
+.analytics-sub {
+  font-size: 13px;
+  color: #33566e;
+  margin: 26px 0 12px;
+  font-weight: 600;
+}
+.dist-bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 16px 4px 4px;
+  border: 1px solid #e5edf4;
+  border-radius: 9px;
+  background: #fbfdff;
+  min-height: 150px;
+}
+.dist-bars.curve {
+  min-height: 90px;
+}
+.dist-bar {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+  height: 130px;
+}
+.dist-bars.curve .dist-bar {
+  height: 70px;
+}
+.dist-bar span {
+  width: 100%;
+  max-width: 44px;
+  min-height: 3px;
+  border-radius: 4px 4px 0 0;
+  background: linear-gradient(180deg, #2f86b8, #0a4d7b);
+}
+.dist-bar small {
+  font-size: 8px;
+  color: #99aebb;
+}
+.dist-bar b {
+  font-size: 10px;
+  color: #33566e;
+}
+.analytics-q {
+  border: 1px solid #e4edf3;
+  border-radius: 9px;
+  margin-bottom: 8px;
+  overflow: hidden;
+  background: #fff;
+}
+.analytics-qhead {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  background: none;
+  text-align: left;
+  padding: 14px 16px;
+  color: #41647c;
+  cursor: pointer;
+}
+.analytics-qhead:hover {
+  background: #f6f9fc;
+}
+.analytics-qhead b {
+  display: block;
+  font-size: 12px;
+  font-weight: 550;
+  color: #33566e;
+  line-height: 1.6;
+}
+.analytics-qhead small {
+  display: block;
+  font-size: 10px;
+  color: #8ba0af;
+  margin: 4px 0 8px;
+}
+.analytics-qbody {
+  border-top: 1px solid #eaf0f5;
+  padding: 14px 16px;
+  background: #fbfdff;
+}
+.heat {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.heat-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas: "label count" "bar bar";
+  gap: 2px 10px;
+  align-items: center;
+  font-size: 11px;
+  color: #41647c;
+}
+.heat-row > span:first-child {
+  grid-area: label;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.heat-row > b {
+  grid-area: count;
+  color: #33566e;
+}
+.heat-bar {
+  grid-area: bar;
+  display: block;
+  height: 8px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #7cc0ec, #0a4d7b);
+  min-width: 3px;
+}
+[data-theme="dark"] .analytics-sub {
+  color: #e0edf6;
+}
+[data-theme="dark"] :is(.dist-bars, .analytics-q) {
+  background: #10202c;
+  border-color: #2a3e4e;
+}
+[data-theme="dark"] .analytics-qhead {
+  color: #c3d7e5;
+}
+[data-theme="dark"] .analytics-qhead:hover {
+  background: #1e394b;
+}
+[data-theme="dark"] .analytics-qhead b {
+  color: #e0edf6;
+}
+[data-theme="dark"] .analytics-qhead small {
+  color: #a5bac9;
+}
+[data-theme="dark"] .analytics-qbody {
+  background: #0d1822;
+  border-color: #2a3e4e;
+}
+[data-theme="dark"] .heat-row {
+  color: #c3d7e5;
+}
+[data-theme="dark"] .heat-row > b {
+  color: #e0edf6;
+}
+[data-theme="dark"] .dist-bar small {
+  color: #8099aa;
+}
+[data-theme="dark"] .dist-bar b {
+  color: #c3d7e5;
+}
