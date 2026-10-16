@@ -44,13 +44,24 @@ adminColleges.get("/", async (req, res) => {
     }),
   ]);
   const ids = rows.map((r) => r.id);
-  const [students, doctors] = await Promise.all([
+  const [students, doctors, deptRows] = await Promise.all([
     prisma.user.groupBy({ by: ["collegeId"], where: { collegeId: { in: ids }, role: "student" }, _count: true }),
     prisma.user.groupBy({ by: ["collegeId"], where: { collegeId: { in: ids }, role: "doctor" }, _count: true }),
+    prisma.department.findMany({ where: { collegeId: { in: ids } }, select: { id: true, collegeId: true } }),
   ]);
+  const subjByCollege = new Map<string, number>();
+  if (deptRows.length) {
+    const deptIds = deptRows.map((d) => d.id);
+    const collegeOfDept = new Map(deptRows.map((d) => [d.id, d.collegeId as string]));
+    const subjGroups = await prisma.subject.groupBy({ by: ["departmentId"], where: { departmentId: { in: deptIds } }, _count: true });
+    for (const g of subjGroups) {
+      const cid = collegeOfDept.get(g.departmentId as string);
+      if (cid) subjByCollege.set(cid, (subjByCollege.get(cid) ?? 0) + g._count);
+    }
+  }
   const sBy = new Map(students.map((g) => [g.collegeId, g._count]));
   const dBy = new Map(doctors.map((g) => [g.collegeId, g._count]));
-  res.json(envelope(total, q, rows.map((r) => ({ id: r.id, code: r.code, name: r.name, createdAt: r.createdAt, departments: r._count.departments, students: sBy.get(r.id) ?? 0, doctors: dBy.get(r.id) ?? 0 }))));
+  res.json(envelope(total, q, rows.map((r) => ({ id: r.id, code: r.code, name: r.name, createdAt: r.createdAt, departments: r._count.departments, subjects: subjByCollege.get(r.id) ?? 0, students: sBy.get(r.id) ?? 0, doctors: dBy.get(r.id) ?? 0 }))));
 });
 
 adminColleges.post("/", async (req, res) => {
@@ -92,7 +103,7 @@ adminColleges.get("/students/search", async (req, res) => {
   res.json(rows);
 });
 
-// GET /api/v1/admin/colleges/:id — info, counts, departments, years present.
+// GET /api/v1/admin/colleges/:id — info, counts, departments, subjects, years present.
 adminColleges.get("/:id", async (req, res) => {
   const row = await prisma.college.findUnique({
     where: { id: String(req.params.id) },
@@ -101,16 +112,30 @@ adminColleges.get("/:id", async (req, res) => {
     },
   });
   if (!row) return res.status(404).json({ error: "not found" });
-  const [students, doctors, years] = await Promise.all([
+  const [students, doctors, years, subjectTotal, subjects] = await Promise.all([
     prisma.user.count({ where: { collegeId: row.id, role: "student" } }),
     prisma.user.count({ where: { collegeId: row.id, role: "doctor" } }),
     prisma.user.groupBy({ by: ["academicYear"], where: { collegeId: row.id, role: "student", academicYear: { not: null } }, _count: true, orderBy: { academicYear: "asc" } }),
+    prisma.subject.count({ where: { department: { collegeId: row.id } } }),
+    prisma.subject.findMany({
+      where: { department: { collegeId: row.id } },
+      select: {
+        id: true, code: true, name: true,
+        department: { select: { id: true, name: true } },
+        _count: { select: { questions: true, exams: true, enrollments: true } },
+      },
+      orderBy: { code: "asc" },
+      take: 200,
+    }),
   ]);
   res.json({
     ...row,
     students,
     doctors,
     years: years.map((g) => ({ year: g.academicYear, students: g._count })),
+    subjects,
+    subjectTotal,
+    subjectsTruncated: subjectTotal > subjects.length,
   });
 });
 

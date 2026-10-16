@@ -1062,4 +1062,12 @@ export const arabic: Record<string, string> = {
   Unlink: "فك الارتباط",
   "Target year": "السنة المستهدفة",
   "Showing {0} of {1}.": "عرض {0} من {1}.",
+
+  subjects: "المقررات",
+  exams: "امتحانات",
+  "Open subject": "فتح المقرر",
+  "Subjects in this college's departments.": "مقررات أقسام هذه الكلية.",
+  "No subjects yet": "لا توجد مقررات بعد",
+  "This college's departments have no subjects yet.": "لا توجد مقررات في أقسام هذه الكلية بعد.",
+  "Departments in this college, with their subjects.": "أقسام هذه الكلية وموادها.",
 };

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { Building2, Users } from "lucide-react";
+import { BookOpen, Building2, Users } from "lucide-react";
 import { useT } from "../lib/i18n";
 import {
   useResource,
@@ -24,16 +24,39 @@ import {
 } from "../components/ui";
 import { Combo } from "../components/builder";
 
+interface CollegeDeptInfo {
+  id: string;
+  code: string;
+  name: string;
+  _count?: { users: number; subjects: number };
+}
+
 interface College extends Entity {
   code: string;
   name: string;
   students?: number;
   doctors?: number;
-  departments?: { id: string; code: string; name: string }[] | number;
+  subjects?: number;
+  departments?: CollegeDeptInfo[] | number;
 }
 
-interface CollegeDetail extends College {
+interface CollegeSubject extends Entity {
+  code: string;
+  name: string;
+  department?: { id: string; name: string } | null;
+  _count?: { questions: number; exams: number; enrollments: number };
+}
+
+interface CollegeDetail extends Entity {
+  code: string;
+  name: string;
+  students?: number;
+  doctors?: number;
+  departments?: CollegeDeptInfo[] | number;
   years: { year: number | null; students: number }[];
+  subjects?: CollegeSubject[];
+  subjectTotal?: number;
+  subjectsTruncated?: boolean;
 }
 
 interface CollegeStudent extends Entity {
@@ -141,7 +164,7 @@ export function Colleges({ user }: { user: SessionUser }) {
                 {c.students ?? 0} {t("students")} · {c.doctors ?? 0}{" "}
                 {t("doctors")} ·{" "}
                 {typeof c.departments === "number" ? c.departments : 0}{" "}
-                {t("departments")}
+                {t("departments")} · {c.subjects ?? 0} {t("subjects")}
               </p>
               <Link className="exam-card-action" to={`/colleges/${c.id}`}>
                 {t("Open college")}
@@ -312,29 +335,119 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                 />
               )}
             </section>
+            <section className="panel">
+              <div className="panel-heading">
+                <div>
+                  <h2>
+                    {t("Subjects")}
+                    {typeof c.subjectTotal === "number" && ` · ${c.subjectTotal}`}
+                  </h2>
+                  <p>{t("Subjects in this college's departments.")}</p>
+                </div>
+              </div>
+              {c.subjects?.length ? (
+                <>
+                  <div className="exam-grid">
+                    {c.subjects.map((s) => (
+                      <article className="exam-card" key={s.id}>
+                        <div className="exam-card-top">
+                          <span className="assessment-icon">
+                            <BookOpen size={18} />
+                          </span>
+                        </div>
+                        <small className="course-code">{s.code}</small>
+                        <h2>{s.name}</h2>
+                        <p>
+                          {s.department?.name ?? "—"} ·{" "}
+                          {s._count?.questions ?? 0} {t("questions")} ·{" "}
+                          {s._count?.exams ?? 0} {t("exams")} ·{" "}
+                          {s._count?.enrollments ?? 0} {t("enrolled")}
+                        </p>
+                        <Link
+                          className="exam-card-action"
+                          to={`/admin/subjects?search=${encodeURIComponent(s.code)}`}
+                        >
+                          {t("Open subject")}
+                        </Link>
+                      </article>
+                    ))}
+                  </div>
+                  {c.subjectsTruncated && (
+                    <p className="subtle">
+                      {t("Showing {0} of {1}.", {
+                        "0": c.subjects.length,
+                        "1": c.subjectTotal ?? c.subjects.length,
+                      })}
+                    </p>
+                  )}
+                </>
+              ) : (
+                <Empty
+                  title={t("No subjects yet")}
+                  text={t("This college's departments have no subjects yet.")}
+                />
+              )}
+            </section>
             {Array.isArray(c.departments) && c.departments.length > 0 && (
               <section className="panel">
                 <div className="panel-heading">
                   <div>
                     <h2>{t("Departments")}</h2>
+                    <p>{t("Departments in this college, with their subjects.")}</p>
                   </div>
                 </div>
-                {c.departments.map((d) => (
-                  <div className="session-row" key={d.id}>
-                    <div>
-                      <b>{d.name}</b> <small>{d.code}</small>
-                    </div>
-                    <button
-                      className="text-button"
-                      onClick={() => {
-                        setDeptTarget(d.id);
-                        setOp("dept");
-                      }}
-                    >
-                      {t(" Unlink ")}
-                    </button>
-                  </div>
-                ))}
+                <div className="exam-grid">
+                  {c.departments.map((d) => {
+                    const owned = (c.subjects ?? []).filter(
+                      (s) => s.department?.id === d.id,
+                    );
+                    return (
+                      <article className="exam-card" key={d.id}>
+                        <div className="exam-card-top">
+                          <span className="assessment-icon">
+                            <Building2 size={18} />
+                          </span>
+                        </div>
+                        <small className="course-code">{d.code}</small>
+                        <h2>{d.name}</h2>
+                        <p>
+                          {d._count?.users ?? 0} {t("users")} ·{" "}
+                          {d._count?.subjects ?? owned.length}{" "}
+                          {t("subjects")}
+                        </p>
+                        {owned.length > 0 && (
+                          <div className="option-chips">
+                            {owned.map((s) => (
+                              <span key={s.id} title={s.name}>
+                                {s.code}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        <div className="exam-card-action">
+                          <span className="subtle">
+                            {typeof d._count?.subjects === "number" &&
+                            d._count.subjects > owned.length
+                              ? t("Showing {0} of {1}.", {
+                                  "0": owned.length,
+                                  "1": d._count.subjects,
+                                })
+                              : ""}
+                          </span>
+                          <button
+                            className="text-button"
+                            onClick={() => {
+                              setDeptTarget(d.id);
+                              setOp("dept");
+                            }}
+                          >
+                            {t(" Unlink ")}
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
               </section>
             )}
             <section className="panel table-wrap">
