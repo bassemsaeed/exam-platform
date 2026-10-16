@@ -198,7 +198,7 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
-  const [newYear, setNewYear] = useState(1);
+  const [moveYear, setMoveYear] = useState<number | null>(null);
   const [op, setOp] = useState<"edit" | "merge" | "delete" | "dept" | null>(null);
   const [deptTarget, setDeptTarget] = useState("");
   const students = useResource<Envelope<CollegeStudent>>(
@@ -344,34 +344,39 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                       })}
                   </p>
                 </div>
-                <div className="action-row">
-                  <label className="subtle" htmlFor="bulk-year">
-                    {t("Set selected to year:")}
-                  </label>
-                  <select
-                    id="bulk-year"
-                    aria-label={t("Set year")}
-                    value={newYear}
-                    onChange={(e) => setNewYear(Number(e.target.value))}
-                  >
+              </div>
+              {selected.length > 0 && (
+                <div className="bulk-toolbar" role="group" aria-label={t("Move selected students")}>
+                  <b>
+                    {t("{0} selected", { "0": selected.length })}
+                  </b>
+                  <span className="subtle">{t("Move to year:")}</span>
+                  <div className="seg-pick" role="group" aria-label={t("Target year")}>
                     {[1, 2, 3, 4, 5, 6, 7].map((y) => (
-                      <option key={y} value={y}>
-                        {t("Year")} {y}
-                      </option>
+                      <button
+                        key={y}
+                        type="button"
+                        className={moveYear === y ? "on" : ""}
+                        aria-pressed={moveYear === y}
+                        onClick={() => setMoveYear(y)}
+                      >
+                        {y}
+                      </button>
                     ))}
-                  </select>
+                  </div>
                   <button
-                    className="secondary"
-                    disabled={!selected.length || action.isPending}
+                    className="primary"
+                    disabled={moveYear === null || action.isPending}
                     onClick={() =>
                       action.mutate(
                         {
                           path: `/api/v1/admin/colleges/${id}/students/year`,
-                          body: { studentIds: selected, year: newYear },
+                          body: { studentIds: selected, year: moveYear },
                         },
                         {
                           onSuccess: () => {
                             setSelected([]);
+                            setMoveYear(null);
                             students.refetch();
                             query.refetch();
                           },
@@ -379,10 +384,19 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                       )
                     }
                   >
-                    {t(" Set year ({0}) ", { "0": selected.length })}
+                    {action.isPending ? t("Moving…") : t(" Move ")}
+                  </button>
+                  <button
+                    className="text-button"
+                    onClick={() => {
+                      setSelected([]);
+                      setMoveYear(null);
+                    }}
+                  >
+                    {t(" Clear ")}
                   </button>
                 </div>
-              </div>
+              )}
               <div className="toolbar">
                 <SearchBox
                   value={search}
