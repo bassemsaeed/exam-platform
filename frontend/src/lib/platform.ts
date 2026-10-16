@@ -21,6 +21,7 @@ export interface Exam extends Entity {
   createdBy?: string;
   title?: string;
   purpose?: string;
+  sebRequired?: boolean;
   notesEnabled?: boolean;
   notesForDoctorEnabled?: boolean;
   examToolsEnabled?: boolean;

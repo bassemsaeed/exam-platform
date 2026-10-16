@@ -21,6 +21,7 @@ export interface ReadinessData {
   maxReentries?: number;
   entriesUsed?: number;
   resultsReleased?: boolean;
+  sebRequired?: boolean;
   startTime: string;
   endTime: string;
   requiresCode: boolean;
@@ -94,17 +95,21 @@ export function ReadinessChecklist({
     },
     {
       name: "Exam browser",
-      detail: !online
-        ? "Offline"
-        : query.isPending
-          ? "Verifying with server…"
-          : "Normal browser accepted — no locked browser required",
+      detail: !data
+        ? "Waiting for server…"
+        : !data.sebRequired
+          ? "Normal browser accepted for this quiz"
+          : data.sebVerified || previewMode
+            ? "Locked browser verified by server"
+            : "Open this exam in Safe Exam Browser",
       state:
         !online || (!data && !query.isPending)
           ? "fail"
-          : data?.sebVerified || previewMode
-            ? "pass"
-            : "wait",
+          : !data
+            ? "wait"
+            : !data.sebRequired || data.sebVerified || previewMode
+              ? "pass"
+              : "wait",
       Icon: ShieldCheck,
     },
     {

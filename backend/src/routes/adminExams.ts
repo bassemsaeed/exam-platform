@@ -40,6 +40,7 @@ adminExams.get("/", async (req, res) => {
         difficultyMix: true,
         title: true,
         purpose: true,
+        sebRequired: true,
         notesEnabled: true,
         notesForDoctorEnabled: true,
         examToolsEnabled: true,
@@ -222,7 +223,7 @@ adminExams.post("/:id/reject", async (req, res) => {
 // keeps serving manualQuestionIds). Convert via delete+recreate instead.
 adminExams.patch("/:id", async (req, res) => {
   const body = z
-    .object({ title: z.string().trim().min(1).max(120).optional(), purpose: z.enum(["midterm", "quiz"]).optional(), notesEnabled: z.boolean().optional(), notesForDoctorEnabled: z.boolean().optional(), examToolsEnabled: z.boolean().optional(), maxReentries: z.number().int().min(0).max(20).optional(), resultsReleased: z.boolean().optional(), startTime: z.string().datetime().optional(), endTime: z.string().datetime().optional(), durationMinutes: z.number().int().positive().optional(), difficultyMix: z.record(z.string(), z.number()).optional() })
+    .object({ title: z.string().trim().min(1).max(120).optional(), purpose: z.enum(["midterm", "quiz"]).optional(), notesEnabled: z.boolean().optional(), notesForDoctorEnabled: z.boolean().optional(), examToolsEnabled: z.boolean().optional(), maxReentries: z.number().int().min(0).max(20).optional(), resultsReleased: z.boolean().optional(), sebRequired: z.boolean().optional(), startTime: z.string().datetime().optional(), endTime: z.string().datetime().optional(), durationMinutes: z.number().int().positive().optional(), difficultyMix: z.record(z.string(), z.number()).optional() })
     .parse(req.body);
   const g = await guardEditable(req.params.id);
   if ("error" in g)

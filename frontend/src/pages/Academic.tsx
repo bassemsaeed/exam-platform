@@ -1104,6 +1104,7 @@ export function ExamDetail({ user }: { user: SessionUser }) {
               durationMinutes={e.durationMinutes}
               title={e.title}
               purpose={e.purpose}
+              sebRequired={e.sebRequired}
               canMidterm={admin || user.role === "doctor"}
               notesEnabled={e.notesEnabled}
               notesForDoctorEnabled={e.notesForDoctorEnabled}

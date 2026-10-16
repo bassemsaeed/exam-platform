@@ -15,7 +15,7 @@ import { Prisma } from "../generated/prisma/client.js";
 import { requireAuth, requirePermission, requireRole, type AuthedRequest } from "../middleware/auth.js";
 import { idempotency } from "../middleware/idempotency.js";
 import { rateLimit } from "../middleware/rateLimit.js";
-import { requireSeb } from "../middleware/seb.js";
+import { hasValidSebHeader, requireSebForExam } from "../middleware/seb.js";
 import { shuffled } from "../lib/shuffle.js";
 
 // Per-student display order: questions and MCQ options are shuffled with a
@@ -114,7 +114,7 @@ student.post("/change-password", async (req, res) => {
 });
 
 // GET /api/v1/student/exams â€” enrolled + in-window + section match (current term).
-student.get("/exams", requireSeb, async (req, res) => {
+student.get("/exams", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const term = await prisma.term.findFirst({ where: { isCurrent: true }, select: { id: true } });
   if (!term) return res.json([]);
@@ -151,7 +151,7 @@ student.get("/exams", requireSeb, async (req, res) => {
 // GET /student/exams/upcoming â€” approved, eligible, but the window hasn't
 // opened yet. Same gates as the live list (minus the open-window filter) so
 // the bell's "Upcoming exam" always has a matching card somewhere.
-student.get("/exams/upcoming", requireSeb, async (req, res) => {
+student.get("/exams/upcoming", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const term = await prisma.term.findFirst({ where: { isCurrent: true }, select: { id: true } });
   if (!term) return res.json([]);
@@ -322,12 +322,13 @@ async function examEligibility(
   return null;
 }
 
-// Read-only preflight using the same identity, permission, SEB and targeting gates as starting.
+// Read-only preflight using the same identity, permission and targeting
+// gates as starting. Deliberately NOT header-gated: students in a normal
+// browser must still reach it to learn an exam needs SEB (sebRequired).
 student.get(
   "/exams/:id/readiness",
   requireRole("student"),
   requirePermission("take_exam"),
-  requireSeb,
   async (req, res) => {
     const a = req as unknown as AuthedRequest;
     const exam = await prisma.exam.findUnique({
@@ -361,6 +362,9 @@ student.get(
       maxReentries: exam.maxReentries,
       entriesUsed: existing ? existing.entryTokens.length : 0,
       resultsReleased: exam.resultsReleased,
+      // SEB posture, computed live: whether this exam demands the locked
+      // browser, and whether THIS request carries a valid header for it.
+      sebRequired: exam.purpose === "midterm" || exam.sebRequired,
       startTime: exam.startTime,
       endTime: exam.endTime,
       requiresCode: !!exam.accessCodeHash,
@@ -368,11 +372,10 @@ student.get(
       submitted,
       ready: !submitted && (resumable || available),
       serverTime: now,
-      // Server-verified (this handler sits behind requireSeb): the checklist
-      // must show THIS, never infer SEB from "data loaded" client-side.
-      // NOTE: requireSeb is currently a policy pass-through (normal browsers
-      // allowed), so sebVerified means "reached the server", not locked browser.
-      sebVerified: true,
+      // Honest SEB posture: required = policy (midterm or flagged quiz);
+      // verified = this request actually carries a valid SEB header.
+      // The checklist must show THESE, never infer SEB from "data loaded".
+      sebVerified: exam.purpose === "midterm" || exam.sebRequired ? await hasValidSebHeader(req) : true,
       attemptStatus: existing?.status ?? null,
       examStatus: exam.status,
     });
@@ -388,7 +391,7 @@ student.post(
   "/exams/:id/start",
   requireRole("student"),
   requirePermission("take_exam"),
-  requireSeb,
+  requireSebForExam,
   rateLimit(config.studentRateLimit.startMax, config.studentRateLimit.startWindowMs, "student:start"),
   async (req, res) => {
     const a = req as unknown as AuthedRequest;
@@ -737,7 +740,7 @@ async function requireActiveExam(examId: string, studentId: string): Promise<Req
 }
 
 // PATCH /api/v1/student/exams/:id/answer (single answer)
-student.patch("/exams/:id/answer", requireRole("student"), requirePermission("take_exam"), requireSeb, rateLimit(config.studentRateLimit.answerMax, config.studentRateLimit.answerWindowMs, "student:answers"), async (req, res) => {
+student.patch("/exams/:id/answer", requireRole("student"), requirePermission("take_exam"), requireSebForExam, rateLimit(config.studentRateLimit.answerMax, config.studentRateLimit.answerWindowMs, "student:answers"), async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const examId = String(req.params.id);
   const body = z
@@ -774,7 +777,7 @@ student.patch("/exams/:id/answer", requireRole("student"), requirePermission("ta
 });
 
 // PATCH /api/v1/student/exams/:id/answers (batch answers)
-student.patch("/exams/:id/answers", requireRole("student"), requirePermission("take_exam"), requireSeb, rateLimit(config.studentRateLimit.answerMax, config.studentRateLimit.answerWindowMs, "student:answers"), async (req, res) => {
+student.patch("/exams/:id/answers", requireRole("student"), requirePermission("take_exam"), requireSebForExam, rateLimit(config.studentRateLimit.answerMax, config.studentRateLimit.answerWindowMs, "student:answers"), async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const examId = String(req.params.id);
   const body = z
@@ -824,7 +827,7 @@ student.patch("/exams/:id/answers", requireRole("student"), requirePermission("t
 });
 
 // PATCH /api/v1/student/exams/:id/flag
-student.patch("/exams/:id/flag", requireRole("student"), requirePermission("take_exam"), requireSeb, rateLimit(config.studentRateLimit.flagMax, config.studentRateLimit.flagWindowMs, "student:flag"), async (req, res) => {
+student.patch("/exams/:id/flag", requireRole("student"), requirePermission("take_exam"), requireSebForExam, rateLimit(config.studentRateLimit.flagMax, config.studentRateLimit.flagWindowMs, "student:flag"), async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const examId = String(req.params.id);
   const body = z
@@ -852,7 +855,7 @@ student.patch("/exams/:id/flag", requireRole("student"), requirePermission("take
 
 // POST /api/v1/student/exams/:id/heartbeat
 // Updates last_heartbeat_at only â€” NEVER extends or pauses the wall-clock timer!
-student.post("/exams/:id/heartbeat", requireRole("student"), requirePermission("take_exam"), requireSeb, rateLimit(config.studentRateLimit.heartbeatMax, config.studentRateLimit.heartbeatWindowMs, "student:heartbeat"), async (req, res) => {
+student.post("/exams/:id/heartbeat", requireRole("student"), requirePermission("take_exam"), requireSebForExam, rateLimit(config.studentRateLimit.heartbeatMax, config.studentRateLimit.heartbeatWindowMs, "student:heartbeat"), async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const examId = String(req.params.id);
 
@@ -875,7 +878,7 @@ student.post(
   "/exams/:id/submit",
   requireRole("student"),
   requirePermission("take_exam"),
-  requireSeb,
+  requireSebForExam,
   idempotency,
   rateLimit(config.studentRateLimit.submitMax, config.studentRateLimit.submitWindowMs, "student:submit"),
   async (req, res) => {
@@ -1006,7 +1009,7 @@ student.post(
 // NOTE: browsers' EventSource cannot send the SEB header, so the frontend must
 // use fetch + ReadableStream with explicit headers (which also lets it send
 // Last-Event-ID on reconnect). ?lastEventId= is accepted as a fallback.
-student.get("/exams/:id/events", requireRole("student"), requirePermission("take_exam"), requireSeb, rateLimit(30, 60_000, "student:sse"), async (req, res) => {
+student.get("/exams/:id/events", requireRole("student"), requirePermission("take_exam"), requireSebForExam, rateLimit(30, 60_000, "student:sse"), async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const examId = String(req.params.id);
 
@@ -1065,7 +1068,7 @@ student.get("/exams/:id/events", requireRole("student"), requirePermission("take
   });
 });
 
-student.patch("/exams/:id/notes", requireRole("student"), requirePermission("take_exam"), requireSeb, rateLimit(config.studentRateLimit.answerMax, config.studentRateLimit.answerWindowMs, "student:notes"), async (req, res) => {
+student.patch("/exams/:id/notes", requireRole("student"), requirePermission("take_exam"), requireSebForExam, rateLimit(config.studentRateLimit.answerMax, config.studentRateLimit.answerWindowMs, "student:notes"), async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const { notes } = z.object({ notes: z.string().max(20000) }).parse(req.body);
   const rows = await prisma.$queryRaw<{ id: string }[]>`
@@ -1078,7 +1081,7 @@ student.patch("/exams/:id/notes", requireRole("student"), requirePermission("tak
   res.json({ ok: true });
 });
 
-student.patch("/exams/:id/notes-for-doctor", requireRole("student"), requirePermission("take_exam"), requireSeb, rateLimit(config.studentRateLimit.answerMax, config.studentRateLimit.answerWindowMs, "student:doctor-notes"), async (req, res) => {
+student.patch("/exams/:id/notes-for-doctor", requireRole("student"), requirePermission("take_exam"), requireSebForExam, rateLimit(config.studentRateLimit.answerMax, config.studentRateLimit.answerWindowMs, "student:doctor-notes"), async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const { notes } = z.object({ notes: z.string().max(20000) }).parse(req.body);
   const rows = await prisma.$queryRaw<{ id: string }[]>`

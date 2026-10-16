@@ -166,6 +166,7 @@ exams.post("/", async (req, res) => {
       examToolsEnabled: z.boolean().default(true),
       maxReentries: z.number().int().min(0).max(20).default(3),
       resultsReleased: z.boolean().default(false),
+      sebRequired: z.boolean().default(false),
       difficultyMix: mixInput.optional(),
       // Manual blueprint: hand-picked question IDs in author order (sampling
       // bypassed). Either this or a non-empty difficultyMix is required.
@@ -279,6 +280,7 @@ exams.post("/", async (req, res) => {
         examToolsEnabled: body.examToolsEnabled,
         maxReentries: body.maxReentries,
         resultsReleased: body.resultsReleased,
+        sebRequired: body.sebRequired,
         difficultyMix: mix,
         manualQuestionIds: manual.length ? manual : Prisma.DbNull,
         questionSource: a.role === "ta" ? source : "own",
@@ -465,7 +467,7 @@ exams.get("/:id/blueprint", async (req, res) => {
 exams.patch("/:id", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const body = z
-    .object({ title: z.string().trim().min(1).max(120).optional(), purpose: z.enum(["midterm", "quiz"]).optional(), notesEnabled: z.boolean().optional(), notesForDoctorEnabled: z.boolean().optional(), examToolsEnabled: z.boolean().optional(), maxReentries: z.number().int().min(0).max(20).optional(), resultsReleased: z.boolean().optional(), startTime: z.string().datetime().optional(), endTime: z.string().datetime().optional(), durationMinutes: z.number().int().positive().optional(), difficultyMix: mixInput.optional() })
+    .object({ title: z.string().trim().min(1).max(120).optional(), purpose: z.enum(["midterm", "quiz"]).optional(), notesEnabled: z.boolean().optional(), notesForDoctorEnabled: z.boolean().optional(), examToolsEnabled: z.boolean().optional(), maxReentries: z.number().int().min(0).max(20).optional(), resultsReleased: z.boolean().optional(), sebRequired: z.boolean().optional(), startTime: z.string().datetime().optional(), endTime: z.string().datetime().optional(), durationMinutes: z.number().int().positive().optional(), difficultyMix: mixInput.optional() })
     .parse(req.body);
   // NOTE: hand-picked blueprints lock at creation (sittings may reference
   // exact IDs) — PATCH covers window/duration/mix only, and mix patches on a

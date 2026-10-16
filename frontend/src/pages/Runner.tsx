@@ -9,6 +9,7 @@ import {
   Clock,
   ChevronLeft,
   ChevronRight,
+  ShieldCheck,
 } from "lucide-react";
 import type { SessionUser } from "../lib/api";
 import { authClient } from "../lib/auth-client";
@@ -394,6 +395,14 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
   const lastPage = !!sitting && pageStart + pageSize >= sitting.questions.length;
   const answered =
     sitting?.questions.filter((q) => q.selectedAnswer !== null).length ?? 0;
+  // SEB gate: this assessment demands the locked browser and the current
+  // request doesn't carry a valid SEB header — show the locked panel instead
+  // of the start form. The start endpoint enforces the same rule server-side.
+  const sebLocked =
+    !previewMode &&
+    !!readiness.query.data &&
+    !!readiness.query.data.sebRequired &&
+    !readiness.query.data.sebVerified;
   const unsaved = Object.keys(retryAnswers).length;
   // Keyboard-first runner: 1-4/A-D answer, arrows move, ? nothing stolen
   // while typing. Disabled once time is up or a dialog is open.
@@ -474,9 +483,13 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
               ? t(
                   "This is a demo assessment. No university results are affected.",
                 )
-              : t(
-                  "You can open and take this exam in your normal browser. Follow your exam rules and instructions.",
-                )}
+              : readiness.query.data?.sebRequired
+                ? t(
+                    "This assessment requires Safe Exam Browser. Open it from inside SEB to begin.",
+                  )
+                : t(
+                    "You can open and take this exam in your normal browser. Follow your exam rules and instructions.",
+                  )}
           </p>
           <form
             onSubmit={(e) => {
@@ -489,6 +502,25 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
                 start.mutate();
             }}
           >
+            {sebLocked ? (
+              <div className="seb-locked" role="alert">
+                <ShieldCheck size={34} />
+                <h3>{t("Safe Exam Browser required")}</h3>
+                <p>
+                  {t(
+                    "This assessment opens only in Safe Exam Browser. Install it with your university configuration, then reopen this page from inside it — your attempt, timer and saved answers pick up where they belong.",
+                  )}
+                </p>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => void readiness.query.refetch()}
+                >
+                  {t("I opened it in SEB — recheck")}
+                </button>
+              </div>
+            ) : (
+            <>
             <ReadinessChecklist {...readiness} user={user} />
             <div className="exam-rules">
               {readiness.query.data?.maxReentries !== undefined && <p>{readiness.query.data.entriesUsed ? t("You have used {0} of {1} entries. Refreshing or reopening the exam counts as a re-entry.", { "0": Math.min(readiness.query.data.entriesUsed, readiness.query.data.maxReentries + 1), "1": readiness.query.data.maxReentries + 1 }) : t("Maximum re-entries: {0}. Refreshing or reopening the exam counts as a re-entry.", { "0": readiness.query.data.maxReentries })}</p>}
@@ -536,6 +568,8 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
             >
               {start.isPending ? t("Opening exam…") : t("Start or resume exam")}
             </button>
+            </>
+            )}
           </form>
           <Link className="back-link" to="/exams">
             {t(" \u2190 Back to exams ")}

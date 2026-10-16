@@ -140,6 +140,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
   const canMidterm = user.role !== "ta";
   const [purpose, setPurpose] = useState<"midterm" | "quiz">(canMidterm ? "midterm" : "quiz");
   const [title, setTitle] = useState("");
+  const [sebRequired, setSebRequired] = useState(false);
   const [createdWarn, setCreatedWarn] = useState<{ id: string; warnings: string[] } | null>(null);
   const [notesEnabled, setNotesEnabled] = useState(false);
   const [resultsReleased, setResultsReleased] = useState(false);  const [examToolsEnabled, setExamToolsEnabled] = useState(true);
@@ -174,6 +175,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
     if (typeof d.duration === "number") setDuration(d.duration);
     if (d.purpose === "midterm" || d.purpose === "quiz") setPurpose(canMidterm ? d.purpose : "quiz");
     if (typeof d.title === "string") setTitle(d.title);
+    if (typeof d.sebRequired === "boolean") setSebRequired(d.sebRequired);
     if (typeof d.startLocal === "string") setStartLocal(d.startLocal);
     if (typeof d.endLocal === "string") setEndLocal(d.endLocal);
     if (typeof d.scope === "string") setScope(d.scope);
@@ -200,14 +202,14 @@ export function ExamWizard({ user }: { user: SessionUser }) {
       sessionStorage.setItem(
         DRAFT_KEY(user.id),
         JSON.stringify({
-          subject, duration, purpose, title, notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel,
+          subject, duration, purpose, title, sebRequired, notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel,
           pickedStudents, source, manual, mix, picked, step,
         }),
       );
     } catch {
       // storage full/blocked: builder still works, just not resumable
     }
-  }, [user.id, subject, duration, purpose, title, notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel, pickedStudents, source, manual, mix, picked, step ]);
+  }, [user.id, subject, duration, purpose, title, sebRequired, notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel, pickedStudents, source, manual, mix, picked, step ]);
 
   const sections = useResource<Envelope<Entity>>(
     user,
@@ -302,6 +304,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
           type: user.role === "ta" ? "ta_quiz" : "doctor_exam",
           title: title.trim(),
           purpose: canMidterm ? purpose : "quiz",
+          ...(purpose === "quiz" ? { sebRequired } : {}),
           startTime,
           endTime,
           durationMinutes: duration,
@@ -454,6 +457,11 @@ export function ExamWizard({ user }: { user: SessionUser }) {
             </div>
 <div className="field">
   <label><input type="checkbox" checked={notesEnabled} onChange={(e) => setNotesEnabled(e.target.checked)} /> {t("Allow student notes")}</label>
+  {purpose === "midterm" ? (
+    <small role="note">{t("Safe Exam Browser is always required for midterms.")}</small>
+  ) : (
+    <label><input type="checkbox" checked={sebRequired} onChange={(e) => setSebRequired(e.target.checked)} /> {t("Require Safe Exam Browser")}</label>
+  )}
   <label><input type="checkbox" checked={resultsReleased} onChange={(e) => setResultsReleased(e.target.checked)} /> {t("Show grades to students immediately")}</label>
   <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
   <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>
@@ -982,7 +990,7 @@ export function QuestionSheet({
 // Modern replacement for the generic edit-window dialog: smart date popovers
 // + duration stepper instead of native datetime-local inputs.
 export function EditExamWindow({
-  notesEnabled: initialNotes = false, notesForDoctorEnabled: initialDoctorNotes = false, examToolsEnabled: initialExamTools = true, maxReentries: initialReentries = 3, resultsReleased: initialReleased = false, title: initialTitle = "", purpose: initialPurpose = "quiz", canMidterm = false,
+  notesEnabled: initialNotes = false, notesForDoctorEnabled: initialDoctorNotes = false, examToolsEnabled: initialExamTools = true, maxReentries: initialReentries = 3, resultsReleased: initialReleased = false, title: initialTitle = "", purpose: initialPurpose = "quiz", sebRequired: initialSeb = false, canMidterm = false,
   startTime,
   endTime,
   durationMinutes,
@@ -1000,6 +1008,7 @@ export function EditExamWindow({
   resultsReleased?: boolean;
   title?: string;
   purpose?: string;
+  sebRequired?: boolean;
   canMidterm?: boolean;
   busy?: boolean;
   error?: unknown;
@@ -1022,6 +1031,7 @@ export function EditExamWindow({
   const [resultsReleased, setResultsReleased] = useState(initialReleased);
   const [title, setTitle] = useState(initialTitle);
   const [purpose, setPurpose] = useState(initialPurpose);
+  const [sebRequired, setSebRequired] = useState(initialSeb);
   const [err, setErr] = useState("");
   function save() {
     const a = new Date(start).getTime();
@@ -1039,6 +1049,7 @@ export function EditExamWindow({
       durationMinutes: dur,
       title: title.trim(),
       ...(canMidterm ? { purpose } : {}),
+      ...(canMidterm && purpose === "quiz" ? { sebRequired } : {}),
       notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, resultsReleased,
     });
   }
@@ -1105,6 +1116,11 @@ export function EditExamWindow({
       </div>
 <div className="field">
   <label><input type="checkbox" checked={notesEnabled} onChange={(e) => setNotesEnabled(e.target.checked)} /> {t("Allow student notes")}</label>
+  {purpose === "midterm" ? (
+    <small role="note">{t("Safe Exam Browser is always required for midterms.")}</small>
+  ) : (
+    <label><input type="checkbox" checked={sebRequired} onChange={(e) => setSebRequired(e.target.checked)} /> {t("Require Safe Exam Browser")}</label>
+  )}
   <label><input type="checkbox" checked={resultsReleased} onChange={(e) => setResultsReleased(e.target.checked)} /> {t("Show grades to students immediately")}</label>
   <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
   <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>

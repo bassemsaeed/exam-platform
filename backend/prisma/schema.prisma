@@ -340,6 +340,9 @@ model Exam {
   // Grade visibility: false hides scores from students (submit + results show
   // "awaiting release") until staff publish. Staff always see real grades.
   resultsReleased Boolean @default(false) @map("results_released")
+  // SEB policy: midterms ALWAYS require Safe Exam Browser (enforced in code
+  // by purpose, not by this flag); quizzes opt in per exam with this flag.
+  sebRequired Boolean @default(false) @map("seb_required")
   difficultyMix   Json       @db.JsonB @map("difficulty_mix")
   manualQuestionIds Json?     @map("manual_question_ids") // hand-picked blueprint (author order); null = auto-sample by mix
   questionSource  String?    @map("question_source") // TA quiz: shared|mine. Doctor: own (implicit).

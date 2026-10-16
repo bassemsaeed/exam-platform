@@ -1822,6 +1822,42 @@ input[type="checkbox"] {
   color: #4b87ad;
   margin-bottom: 23px;
 }
+.seb-locked {
+  border: 1px solid #d9e8f3;
+  background: #f0f6fb;
+  border-radius: 8px;
+  padding: 26px 22px;
+  text-align: center;
+  margin: 22px 0;
+}
+.seb-locked > svg {
+  color: #0c5a87;
+  margin-bottom: 12px;
+}
+.seb-locked h3 {
+  font-size: 15px;
+  color: #174c72;
+  margin: 0 0 10px;
+}
+.seb-locked p {
+  font-size: 12px;
+  line-height: 1.8;
+  color: #607d91;
+  margin: 0 0 18px;
+}
+[data-theme="dark"] .seb-locked {
+  background: #142b3b;
+  border-color: #344b5c;
+}
+[data-theme="dark"] .seb-locked h3 {
+  color: #e0edf6;
+}
+[data-theme="dark"] .seb-locked p {
+  color: #b4cad9;
+}
+[data-theme="dark"] .seb-locked > svg {
+  color: #7cc0ec;
+}
 .start-panel h2,
 .submitted-panel h2 {
   font-size: 21px;
