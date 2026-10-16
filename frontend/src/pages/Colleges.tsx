@@ -283,19 +283,23 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                   >
                     {t("All years")}
                   </button>
-                  {c.years.map((y) => (
-                    <button
-                      key={String(y.year)}
-                      type="button"
-                      className={`chip ${year === String(y.year) ? "smart" : ""}`}
-                      onClick={() => {
-                        setYear(String(y.year));
-                        setPage(1);
-                      }}
-                    >
-                      {t("Year")} {String(y.year)} · {y.students}
-                    </button>
-                  ))}
+                  {[1, 2, 3, 4, 5, 6, 7].map((n) => {
+                    const found = c.years.find((y) => y.year === n);
+                    const count = found ? found.students : 0;
+                    return (
+                      <button
+                        key={n}
+                        type="button"
+                        className={`chip ${year === String(n) ? "smart" : ""}`}
+                        onClick={() => {
+                          setYear(String(n));
+                          setPage(1);
+                        }}
+                      >
+                        {t("Year")} {n} · {count}
+                      </button>
+                    );
+                  })}
                 </div>
               ) : (
                 <Empty
