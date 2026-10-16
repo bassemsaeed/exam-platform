@@ -3673,6 +3673,20 @@ input[type="datetime-local"],
 [data-theme="dark"] .dist-bar b {
   color: #c3d7e5;
 }
+@keyframes flashrow {
+  0%, 100% { background: transparent; }
+  25%, 75% { background: #fff4e5; }
+}
+.flash-row {
+  animation: flashrow 2.4s ease;
+}
+[data-theme="dark"] .flash-row {
+  animation-name: flashrow-dark;
+}
+@keyframes flashrow-dark {
+  0%, 100% { background: transparent; }
+  25%, 75% { background: #3d3021; }
+}
 [data-theme="dark"] .img-flag {
   color: #3d4f5c;
 }

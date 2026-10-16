@@ -69,8 +69,13 @@ questionBank.use(requireAuth, requirePermission("manage_question_bank"));
 // GET /question-bank?subject_id*&owner_type&mine&difficulty — scoped by role.
 questionBank.get("/", async (req, res) => {
   const a = req as unknown as AuthedRequest;
+  // NOTE: .optional().transform() RUNS on undefined in Zod 4, so a naive
+  // (v) => v === "true" would coerce absent params to false. The undefined
+  // guard preserves "not passed" (no filter) distinctly from "false".
+  const tri = (v: string | undefined): boolean | undefined =>
+    v === undefined ? undefined : v === "true";
   const q = pageQuery
-    .extend({ subject_id: z.string(), owner_type: z.enum(["doctor", "ta_shared"]).optional(), mine: z.enum(["true", "false"]).optional().transform((v) => v === "true"), difficulty: z.enum(DIFFS).optional(), search: z.string().max(120).optional(), has_image: z.enum(["true", "false"]).optional().transform((v) => v === "true") })
+    .extend({ subject_id: z.string(), owner_type: z.enum(["doctor", "ta_shared"]).optional(), mine: z.enum(["true", "false"]).optional().transform(tri), difficulty: z.enum(DIFFS).optional(), search: z.string().max(120).optional(), has_image: z.enum(["true", "false"]).optional().transform(tri) })
     .parse(req.query);
   if (!(await mayBank(a.userId, a.role, q.subject_id))) return res.status(403).json({ error: "not your subject" });
   // Banks are separate: doctors see private, TAs see shared (never each other's).
@@ -100,7 +105,7 @@ questionBank.get("/", async (req, res) => {
 // GET /question-bank/counts?subject_id*&mine — tier counts for mix validation UI.
 questionBank.get("/counts", async (req, res) => {
   const a = req as unknown as AuthedRequest;
-  const q = z.object({ subject_id: z.string(), mine: z.enum(["true", "false"]).optional().transform((v) => v === "true") }).parse(req.query);
+  const q = z.object({ subject_id: z.string(), mine: z.enum(["true", "false"]).optional().transform((v) => (v === undefined ? undefined : v === "true")) }).parse(req.query);
   if (!(await mayBank(a.userId, a.role, q.subject_id))) return res.status(403).json({ error: "not your subject" });
   const owner = a.role === "doctor" ? { ownerType: "doctor" as const, doctorId: a.userId } : { ownerType: "ta_shared" as const, ...(q.mine ? { addedByTaId: a.userId } : {}) };
   const rows = await prisma.question.groupBy({ by: ["difficulty"], where: { subjectId: q.subject_id, ...owner }, _count: true });

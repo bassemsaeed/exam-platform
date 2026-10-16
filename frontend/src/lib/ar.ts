@@ -459,6 +459,8 @@ export const arabic: Record<string, string> = {
   "Performance appears after students submit this assessment.": "يظهر الأداء بعد تسليم الطلاب لهذا التقييم.",
   "Happening now": "يحدث الآن",
   "Analytics": "التحليلات",
+  "Export history": "سجل التصدير",
+  "Newest first. Downloads appear when ready.": "الأحدث أولًا. تظهر التنزيلات عند جهوزيتها.",
   "All questions": "كل الأسئلة",
   "With images": "بها صور",
   "Missing images": "بدون صور",

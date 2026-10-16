@@ -1677,6 +1677,8 @@ export function Exports({ user }: { user: SessionUser }) {
   // Per-exam export dialog for staff: the exact exam is shown, never a bare id.
   const [exportExamId, setExportExamId] = useState("");
   const [exportFormat, setExportFormat] = useState("csv");
+  // Freshly created job: scrolled into view and flashed once it arrives.
+  const [freshJob, setFreshJob] = useState("");
   const exportExam = exportExamId ? examById.get(exportExamId) : undefined;
   function examSubject(e: Exam): string {
     const s = e.subject ?? subjectById.get(e.subjectId);
@@ -1734,16 +1736,18 @@ export function Exports({ user }: { user: SessionUser }) {
         title={t("Exports")}
         description={t("Generate and download assessment records.")}
         action={
-          <button
-            className="primary"
-            onClick={() => {
-              action.reset();
-              setModal(true);
-            }}
-          >
-            <Plus size={16} />
-            {t(" New export ")}
-          </button>
+          !staff && (
+            <button
+              className="primary"
+              onClick={() => {
+                action.reset();
+                setModal(true);
+              }}
+            >
+              <Plus size={16} />
+              {t(" New export ")}
+            </button>
+          )
         }
       />
       <Feedback error={query.error} />
@@ -1800,7 +1804,13 @@ export function Exports({ user }: { user: SessionUser }) {
       {query.isPending ? (
         <Loading />
       ) : query.data?.rows.length ? (
-        <section className="panel table-wrap">
+        <section className="panel table-wrap" aria-label={t("Export history")}>
+          <div className="panel-heading">
+            <div>
+              <h2>{t("Export history")}</h2>
+              <p>{t("Newest first. Downloads appear when ready.")}</p>
+            </div>
+          </div>
           <table>
             <thead>
               <tr>
@@ -1813,7 +1823,7 @@ export function Exports({ user }: { user: SessionUser }) {
             </thead>
             <tbody>
               {query.data.rows.map((r) => (
-                <tr key={r.id}>
+                <tr key={r.id} id={`export-${r.id}`} className={r.id === freshJob ? "flash-row" : ""}>
                   <td>
                     <b>{jobTitle(r)}</b>
                     <small>
@@ -1865,8 +1875,7 @@ export function Exports({ user }: { user: SessionUser }) {
         />
       )}
       {staff ? (
-        exportExam && (
-          <Dialog
+        exportExam && (          <Dialog
             title={t("Export results")}
             onClose={() => setExportExamId("")}
           >
@@ -1898,7 +1907,18 @@ export function Exports({ user }: { user: SessionUser }) {
                       format: exportFormat,
                     },
                   },
-                  { onSuccess: () => setExportExamId("") },
+                  { onSuccess: (job) => {
+                    setExportExamId("");
+                    const created = job as unknown as { id?: string };
+                    if (created?.id) {
+                      setFreshJob(created.id);
+                      setTimeout(() => {
+                        document
+                          .getElementById(`export-${created.id}`)
+                          ?.scrollIntoView({ block: "center", behavior: "smooth" });
+                      }, 1200);
+                    }
+                  } },
                 );
               }}
             >
