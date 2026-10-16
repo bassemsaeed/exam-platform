@@ -614,6 +614,7 @@ form > label,
   flex: 1;
 }
 .sidebar nav a {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 11px;
