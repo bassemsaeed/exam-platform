@@ -111,7 +111,7 @@ exams.get("/roster", async (req, res) => {
       id: true, name: true,
       ta: { select: { id: true, name: true, username: true } },
       memberships: {
-        select: { student: { select: { id: true, username: true, name: true, email: true, isActive: true } } },
+        select: { student: { select: { id: true, username: true, name: true, email: true, isActive: true, academicYear: true, collegeRef: { select: { id: true, name: true } } } } },
         orderBy: { student: { name: "asc" } },
         take: config.lists.membersMax,
       },

@@ -2383,6 +2383,8 @@ export interface RosterSection {
     name: string;
     email: string;
     isActive: boolean;
+    academicYear?: number | null;
+    collegeRef?: { id: string; name: string } | null;
   }[];
 }
 
@@ -2446,6 +2448,8 @@ export function Roster({ user }: { user: SessionUser }) {
                       <th scope="col">{t("Name")}</th>
                       <th scope="col">{t("Username")}</th>
                       <th scope="col">{t("Email")}</th>
+                      <th scope="col">{t("Year")}</th>
+                      <th scope="col">{t("College")}</th>
                       <th scope="col">{t("Status")}</th>
                     </tr>
                   </thead>
@@ -2455,6 +2459,8 @@ export function Roster({ user }: { user: SessionUser }) {
                         <td><b>{st.name}</b></td>
                         <td>{st.username}</td>
                         <td>{st.email}</td>
+                        <td>{st.academicYear ?? "—"}</td>
+                        <td>{st.collegeRef?.name ?? "—"}</td>
                         <td>
                           <Badge value={st.isActive ? "active" : "inactive"} />
                         </td>

@@ -38,6 +38,7 @@ adminDepartments.get("/:id", async (req, res) => {
     where: { id: req.params.id },
     include: {
       _count: { select: { users: true, subjects: true } },
+      college: { select: { id: true, code: true, name: true } },
       subjects: { select: { id: true, code: true, name: true } },
     },
   });
@@ -55,9 +56,13 @@ adminDepartments.get("/:id", async (req, res) => {
 });
 
 adminDepartments.patch("/:id", async (req, res) => {
-  const body = z.object({ code: z.string().min(2).max(20).regex(/^[a-zA-Z0-9_.-]+$/).optional(), name: z.string().min(2).max(200).optional() }).parse(req.body);
+  const body = z.object({ code: z.string().min(2).max(20).regex(/^[a-zA-Z0-9_.-]+$/).optional(), name: z.string().min(2).max(200).optional(), collegeId: z.string().uuid().nullable().optional() }).parse(req.body);
   const data: Record<string, unknown> = { ...body };
   if (typeof data["code"] === "string") data["code"] = (data["code"] as string).toUpperCase();
+  if (data["collegeId"]) {
+    const college = await prisma.college.findUnique({ where: { id: data["collegeId"] as string }, select: { id: true } });
+    if (!college) return res.status(422).json({ error: "college not found" });
+  }
   const row = await prisma.department.update({ where: { id: req.params.id }, data: data as never });
   await audit((req as unknown as AuthedRequest).userId, "department.update", "department", row.id, body);
   res.json(row);

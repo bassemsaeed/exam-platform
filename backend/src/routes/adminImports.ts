@@ -103,6 +103,21 @@ function parseWorkbook(buf: Buffer): { rows: ParsedRow[]; errors: { line: number
 export const adminImports: RouterType = Router();
 adminImports.use(requireAuth, requireRole("admin"));
 
+// College free text → entity link (case-insensitive). Unknown names resolve
+// to nothing: the text is still stored, the link stays empty, and the caller
+// reports the names so an admin can create/merge colleges afterwards.
+async function resolveCollegeIds(texts: string[]): Promise<{ byText: Map<string, string>; unknown: string[] }> {
+  const uniq = [...new Set(texts.map((t) => t.trim()).filter(Boolean))];
+  const byText = new Map<string, string>();
+  const unknown: string[] = [];
+  for (const text of uniq) {
+    const row = await prisma.college.findFirst({ where: { name: { equals: text, mode: "insensitive" } }, select: { id: true } });
+    if (row) byText.set(text.toLowerCase(), row.id);
+    else unknown.push(text);
+  }
+  return { byText, unknown };
+}
+
 adminImports.post("/dry-run", rateLimit(30, 60_000, "admin-import:dry-run"), upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "file required" });
   if (!spreadsheetFileOk(req.file.originalname, req.file.mimetype)) {
@@ -156,7 +171,7 @@ adminImports.post("/dry-run", rateLimit(30, 60_000, "admin-import:dry-run"), upl
       },
     });
   })();
-  res.json({ batchId: batch.id, valid: valid.length, errors: final, expiresAt: batch.expiresAt, preview: valid.slice(0, 50).map((r) => ({ line: r.line, username: r.username, fullName: r.fullName, role: r.role, email: r.email ?? null, subjects: r.subjects, taught: r.taught, sections: r.sections })), previewTruncated: valid.length > 50 });
+  res.json({ batchId: batch.id, valid: valid.length, errors: final, expiresAt: batch.expiresAt, unknownColleges: (await resolveCollegeIds(valid.map((r) => r.college ?? ""))).unknown, preview: valid.slice(0, 50).map((r) => ({ line: r.line, username: r.username, fullName: r.fullName, role: r.role, email: r.email ?? null, subjects: r.subjects, taught: r.taught, sections: r.sections })), previewTruncated: valid.length > 50 });
 });
 
 adminImports.post("/commit", rateLimit(30, 60_000, "admin-import:commit"), async (req, res) => {
@@ -184,6 +199,7 @@ adminImports.post("/commit", rateLimit(30, 60_000, "admin-import:commit"), async
   const batch = await prisma.importBatch.findUniqueOrThrow({ where: { id: batchId } });
   type StoredRow = Omit<ParsedRow, "password"> & { passwordHash: string };
   const rows = batch.payload as unknown as StoredRow[];
+  const colleges = await resolveCollegeIds(rows.map((r) => r.college ?? ""));
 
   let imported = 0;
   const rowErrors: { line: number; reason: string }[] = [];
@@ -197,9 +213,10 @@ adminImports.post("/commit", rateLimit(30, 60_000, "admin-import:commit"), async
         const email = r.email || `${r.username}@${config.email.placeholderDomain}`;
         // Cohort columns only overwrite when present in the file — a re-import
         // without year/college must not wipe values set elsewhere.
+        const collegeId = r.college ? (colleges.byText.get(r.college.trim().toLowerCase()) ?? null) : undefined;
         const cohort = {
           ...(r.academicYear !== undefined ? { academicYear: r.academicYear } : {}),
-          ...(r.college !== undefined ? { college: r.college } : {}),
+          ...(r.college !== undefined ? { college: r.college, collegeId } : {}),
         };
         // Re-imports must not resurrect disabled accounts or clobber a real
         // email with a blank-cell placeholder: presence semantics — absent in
@@ -215,7 +232,7 @@ adminImports.post("/commit", rateLimit(30, 60_000, "admin-import:commit"), async
               data: { name: r.fullName, email: targetEmail, role: r.role, canChangePassword: defaultCanChangePassword(r.role), ...cohort },
             })
           : await tx.user.create({
-              data: { id: `u_${r.username}`, name: r.fullName, email: email.toLowerCase(), emailVerified: false, username: r.username, role: r.role, canChangePassword: defaultCanChangePassword(r.role), isActive: true, academicYear: r.academicYear ?? null, college: r.college ?? null },
+              data: { id: `u_${r.username}`, name: r.fullName, email: email.toLowerCase(), emailVerified: false, username: r.username, role: r.role, canChangePassword: defaultCanChangePassword(r.role), isActive: true, academicYear: r.academicYear ?? null, college: r.college ?? null, collegeId },
             });
         // Role changes de-escalate fully here too (overrides win over role
         // defaults — see PATCH /admin/users/:id).

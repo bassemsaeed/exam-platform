@@ -60,6 +60,7 @@ import {
   Roster,
 } from "./pages/Academic";
 import { AdminResource, UserDetail } from "./pages/Admin";
+import { Colleges, CollegeDetail } from "./pages/Colleges";
 import { ExamRunner } from "./pages/Runner";
 const roles: Record<Role, string> = {
   student: "Student",
@@ -138,6 +139,7 @@ export default function Workspace({
           { to: "/support", title: "Account requests", icon: ShieldCheck },
           { to: "/admin/subjects", title: "Subjects", icon: BookOpen },
           { to: "/admin/sections", title: "Sections", icon: Layers },
+          { to: "/colleges", title: "Colleges", icon: Building2 },
           { to: "/admin/departments", title: "Departments", icon: Building2 },
           { to: "/admin/terms", title: "Academic terms", icon: CalendarDays },
           {
@@ -325,6 +327,12 @@ export default function Workspace({
               />
             )}
             <Route path="/results" element={<Results user={user} />} />
+            {user.role === "admin" && (
+              <>
+                <Route path="/colleges" element={<Colleges user={user} />} />
+                <Route path="/colleges/:id" element={<CollegeDetail user={user} />} />
+              </>
+            )}
             <Route path="/profile" element={<Profile user={user} />} />
             {user.role === "admin" && (
               <>

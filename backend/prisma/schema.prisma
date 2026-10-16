@@ -100,12 +100,14 @@ model User {
   canChangePassword  Boolean   @default(true) @map("can_change_password")
   isActive           Boolean   @default(true) @map("is_active")
   academicYear       Int?      @map("academic_year") // 1..7, student cohort year
-  college            String?   // faculty/school name, free text
+  college            String?   // faculty/school name, free text (legacy; see collegeId)
+  collegeId          String?   @db.Uuid @map("college_id")
   departmentId       String?   @db.Uuid @map("department_id")
   createdAt          DateTime  @default(now())
   updatedAt          DateTime  @updatedAt
 
   department         Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  collegeRef         College?    @relation(fields: [collegeId], references: [id], onDelete: SetNull)
   sessions          Session[]
   accounts          Account[]
 
@@ -184,12 +186,27 @@ model Verification {
 
 // ---------- Academic structure ----------
 
+model College {
+  id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  code      String    @unique @db.VarChar(20)
+  name      String    @unique @db.VarChar(120)
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  departments Department[]
+  users       User[]
+
+  @@map("college")
+}
+
 model Department {
   id        String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   code      String    @unique
   name      String
+  collegeId String?   @db.Uuid @map("college_id")
   users     User[]
   subjects  Subject[]
+
+  college College? @relation(fields: [collegeId], references: [id], onDelete: SetNull)
 
   @@map("department")
 }
