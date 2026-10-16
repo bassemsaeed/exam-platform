@@ -1442,6 +1442,39 @@ export function QuestionBank({ user }: { user: SessionUser }) {
           }}
           imageUpload={<div className="field">
             <label htmlFor="qs-image">{t("Attach question image")}</label>
+            {edit !== "new" && (edit as Question).imageUrl && !imageFile && (
+              <div className="image-current">
+                <img
+                  className="question-image"
+                  src={
+                    String((edit as Question).imageUrl).startsWith("/")
+                      ? apiUrl(String((edit as Question).imageUrl))
+                      : String((edit as Question).imageUrl)
+                  }
+                  alt={t("Current diagram")}
+                />
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={imageBusy}
+                  onClick={async () => {
+                    setImageBusy(true);
+                    setUploadError("");
+                    try {
+                      await api.delete(`/api/v1/question-bank/${(edit as Question).id}/image`);
+                      await query.refetch();
+                      setEdit({ ...(edit as Question), imageUrl: undefined });
+                    } catch (err) {
+                      setUploadError(err instanceof Error ? err.message : "Remove failed");
+                    } finally {
+                      setImageBusy(false);
+                    }
+                  }}
+                >
+                  {t(" Remove image ")}
+                </button>
+              </div>
+            )}
             <input id="qs-image" type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={imageBusy} onChange={(e) => setImageFile(e.target.files?.[0] ?? null)} />
             {imageFile && <p>{imageFile.name}</p>}
           </div>}

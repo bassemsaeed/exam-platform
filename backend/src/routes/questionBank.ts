@@ -261,6 +261,31 @@ questionBank.post("/:id/image", upload.single("image"), async (req, res) => {
   res.json({ imageUrl: stored.url });
 });
 
+// DELETE /question-bank/:id/image — remove the diagram (doctor changes their
+// mind post-import). Same ownership gate as attach. File removal is
+// best-effort: the column is always cleared, a missing/unreachable file
+// never blocks the delete.
+questionBank.delete("/:id/image", async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  const own = await ownQuestionOr403(a.userId, a.role, String(req.params.id));
+  if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
+  if (!own.q.imageUrl) return res.status(404).json({ error: "no image attached" });
+  const key = own.q.imageUrl.startsWith(`${storage.publicBase}/`)
+    ? own.q.imageUrl.slice(storage.publicBase.length + 1)
+    : null;
+  const row = await prisma.question.update({ where: { id: own.q.id }, data: { imageUrl: null } });
+  if (key) {
+    try {
+      await storage.delete(key);
+    } catch {
+      // Orphan file: column already cleared, audit notes the leftover.
+      await audit(a.userId, "question.image-orphan", "question", row.id, { key }).catch(() => undefined);
+    }
+  }
+  await audit(a.userId, "question.image-delete", "question", row.id);
+  res.json({ ok: true });
+});
+
 // Excel columns: subject_code*, question_type(mcq|true_false)*, text*, options(A|B|C)*,
 // correct_answer*, grade(number>0)*, difficulty(easy|medium|hard)*, image_filename?
 // (admin rows also need owner_type(doctor|ta_shared)* + owner(username)*).

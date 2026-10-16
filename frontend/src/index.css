@@ -637,7 +637,11 @@ form > label,
 .sidebar nav a.active:before {
   content: "";
   position: absolute;
-  left: 0;
+  /* Flush with the sidebar edge (cancels the nav's 13px padding) and
+     vertically centered — the anchor is relative so it scrolls with the item. */
+  left: -13px;
+  top: 50%;
+  transform: translateY(-50%);
   width: 3px;
   height: 21px;
   background: #f58220;
@@ -1585,6 +1589,17 @@ input[type="checkbox"] {
   object-fit: contain;
   display: block;
   margin: 15px 0;
+}
+.image-current {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  margin-bottom: 10px;
+}
+.image-current .question-image {
+  margin: 0;
+  max-height: 180px;
 }
 .profile-grid {
   display: grid;
@@ -2611,7 +2626,8 @@ textarea {
 }
 [dir="rtl"] .sidebar nav a.active:before {
   left: auto;
-  right: 0;
+  right: -13px;
+  border-radius: 2px 0 0 2px;
 }
 [dir="rtl"]
   :is(

@@ -459,6 +459,8 @@ export const arabic: Record<string, string> = {
   "Performance appears after students submit this assessment.": "يظهر الأداء بعد تسليم الطلاب لهذا التقييم.",
   "Happening now": "يحدث الآن",
   "Analytics": "التحليلات",
+  "Remove image": "إزالة الصورة",
+  "Current diagram": "الرسم الحالي",
   "Require Safe Exam Browser": "اشتراط متصفح الامتحان الآمن",
   "Safe Exam Browser is always required for midterms.": "متصفح الامتحان الآمن مطلوب دائمًا للنصفيات.",
   "Safe Exam Browser required": "متصفح الامتحان الآمن مطلوب",
