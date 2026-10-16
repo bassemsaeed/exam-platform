@@ -459,6 +459,7 @@ export const arabic: Record<string, string> = {
   "Performance appears after students submit this assessment.": "يظهر الأداء بعد تسليم الطلاب لهذا التقييم.",
   "Happening now": "يحدث الآن",
   "Analytics": "التحليلات",
+  "Set selected to year:": "تعيين المحدد إلى سنة:",
   "← Back to colleges": "→ العودة إلى الكليات",
   "Search students…": "ابحث في الطلاب…",
   "students": "طالب",

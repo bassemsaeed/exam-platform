@@ -134,7 +134,9 @@ export function Colleges({ user }: { user: SessionUser }) {
                 <Badge value="active" />
               </div>
               <small className="course-code">{c.code}</small>
-              <h2>{c.name}</h2>
+              <h2>
+                <Link to={`/colleges/${c.id}`}>{c.name}</Link>
+              </h2>
               <p>
                 {c.students ?? 0} {t("students")} · {c.doctors ?? 0}{" "}
                 {t("doctors")} ·{" "}
@@ -334,9 +336,20 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                     {t("Students")}
                     {year ? ` · ${t("Year")} ${year}` : ""}
                   </h2>
+                  <p>
+                    {typeof students.data?.total === "number" &&
+                      t("Showing {0} of {1}.", {
+                        "0": rowsOf(students.data).length,
+                        "1": students.data.total,
+                      })}
+                  </p>
                 </div>
                 <div className="action-row">
+                  <label className="subtle" htmlFor="bulk-year">
+                    {t("Set selected to year:")}
+                  </label>
                   <select
+                    id="bulk-year"
                     aria-label={t("Set year")}
                     value={newYear}
                     onChange={(e) => setNewYear(Number(e.target.value))}
