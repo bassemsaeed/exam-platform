@@ -11,8 +11,10 @@ adminColleges.use(requireAuth, requireRole("admin"));
 
 const codeRule = z.string().min(2).max(20).regex(/^[a-zA-Z0-9_.-]+$/);
 
-// Case-insensitive duplicate check (Prisma unique is case-sensitive —
-// "Engineering" vs "engineering" must not fork a college).
+// Case-insensitive duplicate check (base uniques are case-sensitive —
+// "Engineering" vs "engineering" must not fork a college; lower() unique
+// indexes in 20261016130000_college_ci_unique close the check-then-insert race
+// with a 409 via P2002).
 async function dupeName(name: string, excludeId?: string) {
   return prisma.college.findFirst({
     where: { name: { equals: name.trim(), mode: "insensitive" }, ...(excludeId ? { id: { not: excludeId } } : {}) },
@@ -48,7 +50,7 @@ adminColleges.get("/", async (req, res) => {
   ]);
   const sBy = new Map(students.map((g) => [g.collegeId, g._count]));
   const dBy = new Map(doctors.map((g) => [g.collegeId, g._count]));
-  res.json(envelope(total, q, rows.map((r) => ({ ...r, students: sBy.get(r.id) ?? 0, doctors: dBy.get(r.id) ?? 0 }))));
+  res.json(envelope(total, q, rows.map((r) => ({ id: r.id, code: r.code, name: r.name, createdAt: r.createdAt, departments: r._count.departments, students: sBy.get(r.id) ?? 0, doctors: dBy.get(r.id) ?? 0 }))));
 });
 
 adminColleges.post("/", async (req, res) => {
@@ -60,7 +62,7 @@ adminColleges.post("/", async (req, res) => {
     res.status(201).json(row);
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
-      return res.status(409).json({ error: "college code already exists" });
+      return res.status(409).json({ error: "college already exists" });
     }
     throw e;
   }
@@ -126,7 +128,7 @@ adminColleges.patch("/:id", async (req, res) => {
     res.json(updated);
   } catch (e) {
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
-      return res.status(409).json({ error: "college code already exists" });
+      return res.status(409).json({ error: "college already exists" });
     }
     throw e;
   }
@@ -147,7 +149,37 @@ adminColleges.delete("/:id", async (req, res) => {
       users: linked._count.users,
     });
   }
-  await prisma.college.delete({ where: { id } });
+  // Re-check inside the write transaction: a member linked between the guard
+  // above and the delete must not orphan via SET NULL.
+  try {
+    await prisma.$transaction(async (tx) => {
+      const cur = await tx.college.findUnique({
+        where: { id },
+        select: { _count: { select: { departments: true, users: true } } },
+      });
+      if (!cur) throw Object.assign(new Error("not found"), { status: 404 });
+      if (cur._count.departments > 0 || cur._count.users > 0) {
+        throw Object.assign(new Error("college still has members — merge or reassign them first"), {
+          status: 409,
+          departments: cur._count.departments,
+          users: cur._count.users,
+        });
+      }
+      await tx.college.delete({ where: { id } });
+    });
+  } catch (e) {
+    if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2025") {
+      return res.status(404).json({ error: "not found" });
+    }
+    if (e && typeof e === "object" && "status" in e) {
+      const s = e as { status: number; message: string; departments?: number; users?: number };
+      if (s.status === 404) return res.status(404).json({ error: "not found" });
+      if (s.status === 409) {
+        return res.status(409).json({ error: s.message, departments: s.departments, users: s.users });
+      }
+    }
+    throw e;
+  }
   await audit(me, "college.delete", "college", id);
   res.json({ ok: true });
 });
@@ -165,14 +197,32 @@ adminColleges.post("/:id/merge", async (req, res) => {
     prisma.college.findUnique({ where: { id: intoId }, select: { id: true, name: true } }),
   ]);
   if (!src || !dst) return res.status(404).json({ error: "college not found" });
-  const out = await prisma.$transaction(async (tx) => {
-    const depts = await tx.department.updateMany({ where: { collegeId: id }, data: { collegeId: intoId } });
-    const users = await tx.user.updateMany({ where: { collegeId: id }, data: { collegeId: intoId } });
-    await tx.college.delete({ where: { id } });
-    return { departments: depts.count, users: users.count };
-  });
-  await audit(me, "college.merge", "college", intoId, { from: { id: src.id, name: src.name }, ...out });
-  res.json({ ok: true, intoId, ...out });
+  try {
+    const out = await prisma.$transaction(async (tx) => {
+      // Re-check inside the transaction: either side may have vanished after
+      // the fast pre-check above.
+      const s = await tx.college.findUnique({ where: { id }, select: { id: true } });
+      const d = await tx.college.findUnique({ where: { id: intoId }, select: { id: true, name: true } });
+      if (!s || !d) throw Object.assign(new Error("college not found"), { status: 404 });
+      const depts = await tx.department.updateMany({ where: { collegeId: id }, data: { collegeId: intoId } });
+      // Keep the legacy free-text column in sync with the canonical name so
+      // reads that still show `college` (e.g. admin user lists) stop showing
+      // the folded typo after the merge.
+      const users = await tx.user.updateMany({ where: { collegeId: id }, data: { collegeId: intoId, college: d.name } });
+      await tx.college.delete({ where: { id } });
+      return { departments: depts.count, users: users.count };
+    });
+    await audit(me, "college.merge", "college", intoId, { from: { id: src.id, name: src.name }, ...out });
+    res.json({ ok: true, intoId, ...out });
+  } catch (e) {
+    if (e && typeof e === "object" && "status" in e && (e as { status: number }).status === 404) {
+      return res.status(404).json({ error: "college not found" });
+    }
+    if (e instanceof Prisma.PrismaClientKnownRequestError && (e.code === "P2025" || e.code === "P2003")) {
+      return res.status(404).json({ error: "college not found" });
+    }
+    throw e;
+  }
 });
 
 // GET /api/v1/admin/colleges/:id/students?year&search — enrolled students.
@@ -219,16 +269,30 @@ adminColleges.post("/:id/students/year", async (req, res) => {
   const body = z.object({ studentIds: z.array(z.string()).min(1).max(500), year: z.number().int().min(1).max(7) }).parse(req.body);
   const college = await prisma.college.findUnique({ where: { id: String(req.params.id) }, select: { id: true } });
   if (!college) return res.status(404).json({ error: "not found" });
-  const matched = await prisma.user.count({
-    where: { id: { in: body.studentIds }, collegeId: college.id, role: "student" },
+  const ids = [...new Set(body.studentIds)];
+  const updated = await prisma.$transaction(async (tx) => {
+    const matched = await tx.user.count({
+      where: { id: { in: ids }, collegeId: college.id, role: "student" },
+    });
+    if (matched !== ids.length) {
+      throw Object.assign(new Error("every id must be a student of this college"), { status: 422 });
+    }
+    // Fail-closed write guard: the college filter stays on the write itself so
+    // a concurrent move between the count and the update cannot leak a
+    // cross-college year-set.
+    return tx.user.updateMany({
+      where: { id: { in: ids }, collegeId: college.id, role: "student" },
+      data: { academicYear: body.year },
+    });
+  }).catch((e) => {
+    if (e && typeof e === "object" && "status" in e && (e as { status: number }).status === 422) {
+      return null;
+    }
+    throw e;
   });
-  if (matched !== new Set(body.studentIds).size) {
+  if (!updated) {
     return res.status(422).json({ error: "every id must be a student of this college" });
   }
-  const updated = await prisma.user.updateMany({
-    where: { id: { in: body.studentIds } },
-    data: { academicYear: body.year },
-  });
   await audit(me, "college.bulk-year", "college", college.id, { year: body.year, count: updated.count });
   res.json({ ok: true, count: updated.count });
 });

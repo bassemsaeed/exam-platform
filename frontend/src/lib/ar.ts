@@ -1058,4 +1058,8 @@ export const arabic: Record<string, string> = {
   "The closing time already passed — create a fresh exam instead.":
     "انتهى وقت الإغلاق بالفعل — أنشئ امتحانًا جديدًا بدلًا من ذلك.",
   "exam window has ended": "انتهت نافذة الامتحان",
+
+  Unlink: "فك الارتباط",
+  "Target year": "السنة المستهدفة",
+  "Showing {0} of {1}.": "عرض {0} من {1}.",
 };

@@ -279,6 +279,7 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                     onClick={() => {
                       setYear("");
                       setPage(1);
+                      setSelected([]);
                     }}
                   >
                     {t("All years")}
@@ -291,12 +292,15 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                         key={n}
                         type="button"
                         className={`chip ${year === String(n) ? "smart" : ""}`}
+                        aria-label={`${t("Year")} ${n} · ${count}`}
+                        title={`${t("Year")} ${n} · ${count}`}
                         onClick={() => {
                           setYear(String(n));
                           setPage(1);
+                          setSelected([]);
                         }}
                       >
-                        {t("Year")} {n} · {count}
+                        {n}
                       </button>
                     );
                   })}
@@ -407,6 +411,7 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                   onChange={(s) => {
                     setSearch(s);
                     setPage(1);
+                    setSelected([]);
                   }}
                   placeholder={t("Search students…")}
                 />

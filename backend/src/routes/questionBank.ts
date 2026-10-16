@@ -376,6 +376,7 @@ questionBank.post("/import/dry-run", rateLimit(30, 60_000, "bank-import:dry-run"
   // picks a subject in the UI, every row goes there regardless of per-row
   // subject_code cells (which stay valid when no target is picked).
   const targetCode = str((req.body as Record<string, unknown> | undefined)?.subject_code ?? "");
+  if (targetCode.length > 120) return res.status(422).json({ error: "subject_code longer than 120 chars" });
   let targetSubjectId: string | null = null;
   if (targetCode) {
     const t = await prisma.subject.findUnique({ where: { code: targetCode }, select: { id: true } });

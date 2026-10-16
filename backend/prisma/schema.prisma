@@ -195,6 +195,8 @@ model College {
   departments Department[]
   users       User[]
 
+  // Case-insensitive uniqueness is enforced by lower() unique indexes in
+  // 20261016130000_college_ci_unique (base uniques are case-sensitive).
   @@map("college")
 }
 

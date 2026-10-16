@@ -8,11 +8,15 @@
 # and Cloudflare-side drops all come back automatically with a fresh URL.
 set -u
 LOG=/tmp/cf4000.log
-ENV_FILE=/home/bassem/exam-platform/backend/.env
-URL_FILE=/home/bassem/exam-platform/PUBLIC_URL.txt
+# Paths resolve to THIS checkout (the review tree is the working tree; the old
+# exam-platform paths are retired). Override via env for custom layouts.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${ENV_FILE:-$ROOT/backend/.env}"
+URL_FILE="${URL_FILE:-$ROOT/PUBLIC_URL.txt}"
+PORT="${PORT:-4000}"
 
 rm -f "$LOG"
-/usr/local/bin/cloudflared tunnel --url http://localhost:4000 >"$LOG" 2>&1 &
+/usr/local/bin/cloudflared tunnel --url "http://localhost:$PORT" >"$LOG" 2>&1 &
 CF_PID=$!
 URL=""
 for _ in $(seq 1 40); do
@@ -31,6 +35,17 @@ if [ -z "$URL" ]; then
 fi
 echo "$URL" > "$URL_FILE"
 echo "public URL: $URL"
-sed -i "s|^BETTER_AUTH_URL=.*|BETTER_AUTH_URL=$URL|; s|^FRONTEND_URL=.*|FRONTEND_URL=$URL,http://localhost:4000,http://localhost:5173,http://localhost:5174|" "$ENV_FILE"
+# Point the backend at the fresh URL (append-or-set: a missing line must not
+# silently leave stale localhost URLs in place).
+set_kv() {
+  local key="$1" val="$2" file="$3"
+  if grep -q "^${key}=" "$file" 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${val}|" "$file"
+  else
+    printf '%s=%s\n' "$key" "$val" >> "$file"
+  fi
+}
+set_kv BETTER_AUTH_URL "$URL" "$ENV_FILE"
+set_kv FRONTEND_URL "$URL,http://localhost:4000,http://localhost:5173,http://localhost:5174" "$ENV_FILE"
 /bin/systemctl restart exam-backend.service || true
 wait "$CF_PID"
