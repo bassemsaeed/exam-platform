@@ -21,11 +21,13 @@ export class ApiError extends Error {
   status: number;
   code?: string;
   reason?: string;
-  constructor(status: number, message: string, code?: string, reason?: string) {
+  data?: unknown;
+  constructor(status: number, message: string, code?: string, reason?: string, data?: unknown) {
     super(message);
     this.status = status;
     this.code = code;
     this.reason = reason;
+    this.data = data;
   }
 }
 
@@ -61,11 +63,13 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     let msg = r.statusText;
     let code: string | undefined;
     let reason: string | undefined;
+    let data: unknown;
     try {
       const text = await r.text();
       if (text) {
         try {
           const parsed = JSON.parse(text);
+          data = parsed;
           code = typeof parsed.error === "string" ? parsed.error : undefined;
           reason =
             typeof parsed.reason === "string" ? parsed.reason : undefined;
@@ -86,7 +90,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
       // not JSON / unreadable body
     }
     if (!msg) msg = `HTTP ${r.status}`;
-    throw new ApiError(r.status, msg, code, reason);
+    throw new ApiError(r.status, msg, code, reason, data);
   }
   if (r.status === 204) return undefined as T;
   try {

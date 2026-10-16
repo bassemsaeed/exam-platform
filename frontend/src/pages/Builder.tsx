@@ -26,7 +26,7 @@ import {
   type Subject,
 } from "../lib/platform";
 import { apiUrl } from "../lib/seb";
-import { Badge, Empty, Feedback, Loading, PageTitle } from "../components/ui";
+import { Badge, Dialog, Empty, Feedback, Loading, PageTitle } from "../components/ui";
 import { Combo, DateTimeField, MultiPicker, Sheet } from "../components/builder";
 
 const STEPS = ["Settings", "Audience", "Blueprint", "Review"];
@@ -135,6 +135,12 @@ export function ExamWizard({ user }: { user: SessionUser }) {
   const [step, setStep] = useState(0);
   const [subject, setSubject] = useState("");
   const [duration, setDuration] = useState(45);
+  // Kind: doctors/admins choose midterm (approved) or quiz (instant);
+  // TAs only ever make quizzes.
+  const canMidterm = user.role !== "ta";
+  const [purpose, setPurpose] = useState<"midterm" | "quiz">(canMidterm ? "midterm" : "quiz");
+  const [title, setTitle] = useState("");
+  const [createdWarn, setCreatedWarn] = useState<{ id: string; warnings: string[] } | null>(null);
   const [notesEnabled, setNotesEnabled] = useState(false);
   const [resultsReleased, setResultsReleased] = useState(false);  const [examToolsEnabled, setExamToolsEnabled] = useState(true);
   const [notesForDoctorEnabled, setNotesForDoctorEnabled] = useState(false);
@@ -166,6 +172,8 @@ export function ExamWizard({ user }: { user: SessionUser }) {
     if (typeof d.notesForDoctorEnabled === "boolean") setNotesForDoctorEnabled(d.notesForDoctorEnabled);
     if (typeof d.maxReentries === "number") setMaxReentries(d.maxReentries);
     if (typeof d.duration === "number") setDuration(d.duration);
+    if (d.purpose === "midterm" || d.purpose === "quiz") setPurpose(canMidterm ? d.purpose : "quiz");
+    if (typeof d.title === "string") setTitle(d.title);
     if (typeof d.startLocal === "string") setStartLocal(d.startLocal);
     if (typeof d.endLocal === "string") setEndLocal(d.endLocal);
     if (typeof d.scope === "string") setScope(d.scope);
@@ -181,7 +189,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const draftDirty =
-    !!subject || !!startLocal || !!endLocal || sectionSel.length > 0 ||
+    !!subject || !!startLocal || !!endLocal || !!title || sectionSel.length > 0 ||
     pickedStudents.length > 0 || picked.length > 0;
   useEffect(() => {
     try {
@@ -192,14 +200,14 @@ export function ExamWizard({ user }: { user: SessionUser }) {
       sessionStorage.setItem(
         DRAFT_KEY(user.id),
         JSON.stringify({
-          subject, duration, notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel,
+          subject, duration, purpose, title, notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel,
           pickedStudents, source, manual, mix, picked, step,
         }),
       );
     } catch {
       // storage full/blocked: builder still works, just not resumable
     }
-  }, [user.id, subject, duration, notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel, pickedStudents, source, manual, mix, picked, step ]);
+  }, [user.id, subject, duration, purpose, title, notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel, pickedStudents, source, manual, mix, picked, step ]);
 
   const sections = useResource<Envelope<Entity>>(
     user,
@@ -224,6 +232,20 @@ export function ExamWizard({ user }: { user: SessionUser }) {
     !!subject && (manual || step === 3) && step >= 2,
   );
   const action = useAction<Exam>(user, ["/api/v1/exams", "/api/v1/admin/exams"]);
+  // Own exams (for the quiz-number suggestion + duplicate-name nudge).
+  const mine = useResource<Envelope<Exam>>(user, "/api/v1/exams/mine?limit=100");
+  const sameSubject = rowsOf(mine.data).filter((e) => e.subjectId === subject);
+  const quizNumbers = sameSubject
+    .map((e) => /^quiz\s+(\d+)\b/i.exec(e.title ?? "")?.[1])
+    .filter((n): n is string => !!n)
+    .map(Number)
+    .filter((n) => Number.isFinite(n));
+  const suggestedQuiz = `Quiz ${quizNumbers.length ? Math.max(...quizNumbers) + 1 : 1}`;
+  const dupeName =
+    title.trim() &&
+    sameSubject.some(
+      (e) => (e.title ?? "").trim().toLowerCase() === title.trim().toLowerCase(),
+    );
   const totalQ = mix.easy + mix.medium + mix.hard;
   // Smart close: picking Opens auto-fills Closes (opens + duration, min 60m
   // window) until the user overrides it by hand.
@@ -240,6 +262,8 @@ export function ExamWizard({ user }: { user: SessionUser }) {
   function valid(s: number): string {
     if (s === 0) {
       if (!subject) return "Choose a subject to continue.";
+      if (!title.trim()) return "Give this assessment a title.";
+      if (title.trim().length > 120) return "Title must be 120 characters or less.";
       if (!duration || duration < 1) return "Set a duration of at least 1 minute.";
       if (!startLocal || !endLocal) return "Pick opening and closing times.";
       const a = new Date(startLocal).getTime();
@@ -276,6 +300,8 @@ export function ExamWizard({ user }: { user: SessionUser }) {
         body: {
           subjectId: subject,
           type: user.role === "ta" ? "ta_quiz" : "doctor_exam",
+          title: title.trim(),
+          purpose: canMidterm ? purpose : "quiz",
           startTime,
           endTime,
           durationMinutes: duration,
@@ -295,7 +321,9 @@ export function ExamWizard({ user }: { user: SessionUser }) {
         } catch {
           // ignore
         }
-        navigate("/exams/" + e.id);
+        const warnings = (e as unknown as { warnings?: string[] })?.warnings;
+        if (warnings?.length) setCreatedWarn({ id: e.id, warnings });
+        else navigate("/exams/" + e.id);
       } },
     );
   }
@@ -357,6 +385,58 @@ export function ExamWizard({ user }: { user: SessionUser }) {
             <h2>
               <Settings2 size={16} /> {t("Assessment settings")}
             </h2>
+            {canMidterm && (
+              <div className="field">
+                <span className="field-label">{t("What are you making?")}</span>
+                <div className="scope-cards two">
+                  <button
+                    type="button"
+                    className={purpose === "midterm" ? "on" : ""}
+                    aria-pressed={purpose === "midterm"}
+                    onClick={() => setPurpose("midterm")}
+                  >
+                    <b>{t("Midterm exam")}</b>
+                    <small>
+                      {t("Needs admin approval. One live per subject.")}
+                    </small>
+                  </button>
+                  <button
+                    type="button"
+                    className={purpose === "quiz" ? "on" : ""}
+                    aria-pressed={purpose === "quiz"}
+                    onClick={() => setPurpose("quiz")}
+                  >
+                    <b>{t("Quiz")}</b>
+                    <small>{t("Goes live immediately, no approval.")}</small>
+                  </button>
+                </div>
+              </div>
+            )}
+            <div className="field">
+              <label htmlFor="exam-title">{t("Title")}</label>
+              <input
+                id="exam-title"
+                value={title}
+                maxLength={120}
+                onChange={(e) => setTitle(e.target.value)}
+                placeholder={
+                  purpose === "quiz" ? suggestedQuiz : t("Midterm – Algebra")
+                }
+                autoComplete="off"
+              />
+              {purpose === "quiz" && !title.trim() && (
+                <small>
+                  {t("Suggestion: {0}", { "0": suggestedQuiz })}
+                </small>
+              )}
+              {dupeName ? (
+                <small role="status">
+                  {t(
+                    "Another assessment already uses this title — students will tell them apart by date, but consider renaming.",
+                  )}
+                </small>
+              ) : null}
+            </div>
             <div className="field">
               <span className="field-label">{t("Subject")}</span>
               <Combo
@@ -660,6 +740,30 @@ export function ExamWizard({ user }: { user: SessionUser }) {
         )}
 
         <Feedback error={error || action.error} />
+        {createdWarn && (
+          <Dialog
+            title={t("Created with a scheduling note")}
+            onClose={() => setCreatedWarn(null)}
+          >
+            <p className="dialog-copy">{createdWarn.warnings.join(" ")}</p>
+            <div className="dialog-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setCreatedWarn(null)}
+              >
+                {t(" Keep editing ")}
+              </button>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => navigate("/exams/" + createdWarn.id)}
+              >
+                {t(" View exam ")}
+              </button>
+            </div>
+          </Dialog>
+        )}
         <div className="builder-actions wizard-nav">
           <span>
             {step > 0 && (
@@ -878,7 +982,7 @@ export function QuestionSheet({
 // Modern replacement for the generic edit-window dialog: smart date popovers
 // + duration stepper instead of native datetime-local inputs.
 export function EditExamWindow({
-  notesEnabled: initialNotes = false, notesForDoctorEnabled: initialDoctorNotes = false, examToolsEnabled: initialExamTools = true, maxReentries: initialReentries = 3, resultsReleased: initialReleased = false,
+  notesEnabled: initialNotes = false, notesForDoctorEnabled: initialDoctorNotes = false, examToolsEnabled: initialExamTools = true, maxReentries: initialReentries = 3, resultsReleased: initialReleased = false, title: initialTitle = "", purpose: initialPurpose = "quiz", canMidterm = false,
   startTime,
   endTime,
   durationMinutes,
@@ -894,6 +998,9 @@ export function EditExamWindow({
   examToolsEnabled?: boolean;
   maxReentries?: number;
   resultsReleased?: boolean;
+  title?: string;
+  purpose?: string;
+  canMidterm?: boolean;
   busy?: boolean;
   error?: unknown;
   onSubmit: (body: Record<string, unknown>) => void;
@@ -913,10 +1020,13 @@ export function EditExamWindow({
   const [notesForDoctorEnabled, setNotesForDoctorEnabled] = useState(initialDoctorNotes);
   const [maxReentries, setMaxReentries] = useState(initialReentries);
   const [resultsReleased, setResultsReleased] = useState(initialReleased);
+  const [title, setTitle] = useState(initialTitle);
+  const [purpose, setPurpose] = useState(initialPurpose);
   const [err, setErr] = useState("");
   function save() {
     const a = new Date(start).getTime();
     const b = new Date(end).getTime();
+    if (!title.trim()) return setErr("Give this assessment a title.");
     if (Number.isNaN(a) || Number.isNaN(b))
       return setErr("Pick valid opening and closing times.");
     if (b <= a) return setErr("Closing time must be after opening time.");
@@ -927,11 +1037,41 @@ export function EditExamWindow({
       startTime: new Date(start).toISOString(),
       endTime: new Date(end).toISOString(),
       durationMinutes: dur,
+      title: title.trim(),
+      ...(canMidterm ? { purpose } : {}),
       notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, resultsReleased,
     });
   }
   return (
     <div>
+      <div className="field">
+        <label htmlFor="edit-exam-title">{t("Title")}</label>
+        <input
+          id="edit-exam-title"
+          value={title}
+          maxLength={120}
+          onChange={(e) => setTitle(e.target.value)}
+          autoComplete="off"
+        />
+      </div>
+      {canMidterm && (
+        <div className="field">
+          <span className="field-label">{t("Kind")}</span>
+          <div className="seg-pick">
+            {(["midterm", "quiz"] as const).map((k) => (
+              <button
+                key={k}
+                type="button"
+                className={purpose === k ? "on" : ""}
+                aria-pressed={purpose === k}
+                onClick={() => setPurpose(k)}
+              >
+                {k === "midterm" ? t("Midterm exam") : t("Quiz")}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="form-grid">
         <DateTimeField value={start} onChange={setStart} label="Opens at" />
         <DateTimeField

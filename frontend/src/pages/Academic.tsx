@@ -54,6 +54,7 @@ export function Exams({ user }: { user: SessionUser }) {
   const student = user.role === "student";
   const [page, setPage] = useState(1);
   const [status, setStatus] = useState("");
+  const [kind, setKind] = useState("");
   const [search, setSearch] = useState("");
   const path = student
     ? "/api/v1/student/exams"
@@ -75,7 +76,62 @@ export function Exams({ user }: { user: SessionUser }) {
     `${nameOf(e, rowsOf(subjects.data))} ${e.type}`
       .toLowerCase()
       .includes(search.toLowerCase()),
-  );
+  ).filter((e) => !kind || (e.purpose ?? (e.type === "ta_quiz" ? "quiz" : "midterm")) === kind);
+  // Staff grouping: the live one is unmistakable, drafts sit apart from history.
+  const nowT = Date.now();
+  const isLiveRow = (e: Exam) =>
+    e.status === "approved" &&
+    new Date(e.startTime).getTime() <= nowT &&
+    new Date(e.endTime).getTime() >= nowT;
+  const liveRows = student ? [] : rows.filter(isLiveRow);
+  const pendingRows = student ? [] : rows.filter((e) => e.status === "pending_approval");
+  const draftRows = student ? [] : rows.filter((e) => ["draft", "rejected"].includes(e.status));
+  const pastRows = student
+    ? []
+    : rows.filter(
+        (e) => !isLiveRow(e) && !["pending_approval", "draft", "rejected"].includes(e.status),
+      );
+  function examCards(list: Exam[]) {
+    return (
+      <div className="exam-grid">
+        {list.map((e) => (
+          <article className="exam-card" key={e.id}>
+            <div className="exam-card-top">
+              <span className="assessment-icon">
+                <ShieldCheck size={20} />
+              </span>
+              <Badge value={student ? "available" : e.status} />
+            </div>
+            <small className="course-code">
+              {e.subject?.code ?? t("ASSESSMENT")}
+            </small>
+            <h2>{nameOf(e, rowsOf(subjects.data))}</h2>
+            <p>
+              {t(label(e.purpose ?? (e.type === "ta_quiz" ? "quiz" : "midterm")))} ·{" "}
+              {t(label(e.type))} · {e.durationMinutes}
+              {t(" minutes ")}
+            </p>
+            <div className="exam-card-date">
+              <Clock size={15} />
+              <span>
+                {date(e.startTime)} · {time(e.startTime)}
+              </span>
+            </div>
+            {e.rejectionReason && (
+              <p className="rejection-note">{e.rejectionReason}</p>
+            )}
+            <Link
+              className="exam-card-action"
+              to={student ? `/exams/${e.id}/take` : `/exams/${e.id}`}
+            >
+              {student ? t("Begin or resume") : t("View assessment")}{" "}
+              <ArrowUpRight size={16} />
+            </Link>
+          </article>
+        ))}
+      </div>
+    );
+  }
   // Proctoring overview: the staffer's exams whose window is open right now,
   // with live headcounts. Students never see this; admins see everything.
   const liveNow = useResource<{
@@ -163,6 +219,21 @@ export function Exams({ user }: { user: SessionUser }) {
             ariaLabel={t("Filter exam status")}
           />
         )}
+        {!student && (
+          <Combo
+            value={kind}
+            options={[
+              { value: "", label: t("Midterms & quizzes") },
+              { value: "midterm", label: t("Midterms") },
+              { value: "quiz", label: t("Quizzes") },
+            ]}
+            onChange={(v) => {
+              setKind(v);
+              setPage(1);
+            }}
+            ariaLabel={t("Filter exam kind")}
+          />
+        )}
         <button className="secondary" onClick={() => query.refetch()}>
           <RefreshCw size={15} />
           {t(" Refresh ")}
@@ -171,54 +242,50 @@ export function Exams({ user }: { user: SessionUser }) {
       <Feedback error={query.error} />
       {query.isPending ? (
         <Loading />
-      ) : rows.length ? (
-        <div className="exam-grid">
-          {rows.map((e) => (
-            <article className="exam-card" key={e.id}>
-              <div className="exam-card-top">
-                <span className="assessment-icon">
-                  <ShieldCheck size={20} />
-                </span>
-                <Badge value={student ? "available" : e.status} />
-              </div>
-              <small className="course-code">
-                {e.subject?.code ?? t("ASSESSMENT")}
-              </small>
-              <h2>{nameOf(e, rowsOf(subjects.data))}</h2>
-              <p>
-                {t(label(e.type))} · {e.durationMinutes}
-                {t(" minutes ")}
-              </p>
-              <div className="exam-card-date">
-                <Clock size={15} />
-                <span>
-                  {date(e.startTime)} · {time(e.startTime)}
-                </span>
-              </div>
-              {e.rejectionReason && (
-                <p className="rejection-note">{e.rejectionReason}</p>
-              )}
-              <Link
-                className="exam-card-action"
-                to={student ? `/exams/${e.id}/take` : `/exams/${e.id}`}
-              >
-                {student ? t("Begin or resume") : t("View assessment")}{" "}
-                <ArrowUpRight size={16} />
-              </Link>
-            </article>
-          ))}
-        </div>
-      ) : (
-        !query.error && (
-          <Empty
-            title={t("No exams found")}
-            text={
-              student
-                ? "Exams appear here during their availability window."
-                : "Try a different filter or create a new assessment."
-            }
-          />
+      ) : student ? (
+        rows.length ? (
+          examCards(rows)
+        ) : (
+          !query.error && (
+            <Empty
+              title={t("No exams found")}
+              text={t("Exams appear here during their availability window.")}
+            />
+          )
         )
+      ) : (
+        <>
+          {liveRows.length > 0 && (
+            <>
+              <h3 className="analytics-sub">{t("Live now")}</h3>
+              {examCards(liveRows)}
+            </>
+          )}
+          {pendingRows.length > 0 && (
+            <>
+              <h3 className="analytics-sub">{t("Waiting for approval")}</h3>
+              {examCards(pendingRows)}
+            </>
+          )}
+          {draftRows.length > 0 && (
+            <>
+              <h3 className="analytics-sub">{t("Drafts")}</h3>
+              {examCards(draftRows)}
+            </>
+          )}
+          {pastRows.length > 0 && (
+            <>
+              <h3 className="analytics-sub">{t("Past")}</h3>
+              {examCards(pastRows)}
+            </>
+          )}
+          {!rows.length && !query.error && (
+            <Empty
+              title={t("No exams found")}
+              text={t("Try a different filter or create a new assessment.")}
+            />
+          )}
+        </>
       )}{" "}
       {student && !query.isPending && !query.error && (
         <section className="panel upcoming-panel">
@@ -326,6 +393,9 @@ export function ExamDetail({ user }: { user: SessionUser }) {
   const admin = user.role === "admin";
   const [tab, setTab] = useState("blueprint");
   const [operation, setOperation] = useState("");
+  const [conflicts, setConflicts] = useState<
+    { id: string; title: string; purpose: string; status: string }[] | null
+  >(null);
   const [compStudents, setCompStudents] = useState<string[]>([]);
   const action = useAction(user, ["/api/v1/exams", "/api/v1/admin/exams"]);
   const query = useResource<{
@@ -440,9 +510,24 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                       className="primary"
                       disabled={action.isPending}
                       onClick={() =>
-                        action.mutate({
-                          path: `/api/v1/admin/exams/${id}/approve`,
-                        })
+                        action.mutate(
+                          {
+                            path: `/api/v1/admin/exams/${id}/approve`,
+                          },
+                          {
+                            onError: (err) => {
+                              const data = (err as { data?: { conflicts?: { id: string; title: string; purpose: string; status: string }[] } })?.data;
+                              if (
+                                err instanceof Error &&
+                                "status" in err &&
+                                (err as { status?: number }).status === 409 &&
+                                data?.conflicts?.length
+                              ) {
+                                setConflicts(data.conflicts);
+                              }
+                            },
+                          },
+                        )
                       }
                     >
                       {t(" Approve exam ")}
@@ -915,6 +1000,59 @@ export function ExamDetail({ user }: { user: SessionUser }) {
           </>
         )
       )}
+      {conflicts && (
+        <Dialog
+          title={t("Another midterm covers this window")}
+          onClose={() => setConflicts(null)}
+        >
+          <p className="dialog-copy">
+            {t(
+              "Only one live midterm per subject is allowed. Close the conflicting midterm and approve this one instead?",
+            )}
+          </p>
+          {conflicts.map((c) => (
+            <div className="question-preview" key={c.id}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <b>{c.title || t("Untitled")}</b>
+                <small>
+                  {t(label(c.purpose))} · {t(label(c.status))}
+                </small>
+              </div>
+            </div>
+          ))}
+          <Feedback error={action.error} />
+          <div className="dialog-actions">
+            <button
+              type="button"
+              className="secondary"
+              onClick={() => setConflicts(null)}
+            >
+              {t(" Keep both pending ")}
+            </button>
+            <button
+              type="button"
+              className="primary"
+              disabled={action.isPending}
+              onClick={() =>
+                action.mutate(
+                  {
+                    path: `/api/v1/admin/exams/${id}/approve`,
+                    body: { closeConflicts: true },
+                  },
+                  {
+                    onSuccess: () => {
+                      setConflicts(null);
+                      query.refetch();
+                    },
+                  },
+                )
+              }
+            >
+              {action.isPending ? t("Working…") : t("Close & approve")}
+            </button>
+          </div>
+        </Dialog>
+      )}
       {operation === "delete" && (
         <Confirm
           title={t("Delete assessment?")}
@@ -963,6 +1101,9 @@ export function ExamDetail({ user }: { user: SessionUser }) {
               startTime={e.startTime}
               endTime={e.endTime}
               durationMinutes={e.durationMinutes}
+              title={e.title}
+              purpose={e.purpose}
+              canMidterm={admin || user.role === "doctor"}
               notesEnabled={e.notesEnabled}
               notesForDoctorEnabled={e.notesForDoctorEnabled}
               examToolsEnabled={e.examToolsEnabled}

@@ -42,6 +42,11 @@ enum ExamType {
   ta_quiz
 }
 
+enum ExamPurpose {
+  midterm
+  quiz
+}
+
 enum ExamStatus {
   draft
   pending_approval
@@ -322,6 +327,12 @@ model Exam {
   startTime       DateTime   @db.Timestamptz(6) @map("start_time")
   endTime         DateTime   @db.Timestamptz(6) @map("end_time")
   durationMinutes Int        @map("duration_minutes")
+  // Display identity: free-text title shown everywhere (lists, runner,
+  // results, exports, analytics) so same-subject exams stay distinguishable.
+  title           String     @default("") @db.VarChar(120)
+  // Midterm vs quiz: midterms need approval and obey the one-live-per-
+  // subject+term overlap rule; quizzes go live immediately. TAs: quiz only.
+  purpose         ExamPurpose @default(quiz) @map("purpose")
   notesEnabled Boolean @default(false) @map("notes_enabled")
   notesForDoctorEnabled Boolean @default(false) @map("notes_for_doctor_enabled")
   examToolsEnabled Boolean @default(true) @map("exam_tools_enabled")

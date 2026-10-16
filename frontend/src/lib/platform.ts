@@ -19,6 +19,8 @@ export interface Subject extends Entity {
 }
 export interface Exam extends Entity {
   createdBy?: string;
+  title?: string;
+  purpose?: string;
   notesEnabled?: boolean;
   notesForDoctorEnabled?: boolean;
   examToolsEnabled?: boolean;
@@ -167,6 +169,7 @@ export const time = (s: unknown) =>
       }).format(new Date(String(s)))
     : "—";
 export const nameOf = (exam: Exam, subjects: Subject[] = []) =>
-  exam.subject?.name ??
-  subjects.find((s) => s.id === exam.subjectId)?.name ??
-  "Exam";
+  exam.title ||
+  (exam.subject?.name ??
+    subjects.find((s) => s.id === exam.subjectId)?.name ??
+    "Exam");

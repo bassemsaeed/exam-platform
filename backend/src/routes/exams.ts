@@ -156,6 +156,8 @@ exams.post("/", async (req, res) => {
       subjectId: z.string(),
       termId: z.string().optional(),
       type: z.enum(["doctor_exam", "ta_quiz"]),
+      title: z.string().trim().min(1).max(120),
+      purpose: z.enum(["midterm", "quiz"]).default("quiz"),
       startTime: z.string().datetime(),
       endTime: z.string().datetime(),
       durationMinutes: z.number().int().positive(),
@@ -208,6 +210,8 @@ exams.post("/", async (req, res) => {
   }
   if (a.role === "ta") {
     if (body.type !== "ta_quiz") return res.status(403).json({ error: "TAs create ta_quiz" });
+    // TAs make quizzes only — midterms are a doctor+admin affair.
+    if (body.purpose !== "quiz") return res.status(403).json({ error: "TAs create quizzes only" });
     if (!(await hasPermission(a.userId, a.role, "create_quiz"))) return res.status(403).json({ error: "forbidden", need: "create_quiz" });
     if (body.targetScope !== "sections" || !body.targetSections?.length) {
       return res.status(422).json({ error: "TA quiz needs targetSections" });
@@ -262,7 +266,11 @@ exams.post("/", async (req, res) => {
         termId,
         type: body.type,
         createdBy: a.userId,
-        status: a.role === "ta" ? "approved" : a.role === "admin" ? "approved" : "pending_approval",
+        // Quizzes go live immediately (no approval queue); midterms wait for
+        // admin unless created by one. TAs can only reach this line as quiz.
+        status: body.purpose === "quiz" || a.role === "admin" ? "approved" : "pending_approval",
+        title: body.title,
+        purpose: body.purpose,
         startTime: start,
         endTime: end,
         durationMinutes: body.durationMinutes,
@@ -282,8 +290,50 @@ exams.post("/", async (req, res) => {
     return exam;
   });
   await audit(a.userId, "exam.create", "exam", row.id, { type: body.type, status: row.status });
-  res.status(201).json(row);
+  // Soft overlap warning (never blocks): exams sharing this subject+term and
+  // window, so the author can spot double-bookings before students do.
+  const warnings: string[] = [];
+  try {
+    const clashes = await overlappingExams(row.id, body.subjectId, termId, start, end, body.targetScope === "sections" ? (body.targetSections ?? []) : null);
+    for (const c of clashes.slice(0, 3)) {
+      warnings.push(`${c.title || "Untitled"} overlaps this window (${c.status})`);
+    }
+  } catch {
+    // Warning is advisory only — creation already committed.
+  }
+  res.status(201).json({ ...row, warnings });
 });
+
+// Windows overlap when a.start < b.end && b.start < a.end. Same subject+term,
+// both approved; optionally restricted to shared sections. Powers the soft
+// creation warning and the hard one-live-midterm approval rule.
+export async function overlappingExams(
+  excludeId: string,
+  subjectId: string,
+  termId: string,
+  start: Date,
+  end: Date,
+  sectionIds: string[] | null,
+  purpose?: "midterm" | "quiz",
+): Promise<{ id: string; title: string; purpose: string; status: string }[]> {
+  const rows = await prisma.exam.findMany({
+    where: {
+      id: { not: excludeId },
+      subjectId,
+      termId,
+      status: "approved",
+      ...(purpose ? { purpose } : {}),
+      startTime: { lt: end },
+      endTime: { gt: start },
+    },
+    select: { id: true, title: true, purpose: true, status: true, targetScope: true, targetSections: { select: { sectionId: true } } },
+  });
+  if (!sectionIds) return rows.map(({ targetScope, targetSections, ...r }) => r);
+  const wanted = new Set(sectionIds);
+  return rows
+    .filter((r) => r.targetScope !== "sections" || r.targetSections.some((t) => wanted.has(t.sectionId)))
+    .map(({ targetScope, targetSections, ...r }) => r);
+}
 
 async function ownExamOrAdmin(userId: string, role: string, id: string) {
   const exam = await prisma.exam.findUnique({ where: { id } });
@@ -415,7 +465,7 @@ exams.get("/:id/blueprint", async (req, res) => {
 exams.patch("/:id", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const body = z
-    .object({ notesEnabled: z.boolean().optional(), notesForDoctorEnabled: z.boolean().optional(), examToolsEnabled: z.boolean().optional(), maxReentries: z.number().int().min(0).max(20).optional(), resultsReleased: z.boolean().optional(), startTime: z.string().datetime().optional(), endTime: z.string().datetime().optional(), durationMinutes: z.number().int().positive().optional(), difficultyMix: mixInput.optional() })
+    .object({ title: z.string().trim().min(1).max(120).optional(), purpose: z.enum(["midterm", "quiz"]).optional(), notesEnabled: z.boolean().optional(), notesForDoctorEnabled: z.boolean().optional(), examToolsEnabled: z.boolean().optional(), maxReentries: z.number().int().min(0).max(20).optional(), resultsReleased: z.boolean().optional(), startTime: z.string().datetime().optional(), endTime: z.string().datetime().optional(), durationMinutes: z.number().int().positive().optional(), difficultyMix: mixInput.optional() })
     .parse(req.body);
   // NOTE: hand-picked blueprints lock at creation (sittings may reference
   // exact IDs) — PATCH covers window/duration/mix only, and mix patches on a
@@ -449,7 +499,9 @@ exams.patch("/:id", async (req, res) => {
   }
   const row = await prisma.exam.update({
     where: { id: own.exam.id },
-    data: { ...body, ...(own.exam.status === "approved" && a.role === "doctor" ? { status: "pending_approval" as const, approvedBy: null } : {}) },
+    // Title/purpose edits are free, but flipping purpose on an approved exam
+    // re-queues it (a quiz silently becoming a midterm must not skip approval).
+    data: { ...body, ...(own.exam.status === "approved" && (a.role === "doctor" || (body.purpose && body.purpose !== own.exam.purpose)) ? { status: "pending_approval" as const, approvedBy: null } : {}) },
   });
   await audit(a.userId, "exam.update", "exam", row.id, body);
   res.json(row);

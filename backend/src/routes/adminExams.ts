@@ -8,7 +8,7 @@ import { checkMix, checkWindow, mixShortfall, poolCounts } from "../lib/examRule
 import { poolForExam } from "../lib/sampling.js";
 import { broadcastExamEvent, emitExamEvent } from "../lib/events.js";
 import { hashEntryCode } from "../lib/sebCrypto.js";
-import { poolWhere } from "./exams.js";
+import { overlappingExams, poolWhere } from "./exams.js";
 import { envelope, page, pageQuery } from "../lib/pagination.js";
 import { prisma } from "../lib/prisma.js";
 import { requireAuth, requireRole, type AuthedRequest } from "../middleware/auth.js";
@@ -38,6 +38,8 @@ adminExams.get("/", async (req, res) => {
         endTime: true,
         durationMinutes: true,
         difficultyMix: true,
+        title: true,
+        purpose: true,
         notesEnabled: true,
         notesForDoctorEnabled: true,
         examToolsEnabled: true,
@@ -144,10 +146,33 @@ adminExams.post("/:id/approve", async (req, res) => {
   // whose start just passed would otherwise be unrescuable (locked forever,
   // never takable). Only a fully-ended exam refuses approval. Edits and
   // deletes keep the strict pre-start lock via guardEditable.
+  const { closeConflicts } = z.object({ closeConflicts: z.boolean().optional() }).parse(req.body ?? {});
   const exam = await prisma.exam.findUnique({ where: { id: String(req.params.id) } });
   if (!exam) return res.status(404).json({ error: "not found" });
   if (exam.endTime.getTime() <= Date.now())
     return res.status(409).json({ error: "locked", reason: "exam window has ended" });
+  // One live midterm per subject+term (window overlap, not just "right now",
+  // so a scheduled December midterm isn't blocked by October's). Quizzes and
+  // non-overlapping windows pass freely. closeConflicts atomically closes the
+  // blockers first — the "replace the live midterm" action.
+  if (exam.purpose === "midterm") {
+    const conflicts = await overlappingExams(exam.id, exam.subjectId, exam.termId, exam.startTime, exam.endTime, null, "midterm");
+    if (conflicts.length && !closeConflicts) {
+      return res.status(409).json({ error: "midterm overlap", reason: "another approved midterm covers this window", conflicts });
+    }
+    if (conflicts.length) {
+      const me = (req as unknown as AuthedRequest).userId;
+      const row = await prisma.$transaction(async (tx) => {
+        await tx.exam.updateMany({ where: { id: { in: conflicts.map((c) => c.id) } }, data: { status: "closed" } });
+        for (const c of conflicts) {
+          await tx.auditLog.create({ data: { actorId: me, action: "exam.auto-close", entityType: "exam", entityId: c.id, metadata: { replacedBy: exam.id } as never } });
+        }
+        return tx.exam.update({ where: { id: exam.id }, data: { status: "approved", approvedBy: me, rejectionReason: null } });
+      });
+      await audit(me, "exam.approve", "exam", row.id, { replaced: conflicts.map((c) => c.id) });
+      return res.json(row);
+    }
+  }
   const g = { exam };
   // Revalidate the pool at approval time: banks change after creation, and an
   // approved-but-unstartable exam fails on exam day instead of in the queue.
@@ -197,7 +222,7 @@ adminExams.post("/:id/reject", async (req, res) => {
 // keeps serving manualQuestionIds). Convert via delete+recreate instead.
 adminExams.patch("/:id", async (req, res) => {
   const body = z
-    .object({ notesEnabled: z.boolean().optional(), notesForDoctorEnabled: z.boolean().optional(), examToolsEnabled: z.boolean().optional(), maxReentries: z.number().int().min(0).max(20).optional(), resultsReleased: z.boolean().optional(), startTime: z.string().datetime().optional(), endTime: z.string().datetime().optional(), durationMinutes: z.number().int().positive().optional(), difficultyMix: z.record(z.string(), z.number()).optional() })
+    .object({ title: z.string().trim().min(1).max(120).optional(), purpose: z.enum(["midterm", "quiz"]).optional(), notesEnabled: z.boolean().optional(), notesForDoctorEnabled: z.boolean().optional(), examToolsEnabled: z.boolean().optional(), maxReentries: z.number().int().min(0).max(20).optional(), resultsReleased: z.boolean().optional(), startTime: z.string().datetime().optional(), endTime: z.string().datetime().optional(), durationMinutes: z.number().int().positive().optional(), difficultyMix: z.record(z.string(), z.number()).optional() })
     .parse(req.body);
   const g = await guardEditable(req.params.id);
   if ("error" in g)
