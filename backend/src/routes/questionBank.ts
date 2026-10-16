@@ -70,7 +70,7 @@ questionBank.use(requireAuth, requirePermission("manage_question_bank"));
 questionBank.get("/", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const q = pageQuery
-    .extend({ subject_id: z.string(), owner_type: z.enum(["doctor", "ta_shared"]).optional(), mine: z.enum(["true", "false"]).optional().transform((v) => v === "true"), difficulty: z.enum(DIFFS).optional(), search: z.string().max(120).optional() })
+    .extend({ subject_id: z.string(), owner_type: z.enum(["doctor", "ta_shared"]).optional(), mine: z.enum(["true", "false"]).optional().transform((v) => v === "true"), difficulty: z.enum(DIFFS).optional(), search: z.string().max(120).optional(), has_image: z.enum(["true", "false"]).optional().transform((v) => v === "true") })
     .parse(req.query);
   if (!(await mayBank(a.userId, a.role, q.subject_id))) return res.status(403).json({ error: "not your subject" });
   // Banks are separate: doctors see private, TAs see shared (never each other's).
@@ -86,6 +86,9 @@ questionBank.get("/", async (req, res) => {
     ...(a.role === "doctor" ? { doctorId: a.userId } : q.mine ? { addedByTaId: a.userId } : {}),
     ...(q.difficulty ? { difficulty: q.difficulty } : {}),
     ...(q.search?.trim() ? { text: { contains: q.search.trim(), mode: "insensitive" as const } } : {}),
+    // Image presence: null or empty string both count as missing.
+    ...(q.has_image === true ? { NOT: [{ imageUrl: null }, { imageUrl: "" }] } : {}),
+    ...(q.has_image === false ? { OR: [{ imageUrl: null }, { imageUrl: "" }] } : {}),
   };
   const [total, rows] = await Promise.all([
     prisma.question.count({ where }),

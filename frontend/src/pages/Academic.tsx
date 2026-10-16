@@ -11,6 +11,7 @@ import {
   ShieldCheck,
   RefreshCw,
   Radio,
+  Image as ImageIcon,
 } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { api, type SessionUser } from "../lib/api";
@@ -1228,6 +1229,7 @@ export function QuestionBank({ user }: { user: SessionUser }) {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [difficulty, setDifficulty] = useState("");
+  const [hasImage, setHasImage] = useState("");
   const [edit, setEdit] = useState<Question | "new" | null>(null);
   const [remove, setRemove] = useState<Question | null>(null);
   const [uploadError, setUploadError] = useState("");
@@ -1236,7 +1238,7 @@ export function QuestionBank({ user }: { user: SessionUser }) {
   const [createdQuestion, setCreatedQuestion] = useState<Question | null>(null);
   const query = useResource<Envelope<Question>>(
     user,
-    `/api/v1/question-bank?subject_id=${selectedSubject}&page=${page}&limit=10&search=${encodeURIComponent(search)}${difficulty ? "&difficulty=" + difficulty : ""}`,
+    `/api/v1/question-bank?subject_id=${selectedSubject}&page=${page}&limit=10&search=${encodeURIComponent(search)}${difficulty ? "&difficulty=" + difficulty : ""}${hasImage ? "&has_image=" + hasImage : ""}`,
     !!selectedSubject,
   );
   const action = useAction<Question>(user, [
@@ -1312,6 +1314,19 @@ export function QuestionBank({ user }: { user: SessionUser }) {
           placeholder="All difficulties"
           ariaLabel={t("Difficulty")}
         />
+        <Combo
+          value={hasImage}
+          options={[
+            { value: "", label: t("All questions") },
+            { value: "true", label: t("With images") },
+            { value: "false", label: t("Missing images") },
+          ]}
+          onChange={(v) => {
+            setHasImage(v);
+            setPage(1);
+          }}
+          ariaLabel={t("Filter by image")}
+        />
       </div>
       <Feedback error={query.error} />
       {(query.isPending || query.isPlaceholderData) && selectedSubject ? (
@@ -1323,6 +1338,18 @@ export function QuestionBank({ user }: { user: SessionUser }) {
               <div>
                 <div className="question-tags">
                   <Badge value={q.difficulty} />
+                  <span
+                    className={`img-flag ${q.imageUrl ? "has" : "missing"}`}
+                    role="img"
+                    aria-label={
+                      q.imageUrl ? t("Has diagram") : t("No image attached")
+                    }
+                    title={
+                      q.imageUrl ? t("Has diagram") : t("No image attached")
+                    }
+                  >
+                    <ImageIcon size={13} />
+                  </span>
                   <span>
                     {t(label(q.questionType))} · {q.grade}
                     {t(" marks ")}
