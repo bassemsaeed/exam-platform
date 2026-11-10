@@ -302,22 +302,34 @@ adminExams.post("/:id/compensate", async (req, res) => {
     })
     .parse(req.body);
   const me = (req as unknown as AuthedRequest).userId;
-  const exam = await prisma.exam.findUnique({ where: { id: req.params.id }, select: { id: true } });
+  const exam = await prisma.exam.findUnique({ where: { id: req.params.id } });
   if (!exam) return res.status(404).json({ error: "not found" });
   const question = await prisma.question.findUnique({ where: { id: body.question_id }, select: { id: true, grade: true } });
   if (!question) return res.status(404).json({ error: "question not found" });
-  // The question must belong to THIS exam (pinned blueprint or sampled
-  // sitting): a typo'd or foreign ID would otherwise write the wrong tier
-  // and leave a misleading compensation trail.
-  const inExam =
+  // The question must belong to THIS exam (pinned blueprint, sampled sitting,
+  // or the exam's sampling pool): a typo'd or foreign ID would otherwise write
+  // the wrong tier and leave a misleading compensation trail.
+  let inExam =
     (await prisma.studentExamQuestion.count({ where: { questionId: question.id, studentExam: { examId: exam.id } } })) > 0 ||
     (await prisma.exam.count({ where: { id: exam.id, manualQuestionIds: { array_contains: question.id } } })) > 0;
+  if (!inExam) {
+    const manual = Array.isArray(exam.manualQuestionIds) ? (exam.manualQuestionIds as string[]) : [];
+    if (!manual.length) {
+      const { poolForExam } = await import("../lib/sampling.js");
+      const pool = await poolForExam(prisma, exam);
+      if (pool.ok) {
+        inExam = (await prisma.question.count({ where: { id: question.id, ...(pool.where as object) } })) > 0;
+      }
+    }
+  }
   if (!inExam) return res.status(422).json({ error: "question is not part of this exam" });
   const fullGrade = Number(question.grade);
   if (body.adjustment_type === "set") {
     if (body.adjustment_value == null || body.adjustment_value < 0 || body.adjustment_value > fullGrade) {
       return res.status(422).json({ error: "set value must be within 0 and the question grade" });
     }
+  } else if (body.adjustment_type === "delta" && body.adjustment_value == null) {
+    return res.status(422).json({ error: "delta adjustment requires adjustment_value" });
   }
   // One row per (exam, question) — enforced by unique index. Duplicates grade
   // inconsistently by submit timing (live SQL is incremental, submit-time

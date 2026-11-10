@@ -6,8 +6,8 @@
 #   3. points the backend at it (CORS + auth) and restarts the backend.
 # systemd (exam-tunnel.service) keeps this running forever: reboots, crashes,
 # and Cloudflare-side drops all come back automatically with a fresh URL.
-set -u
-LOG=/tmp/cf4000.log
+set -euo pipefail
+LOG="$(mktemp -t cf-tunnel-XXXXXX.log)"
 # Paths resolve to THIS checkout (the review tree is the working tree; the old
 # exam-platform paths are retired). Override via env for custom layouts.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,7 +15,11 @@ ENV_FILE="${ENV_FILE:-$ROOT/backend/.env}"
 URL_FILE="${URL_FILE:-$ROOT/PUBLIC_URL.txt}"
 PORT="${PORT:-4000}"
 
-rm -f "$LOG"
+cleanup() {
+  rm -f "$LOG"
+}
+trap cleanup EXIT
+
 /usr/local/bin/cloudflared tunnel --url "http://localhost:$PORT" >"$LOG" 2>&1 &
 CF_PID=$!
 URL=""
@@ -25,7 +29,7 @@ for _ in $(seq 1 40); do
     echo "cloudflared exited early; see $LOG"
     exit 1
   fi
-  URL=$(grep -oE "https://[a-z0-9-]+\.trycloudflare\.com" "$LOG" 2>/dev/null | head -1)
+  URL=$(grep -oE "https://[a-z0-9-]+\.trycloudflare\.com" "$LOG" 2>/dev/null | head -1 || true)
   [ -n "$URL" ] && break
 done
 if [ -z "$URL" ]; then

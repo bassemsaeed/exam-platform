@@ -1,6 +1,14 @@
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { BookOpen, Building2, Users } from "lucide-react";
+import {
+  ArrowUpRight,
+  BookOpen,
+  Building2,
+  GraduationCap,
+  Layers,
+  Plus,
+  Users,
+} from "lucide-react";
 import { useT } from "../lib/i18n";
 import {
   useResource,
@@ -28,6 +36,7 @@ interface CollegeDeptInfo {
   id: string;
   code: string;
   name: string;
+  collegeId?: string | null;
   _count?: { users: number; subjects: number };
 }
 
@@ -43,11 +52,31 @@ interface College extends Entity {
 interface CollegeSubject extends Entity {
   code: string;
   name: string;
-  department?: { id: string; name: string } | null;
-  _count?: { questions: number; exams: number; enrollments: number };
+  department?: { id: string; name: string; code?: string } | null;
+  _count?: { questions: number; exams: number; enrollments: number; sections?: number };
+  doctorAssignments?: {
+    doctorId: string;
+    termId: string;
+    doctor: { id: string; name: string; username: string };
+    term: { id: string; name: string };
+  }[];
 }
 
-interface CollegeDetail extends Entity {
+interface CollegeDoctor extends Entity {
+  username: string;
+  name: string;
+  email?: string;
+  isActive?: boolean;
+  department?: { id: string; code: string; name: string } | null;
+  doctorAssignments?: {
+    subjectId: string;
+    termId: string;
+    subject: { id: string; code: string; name: string };
+    term: { id: string; name: string };
+  }[];
+}
+
+interface CollegeDetailData extends Entity {
   code: string;
   name: string;
   students?: number;
@@ -57,6 +86,7 @@ interface CollegeDetail extends Entity {
   subjects?: CollegeSubject[];
   subjectTotal?: number;
   subjectsTruncated?: boolean;
+  doctorsList?: CollegeDoctor[];
 }
 
 interface CollegeStudent extends Entity {
@@ -80,11 +110,20 @@ export function Colleges({ user }: { user: SessionUser }) {
     `/api/v1/admin/colleges/students/search?q=${encodeURIComponent(q)}`,
     q.trim().length > 1,
   );
+  const allColleges = rowsOf(query.data);
+  const filteredColleges = q.trim()
+    ? allColleges.filter(
+        (c) =>
+          c.name.toLowerCase().includes(q.trim().toLowerCase()) ||
+          c.code.toLowerCase().includes(q.trim().toLowerCase()),
+      )
+    : allColleges;
+
   return (
     <>
       <PageTitle
         title={t("Colleges")}
-        description={t("Faculties, their years, and enrolled students.")}
+        description={t("Faculties, academic departments, educators, and enrolled cohorts.")}
         action={
           <button
             className="primary"
@@ -93,7 +132,7 @@ export function Colleges({ user }: { user: SessionUser }) {
               setModal(true);
             }}
           >
-            {t(" New college ")}
+            <Plus size={16} /> {t(" New college ")}
           </button>
         }
       />
@@ -101,14 +140,17 @@ export function Colleges({ user }: { user: SessionUser }) {
         <SearchBox
           value={q}
           onChange={setQ}
-          placeholder={t("Find a student by name or username…")}
+          placeholder={t("Filter colleges or find a student by name / username…")}
         />
+        <span className="subtle">
+          {filteredColleges.length} {t("colleges")}
+        </span>
       </div>
       {q.trim().length > 1 && (
         <section className="panel">
           <div className="panel-heading">
             <div>
-              <h2>{t("Students")}</h2>
+              <h2>{t("Matching students across colleges")}</h2>
             </div>
           </div>
           <Feedback error={search.error} />
@@ -146,31 +188,51 @@ export function Colleges({ user }: { user: SessionUser }) {
       <Feedback error={query.error} />
       {query.isPending ? (
         <Loading />
-      ) : rowsOf(query.data).length ? (
-        <div className="exam-grid">
-          {rowsOf(query.data).map((c) => (
-            <article className="exam-card" key={c.id}>
-              <div className="exam-card-top">
-                <span className="assessment-icon">
-                  <Building2 size={18} />
-                </span>
-                <Badge value="active" />
-              </div>
-              <small className="course-code">{c.code}</small>
-              <h2>
-                <Link to={`/colleges/${c.id}`}>{c.name}</Link>
-              </h2>
-              <p>
-                {c.students ?? 0} {t("students")} · {c.doctors ?? 0}{" "}
-                {t("doctors")} ·{" "}
-                {typeof c.departments === "number" ? c.departments : 0}{" "}
-                {t("departments")} · {c.subjects ?? 0} {t("subjects")}
-              </p>
-              <Link className="exam-card-action" to={`/colleges/${c.id}`}>
-                {t("Open college")}
-              </Link>
-            </article>
-          ))}
+      ) : filteredColleges.length ? (
+        <div className="exam-grid academic-card-grid">
+          {filteredColleges.map((c) => {
+            const deptCount = typeof c.departments === "number" ? c.departments : (c.departments?.length ?? 0);
+            return (
+              <article className="exam-card academic-card" key={c.id}>
+                <div className="exam-card-top">
+                  <span className="assessment-icon">
+                    <Building2 size={18} />
+                  </span>
+                  <span className="code-pill">{c.code}</span>
+                </div>
+                <h2>
+                  <Link to={`/colleges/${c.id}`}>{c.name}</Link>
+                </h2>
+                <div className="card-metrics-grid">
+                  <div className="card-metric-pill">
+                    <Users size={14} />
+                    <strong>{c.students ?? 0}</strong>
+                    <span>{t("Students")}</span>
+                  </div>
+                  <div className="card-metric-pill">
+                    <GraduationCap size={14} />
+                    <strong>{c.doctors ?? 0}</strong>
+                    <span>{t("Educators")}</span>
+                  </div>
+                  <div className="card-metric-pill">
+                    <Layers size={14} />
+                    <strong>{deptCount}</strong>
+                    <span>{t("Depts")}</span>
+                  </div>
+                  <div className="card-metric-pill">
+                    <BookOpen size={14} />
+                    <strong>{c.subjects ?? 0}</strong>
+                    <span>{t("Subjects")}</span>
+                  </div>
+                </div>
+                <div className="exam-card-action">
+                  <Link className="button secondary small-btn" to={`/colleges/${c.id}`}>
+                    {t("Manage college")} <ArrowUpRight size={14} />
+                  </Link>
+                </div>
+              </article>
+            );
+          })}
         </div>
       ) : (
         !query.error && (
@@ -209,21 +271,23 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
   const t = useT();
   const { id } = useParams();
   const navigate = useNavigate();
-  const query = useResource<CollegeDetail>(
+  const query = useResource<CollegeDetailData>(
     user,
     `/api/v1/admin/colleges/${id}`,
   );
   const action = useAction(user, [
     "/api/v1/admin/colleges",
     `/api/v1/admin/colleges/${id}`,
+    "/api/v1/admin/departments",
   ]);
   const [year, setYear] = useState("");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [selected, setSelected] = useState<string[]>([]);
   const [moveYear, setMoveYear] = useState<number | null>(null);
-  const [op, setOp] = useState<"edit" | "merge" | "delete" | "dept" | null>(null);
+  const [op, setOp] = useState<"edit" | "merge" | "delete" | "dept" | "link-dept" | null>(null);
   const [deptTarget, setDeptTarget] = useState("");
+  const [linkDeptId, setLinkDeptId] = useState("");
   const students = useResource<Envelope<CollegeStudent>>(
     user,
     `/api/v1/admin/colleges/${id}/students?page=${page}&limit=20${year ? `&year=${year}` : ""}${search ? `&search=${encodeURIComponent(search)}` : ""}`,
@@ -234,11 +298,20 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
     "/api/v1/admin/colleges?limit=100",
     op === "merge",
   );
+  const allDepts = useResource<Envelope<CollegeDeptInfo>>(
+    user,
+    "/api/v1/admin/departments?limit=100",
+    op === "link-dept",
+  );
   const c = query.data;
   const toggle = (sid: string) =>
     setSelected((prev) =>
       prev.includes(sid) ? prev.filter((x) => x !== sid) : [...prev, sid],
     );
+  const deptList = Array.isArray(c?.departments) ? c.departments : [];
+  const linkedDeptIds = new Set(deptList.map((d) => d.id));
+  const linkableDepts = rowsOf(allDepts.data).filter((d) => !linkedDeptIds.has(d.id));
+
   return (
     <>
       <Link className="back-link" to="/colleges">
@@ -252,9 +325,12 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
           <>
             <PageTitle
               title={c.name}
-              description={`${c.code} · ${c.students ?? 0} ${t("students")} · ${c.doctors ?? 0} ${t("doctors")}`}
+              description={`${c.code} · ${c.students ?? 0} ${t("students")} · ${c.doctors ?? 0} ${t("doctors")} · ${c.subjectTotal ?? c.subjects?.length ?? 0} ${t("subjects")}`}
               action={
                 <div className="action-row">
+                  <button className="secondary" onClick={() => { setLinkDeptId(""); setOp("link-dept"); }}>
+                    <Plus size={15} /> {t(" Link department ")}
+                  </button>
                   <button className="secondary" onClick={() => setOp("edit")}>
                     {t(" Edit ")}
                   </button>
@@ -275,18 +351,278 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                 <small>{t("enrolled in this college")}</small>
               </div>
               <div className="stat-card">
-                <div>{t("Doctors")}</div>
+                <div>{t("Educators")}</div>
                 <strong>{c.doctors ?? 0}</strong>
-                <small>{t("teaching in this college")}</small>
+                <small>{t("doctors in this college")}</small>
               </div>
               <div className="stat-card">
                 <div>{t("Departments")}</div>
-                <strong>
-                  {Array.isArray(c.departments) ? c.departments.length : 0}
-                </strong>
+                <strong>{deptList.length}</strong>
                 <small>{t("linked departments")}</small>
               </div>
+              <div className="stat-card">
+                <div>{t("Subjects")}</div>
+                <strong>{c.subjectTotal ?? c.subjects?.length ?? 0}</strong>
+                <small>{t("courses in departments")}</small>
+              </div>
             </div>
+
+            <section className="panel">
+              <div className="panel-heading">
+                <div>
+                  <h2>
+                    {t("Departments")} · {deptList.length}
+                  </h2>
+                  <p>{t("Academic departments belonging to this college and their course catalog.")}</p>
+                </div>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => {
+                    setLinkDeptId("");
+                    setOp("link-dept");
+                  }}
+                >
+                  <Plus size={15} /> {t("Link department")}
+                </button>
+              </div>
+              {deptList.length > 0 ? (
+                <div className="exam-grid academic-card-grid">
+                  {deptList.map((d) => {
+                    const owned = (c.subjects ?? []).filter(
+                      (s) => s.department?.id === d.id,
+                    );
+                    return (
+                      <article className="exam-card academic-card" key={d.id}>
+                        <div className="exam-card-top">
+                          <span className="assessment-icon">
+                            <Building2 size={18} />
+                          </span>
+                          <span className="code-pill">{d.code}</span>
+                        </div>
+                        <h2>{d.name}</h2>
+                        <div className="card-metrics-grid two-col">
+                          <div className="card-metric-pill">
+                            <Users size={14} />
+                            <strong>{d._count?.users ?? 0}</strong>
+                            <span>{t("Members")}</span>
+                          </div>
+                          <div className="card-metric-pill">
+                            <BookOpen size={14} />
+                            <strong>{d._count?.subjects ?? owned.length}</strong>
+                            <span>{t("Subjects")}</span>
+                          </div>
+                        </div>
+                        {owned.length > 0 && (
+                          <div className="option-chips">
+                            {owned.map((s) => (
+                              <span key={s.id} title={s.name}>
+                                {s.code}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        <div className="exam-card-action">
+                          <span className="subtle">
+                            {typeof d._count?.subjects === "number" &&
+                            d._count.subjects > owned.length
+                              ? t("Showing {0} of {1}.", {
+                                  "0": owned.length,
+                                  "1": d._count.subjects,
+                                })
+                              : ""}
+                          </span>
+                          <button
+                            className="text-button"
+                            onClick={() => {
+                              setDeptTarget(d.id);
+                              setOp("dept");
+                            }}
+                          >
+                            {t(" Unlink ")}
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : (
+                <Empty
+                  title={t("No departments linked yet")}
+                  text={t("Link an existing department to organize subjects and educators under this college.")}
+                />
+              )}
+            </section>
+
+            <section className="panel">
+              <div className="panel-heading">
+                <div>
+                  <h2>
+                    {t("Subjects")}
+                    {typeof c.subjectTotal === "number" && ` · ${c.subjectTotal}`}
+                  </h2>
+                  <p>{t("Courses offered by this college's departments and their assigned educators.")}</p>
+                </div>
+                <Link className="button secondary" to="/admin/subjects">
+                  {t("Manage all subjects")}
+                </Link>
+              </div>
+              {c.subjects?.length ? (
+                <>
+                  <div className="exam-grid academic-card-grid">
+                    {c.subjects.map((s) => {
+                      const docs = s.doctorAssignments ?? [];
+                      return (
+                        <article className="exam-card academic-card" key={s.id}>
+                          <div className="exam-card-top">
+                            <span className="assessment-icon">
+                              <BookOpen size={18} />
+                            </span>
+                            <div className="card-badge-group">
+                              <span className="code-pill">{s.code}</span>
+                              {s.department?.name && (
+                                <span className="dept-pill">{s.department.name}</span>
+                              )}
+                            </div>
+                          </div>
+                          <h2>{s.name}</h2>
+                          <div className="card-metrics-grid three-col">
+                            <div className="card-metric-pill">
+                              <strong>{s._count?.enrollments ?? 0}</strong>
+                              <span>{t("Enrolled")}</span>
+                            </div>
+                            <div className="card-metric-pill">
+                              <strong>{s._count?.questions ?? 0}</strong>
+                              <span>{t("Questions")}</span>
+                            </div>
+                            <div className="card-metric-pill">
+                              <strong>{s._count?.exams ?? 0}</strong>
+                              <span>{t("Exams")}</span>
+                            </div>
+                          </div>
+                          <div className="card-educators-block">
+                            <span className="card-section-label">{t("Educators")}</span>
+                            {docs.length > 0 ? (
+                              <div className="educator-chip-list">
+                                {docs.map((da) => (
+                                  <Link
+                                    key={`${da.doctorId}-${da.termId}`}
+                                    to={`/admin/users/${da.doctor.id}`}
+                                    className="educator-chip"
+                                    title={`${da.doctor.name} (${da.term.name})`}
+                                  >
+                                    <GraduationCap size={13} />
+                                    <span>{da.doctor.name}</span>
+                                  </Link>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="subtle">{t("No educator assigned")}</span>
+                            )}
+                          </div>
+                          <div className="exam-card-action">
+                            <Link
+                              className="button secondary small-btn"
+                              to={`/admin/subjects?search=${encodeURIComponent(s.code)}`}
+                            >
+                              {t("Open subject")} <ArrowUpRight size={14} />
+                            </Link>
+                          </div>
+                        </article>
+                      );
+                    })}
+                  </div>
+                  {c.subjectsTruncated && (
+                    <p className="subtle">
+                      {t("Showing {0} of {1}.", {
+                        "0": c.subjects.length,
+                        "1": c.subjectTotal ?? c.subjects.length,
+                      })}
+                    </p>
+                  )}
+                </>
+              ) : (
+                <Empty
+                  title={t("No subjects yet")}
+                  text={t("This college's departments have no subjects yet.")}
+                />
+              )}
+            </section>
+
+            <section className="panel">
+              <div className="panel-heading">
+                <div>
+                  <h2>
+                    {t("Educators")} · {c.doctorsList?.length ?? c.doctors ?? 0}
+                  </h2>
+                  <p>{t("Doctors affiliated with this college or its departments and their current-term subjects.")}</p>
+                </div>
+                <Link className="button secondary" to="/admin/assignments">
+                  {t("Manage assignments")}
+                </Link>
+              </div>
+              {c.doctorsList?.length ? (
+                <div className="exam-grid academic-card-grid">
+                  {c.doctorsList.map((doc) => {
+                    const assignments = doc.doctorAssignments ?? [];
+                    return (
+                      <article className="exam-card academic-card" key={doc.id}>
+                        <div className="exam-card-top">
+                          <span className="assessment-icon">
+                            <GraduationCap size={18} />
+                          </span>
+                          <div className="card-badge-group">
+                            {doc.department?.code && (
+                              <span className="dept-pill" title={doc.department.name}>
+                                {doc.department.code}
+                              </span>
+                            )}
+                            <Badge value={doc.isActive !== false ? "active" : "inactive"} />
+                          </div>
+                        </div>
+                        <small className="course-code">@{doc.username}</small>
+                        <h2>
+                          <Link to={`/admin/users/${doc.id}`}>{doc.name}</Link>
+                        </h2>
+                        <div className="card-educators-block">
+                          <span className="card-section-label">
+                            {t("Assigned subjects")} ({assignments.length})
+                          </span>
+                          {assignments.length > 0 ? (
+                            <div className="educator-chip-list">
+                              {assignments.map((a) => (
+                                <Link
+                                  key={`${a.subjectId}-${a.termId}`}
+                                  to={`/admin/subjects?search=${encodeURIComponent(a.subject.code)}`}
+                                  className="subject-assign-chip"
+                                  title={`${a.subject.name} (${a.term.name})`}
+                                >
+                                  <b>{a.subject.code}</b>
+                                  <span>{a.subject.name}</span>
+                                </Link>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="subtle">{t("No current-term subjects assigned")}</span>
+                          )}
+                        </div>
+                        <div className="exam-card-action">
+                          <Link className="button secondary small-btn" to={`/admin/users/${doc.id}`}>
+                            {t("Profile & assignments")} <ArrowUpRight size={14} />
+                          </Link>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : (
+                <Empty
+                  title={t("No educators in this college yet")}
+                  text={t("Assign doctors to this college or one of its departments in Users.")}
+                />
+              )}
+            </section>
+
             <section className="panel">
               <div className="panel-heading">
                 <div>
@@ -323,7 +659,7 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                           setSelected([]);
                         }}
                       >
-                        {n}
+                        {t("Year")} {n} ({count})
                       </button>
                     );
                   })}
@@ -335,121 +671,7 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                 />
               )}
             </section>
-            <section className="panel">
-              <div className="panel-heading">
-                <div>
-                  <h2>
-                    {t("Subjects")}
-                    {typeof c.subjectTotal === "number" && ` · ${c.subjectTotal}`}
-                  </h2>
-                  <p>{t("Subjects in this college's departments.")}</p>
-                </div>
-              </div>
-              {c.subjects?.length ? (
-                <>
-                  <div className="exam-grid">
-                    {c.subjects.map((s) => (
-                      <article className="exam-card" key={s.id}>
-                        <div className="exam-card-top">
-                          <span className="assessment-icon">
-                            <BookOpen size={18} />
-                          </span>
-                        </div>
-                        <small className="course-code">{s.code}</small>
-                        <h2>{s.name}</h2>
-                        <p>
-                          {s.department?.name ?? "—"} ·{" "}
-                          {s._count?.questions ?? 0} {t("questions")} ·{" "}
-                          {s._count?.exams ?? 0} {t("exams")} ·{" "}
-                          {s._count?.enrollments ?? 0} {t("enrolled")}
-                        </p>
-                        <Link
-                          className="exam-card-action"
-                          to={`/admin/subjects?search=${encodeURIComponent(s.code)}`}
-                        >
-                          {t("Open subject")}
-                        </Link>
-                      </article>
-                    ))}
-                  </div>
-                  {c.subjectsTruncated && (
-                    <p className="subtle">
-                      {t("Showing {0} of {1}.", {
-                        "0": c.subjects.length,
-                        "1": c.subjectTotal ?? c.subjects.length,
-                      })}
-                    </p>
-                  )}
-                </>
-              ) : (
-                <Empty
-                  title={t("No subjects yet")}
-                  text={t("This college's departments have no subjects yet.")}
-                />
-              )}
-            </section>
-            {Array.isArray(c.departments) && c.departments.length > 0 && (
-              <section className="panel">
-                <div className="panel-heading">
-                  <div>
-                    <h2>{t("Departments")}</h2>
-                    <p>{t("Departments in this college, with their subjects.")}</p>
-                  </div>
-                </div>
-                <div className="exam-grid">
-                  {c.departments.map((d) => {
-                    const owned = (c.subjects ?? []).filter(
-                      (s) => s.department?.id === d.id,
-                    );
-                    return (
-                      <article className="exam-card" key={d.id}>
-                        <div className="exam-card-top">
-                          <span className="assessment-icon">
-                            <Building2 size={18} />
-                          </span>
-                        </div>
-                        <small className="course-code">{d.code}</small>
-                        <h2>{d.name}</h2>
-                        <p>
-                          {d._count?.users ?? 0} {t("users")} ·{" "}
-                          {d._count?.subjects ?? owned.length}{" "}
-                          {t("subjects")}
-                        </p>
-                        {owned.length > 0 && (
-                          <div className="option-chips">
-                            {owned.map((s) => (
-                              <span key={s.id} title={s.name}>
-                                {s.code}
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                        <div className="exam-card-action">
-                          <span className="subtle">
-                            {typeof d._count?.subjects === "number" &&
-                            d._count.subjects > owned.length
-                              ? t("Showing {0} of {1}.", {
-                                  "0": owned.length,
-                                  "1": d._count.subjects,
-                                })
-                              : ""}
-                          </span>
-                          <button
-                            className="text-button"
-                            onClick={() => {
-                              setDeptTarget(d.id);
-                              setOp("dept");
-                            }}
-                          >
-                            {t(" Unlink ")}
-                          </button>
-                        </div>
-                      </article>
-                    );
-                  })}
-                </div>
-              </section>
-            )}
+
             <section className="panel table-wrap">
               <div className="panel-heading">
                 <div>
@@ -589,6 +811,55 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                 setSelected([]);
               }}
             />
+            {op === "link-dept" && (
+              <Dialog title={t("Link department to {0}", { "0": c.name })} onClose={() => setOp(null)}>
+                <p className="dialog-copy">
+                  {t("Select an existing department to attach to this college.")}
+                </p>
+                <div className="field">
+                  <span className="field-label">{t("Department")}</span>
+                  <Combo
+                    value={linkDeptId}
+                    options={linkableDepts.map((d) => ({
+                      value: d.id,
+                      label: `${d.code} · ${d.name}`,
+                    }))}
+                    onChange={setLinkDeptId}
+                    placeholder={t("Search departments…")}
+                    ariaLabel={t("Department")}
+                  />
+                </div>
+                <Feedback error={action.error} />
+                <div className="dialog-actions">
+                  <button type="button" className="secondary" onClick={() => setOp(null)}>
+                    {t("Cancel")}
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={!linkDeptId || action.isPending}
+                    onClick={() =>
+                      action.mutate(
+                        {
+                          path: `/api/v1/admin/departments/${linkDeptId}`,
+                          method: "PATCH",
+                          body: { collegeId: id },
+                        },
+                        {
+                          onSuccess: () => {
+                            setOp(null);
+                            setLinkDeptId("");
+                            query.refetch();
+                          },
+                        },
+                      )
+                    }
+                  >
+                    {action.isPending ? t("Linking…") : t("Link department")}
+                  </button>
+                </div>
+              </Dialog>
+            )}
             {op === "edit" && (
               <Dialog title={t("Edit college")} onClose={() => setOp(null)}>
                 <FieldsForm

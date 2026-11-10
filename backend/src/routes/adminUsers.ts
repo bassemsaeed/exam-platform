@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { Router, type Router as RouterType } from "express";
 import { z } from "zod";
 import { audit } from "../lib/audit.js";
@@ -10,20 +11,65 @@ import { requireAuth, requireRole, type AuthedRequest } from "../middleware/auth
 export const adminUsers: RouterType = Router();
 adminUsers.use(requireAuth, requireRole("admin"));
 
+async function resolveCollegeInput(collegeId?: string | null, collegeText?: string | null): Promise<{ collegeId: string | null; college: string | null } | { error: string }> {
+  if (collegeId) {
+    const c = await prisma.college.findUnique({ where: { id: collegeId }, select: { id: true, name: true } });
+    if (!c) return { error: "invalid collegeId" };
+    return { collegeId: c.id, college: c.name };
+  }
+  const text = collegeText?.trim() || null;
+  if (text) {
+    const c = await prisma.college.findFirst({
+      where: {
+        OR: [
+          { name: { equals: text, mode: "insensitive" } },
+          { code: { equals: text, mode: "insensitive" } },
+        ],
+      },
+      select: { id: true, name: true },
+    });
+    if (c) return { collegeId: c.id, college: c.name };
+    return { collegeId: null, college: text };
+  }
+  return { collegeId: null, college: null };
+}
+
 // GET /api/v1/admin/users?role&search&active&page&limit
 adminUsers.get("/", async (req, res) => {
-  const q = pageQuery.extend({ role: z.string().optional(), search: z.string().optional(), active: z.string().optional(), department_id: z.string().optional() }).parse(req.query);
+  const q = pageQuery.extend({
+    role: z.string().optional(),
+    search: z.string().optional(),
+    active: z.string().optional(),
+    department_id: z.string().optional(),
+    college_id: z.string().optional(),
+  }).parse(req.query);
   const where = {
     ...(q.role ? { role: q.role as never } : {}),
     ...(q.active === "true" ? { isActive: true } : q.active === "false" ? { isActive: false } : {}),
     ...(q.department_id ? { departmentId: q.department_id } : {}),
+    ...(q.college_id ? { collegeId: q.college_id } : {}),
     ...(q.search ? { OR: [{ username: { contains: q.search, mode: "insensitive" as const } }, { name: { contains: q.search, mode: "insensitive" as const } }, { email: { contains: q.search, mode: "insensitive" as const } }] } : {}),
   };
   const [total, rows] = await Promise.all([
     prisma.user.count({ where }),
     prisma.user.findMany({
       where,
-      select: { id: true, username: true, name: true, email: true, role: true, isActive: true, canChangePassword: true, departmentId: true, department: { select: { id: true, code: true, name: true } }, academicYear: true, college: true, createdAt: true },
+      select: {
+        id: true,
+        username: true,
+        name: true,
+        email: true,
+        role: true,
+        isActive: true,
+        canChangePassword: true,
+        departmentId: true,
+        department: { select: { id: true, code: true, name: true, collegeId: true, college: { select: { id: true, code: true, name: true } } } },
+        academicYear: true,
+        college: true,
+        collegeId: true,
+        collegeRef: { select: { id: true, code: true, name: true } },
+        createdAt: true,
+      },
       orderBy: { createdAt: "desc" },
       ...page(q),
     }),
@@ -46,6 +92,7 @@ adminUsers.post("/", async (req, res) => {
     email: z.string().email().max(320).optional(),
     academicYear: z.number().int().min(1).max(7).nullable().optional(),
     college: z.string().trim().max(120).nullable().optional(),
+    collegeId: z.string().uuid().nullable().optional(),
     departmentId: z.string().uuid().nullable().optional(),
   }).parse(req.body);
   const username = body.username.toLowerCase();
@@ -54,14 +101,19 @@ adminUsers.post("/", async (req, res) => {
     const dept = await prisma.department.count({ where: { id: body.departmentId } });
     if (!dept) return res.status(400).json({ error: "invalid reference", field: "departmentId" });
   }
+  const resolvedCollege = await resolveCollegeInput(body.collegeId, body.college);
+  if ("error" in resolvedCollege) {
+    return res.status(400).json({ error: "invalid reference", field: "collegeId" });
+  }
   const clash = await prisma.user.findFirst({ where: { OR: [{ username }, { email }] }, select: { id: true } });
   if (clash) return res.status(409).json({ error: "username or email taken" });
   const { hashPassword } = await import("better-auth/crypto");
   const hashed = await hashPassword(body.password);
   const row = await prisma.$transaction(async (tx) => {
+    const userId = `u_${crypto.randomUUID()}`;
     const u = await tx.user.create({
       data: {
-        id: `u_${username}`,
+        id: userId,
         name: body.name.trim(),
         email,
         emailVerified: false,
@@ -70,7 +122,8 @@ adminUsers.post("/", async (req, res) => {
         canChangePassword: body.role !== "student",
         isActive: true,
         academicYear: body.academicYear ?? null,
-        college: body.college?.trim() || null,
+        college: resolvedCollege.college,
+        collegeId: resolvedCollege.collegeId,
         departmentId: body.departmentId ?? null,
       },
     });
@@ -89,8 +142,9 @@ adminUsers.get("/:id", async (req, res) => {
     where: { id: req.params.id },
     select: {
       id: true, username: true, name: true, email: true, role: true, isActive: true,
-      canChangePassword: true, departmentId: true, academicYear: true, college: true, createdAt: true, updatedAt: true,
-      department: { select: { id: true, code: true, name: true } },
+      canChangePassword: true, departmentId: true, academicYear: true, college: true, collegeId: true, createdAt: true, updatedAt: true,
+      department: { select: { id: true, code: true, name: true, collegeId: true, college: { select: { id: true, code: true, name: true } } } },
+      collegeRef: { select: { id: true, code: true, name: true } },
       _count: { select: { sessions: true, studentExams: true, permissionOverrides: true } },
     },
   });
@@ -179,6 +233,7 @@ adminUsers.patch("/:id", async (req, res) => {
     canChangePassword: z.boolean().optional(),
     academicYear: z.number().int().min(1).max(7).nullable().optional(),
     college: z.string().trim().max(120).nullable().optional(),
+    collegeId: z.string().uuid().nullable().optional(),
     departmentId: z.string().uuid().nullable().optional(),
   }).parse(req.body);
   const before = await prisma.user.findUnique({ where: { id: req.params.id } });
@@ -199,7 +254,14 @@ adminUsers.patch("/:id", async (req, res) => {
   const data: Record<string, unknown> = { ...body };
   if (typeof data["username"] === "string") data["username"] = (data["username"] as string).toLowerCase();
   if (typeof data["email"] === "string") data["email"] = (data["email"] as string).toLowerCase();
-  if (data["college"] === "") data["college"] = null;
+  if (body.collegeId !== undefined || body.college !== undefined) {
+    const resolvedCollege = await resolveCollegeInput(body.collegeId, body.college);
+    if ("error" in resolvedCollege) {
+      return res.status(400).json({ error: "invalid reference", field: "collegeId" });
+    }
+    data["collegeId"] = resolvedCollege.collegeId;
+    data["college"] = resolvedCollege.college;
+  }
   const row = await prisma.user.update({ where: { id: before.id }, data: data as never });
   // Role change de-escalates fully: override rows win over role defaults, so
   // leaving them would let a demoted user keep elevated keys.

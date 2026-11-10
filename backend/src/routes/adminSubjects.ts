@@ -10,15 +10,47 @@ export const adminSubjects: RouterType = Router();
 adminSubjects.use(requireAuth, requireRole("admin"));
 
 adminSubjects.get("/", async (req, res) => {
-  const q = pageQuery.extend({ search: z.string().optional() }).parse(req.query);
-  const where = q.search?.trim()
-    ? { OR: [{ code: { contains: q.search.trim(), mode: "insensitive" as const } }, { name: { contains: q.search.trim(), mode: "insensitive" as const } }] }
-    : {};
+  const q = pageQuery.extend({
+    search: z.string().optional(),
+    department_id: z.string().optional(),
+    college_id: z.string().optional(),
+  }).parse(req.query);
+  const where = {
+    ...(q.search?.trim()
+      ? { OR: [{ code: { contains: q.search.trim(), mode: "insensitive" as const } }, { name: { contains: q.search.trim(), mode: "insensitive" as const } }] }
+      : {}),
+    ...(q.department_id ? { departmentId: q.department_id } : {}),
+    ...(q.college_id ? { department: { collegeId: q.college_id } } : {}),
+  };
   const [total, rows] = await Promise.all([
     prisma.subject.count({ where }),
     prisma.subject.findMany({
       where,
-      select: { id: true, code: true, name: true, department: { select: { code: true } } },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        departmentId: true,
+        department: {
+          select: {
+            id: true,
+            code: true,
+            name: true,
+            collegeId: true,
+            college: { select: { id: true, code: true, name: true } },
+          },
+        },
+        _count: { select: { enrollments: true, sections: true, questions: true, exams: true } },
+        doctorAssignments: {
+          select: {
+            doctorId: true,
+            termId: true,
+            doctor: { select: { id: true, name: true, username: true } },
+            term: { select: { id: true, name: true, isCurrent: true } },
+          },
+          orderBy: { doctor: { name: "asc" } },
+        },
+      },
       orderBy: { code: "asc" },
       ...page(q),
     }),

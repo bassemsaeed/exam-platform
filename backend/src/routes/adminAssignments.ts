@@ -14,11 +14,27 @@ adminAssignments.use(requireAuth, requireRole("admin"));
 // --- Doctor assignments ---
 
 adminAssignments.get("/doctors", async (req, res) => {
-  const q = pageQuery.extend({ subject_id: z.string().optional(), term_id: z.string().optional(), doctor_id: z.string().optional() }).parse(req.query);
+  const q = pageQuery.extend({
+    subject_id: z.string().optional(),
+    term_id: z.string().optional(),
+    doctor_id: z.string().optional(),
+    search: z.string().optional(),
+  }).parse(req.query);
+  const s = q.search?.trim();
   const where = {
     ...(q.subject_id ? { subjectId: q.subject_id } : {}),
     ...(q.term_id ? { termId: q.term_id } : {}),
     ...(q.doctor_id ? { doctorId: q.doctor_id } : {}),
+    ...(s
+      ? {
+          OR: [
+            { doctor: { name: { contains: s, mode: "insensitive" as const } } },
+            { doctor: { username: { contains: s, mode: "insensitive" as const } } },
+            { subject: { code: { contains: s, mode: "insensitive" as const } } },
+            { subject: { name: { contains: s, mode: "insensitive" as const } } },
+          ],
+        }
+      : {}),
   };
   const [total, rows] = await Promise.all([
     prisma.doctorAssignment.count({ where }),
@@ -26,9 +42,25 @@ adminAssignments.get("/doctors", async (req, res) => {
       where,
       select: {
         doctorId: true, subjectId: true, termId: true,
-        doctor: { select: { id: true, username: true, name: true } },
-        subject: { select: { id: true, code: true, name: true } },
-        term: { select: { id: true, name: true } },
+        doctor: {
+          select: {
+            id: true,
+            username: true,
+            name: true,
+            email: true,
+            department: { select: { id: true, code: true, name: true } },
+            collegeRef: { select: { id: true, code: true, name: true } },
+          },
+        },
+        subject: {
+          select: {
+            id: true,
+            code: true,
+            name: true,
+            department: { select: { id: true, code: true, name: true, college: { select: { id: true, code: true, name: true } } } },
+          },
+        },
+        term: { select: { id: true, name: true, isCurrent: true } },
       },
       orderBy: { subjectId: "asc" },
       ...page(q),
@@ -67,11 +99,27 @@ adminAssignments.delete("/doctors", async (req, res) => {
 // --- Enrollments (students ↔ subjects, per term) ---
 
 adminAssignments.get("/enrollments", async (req, res) => {
-  const q = pageQuery.extend({ subject_id: z.string().optional(), term_id: z.string().optional(), student_id: z.string().optional() }).parse(req.query);
+  const q = pageQuery.extend({
+    subject_id: z.string().optional(),
+    term_id: z.string().optional(),
+    student_id: z.string().optional(),
+    search: z.string().optional(),
+  }).parse(req.query);
+  const s = q.search?.trim();
   const where = {
     ...(q.subject_id ? { subjectId: q.subject_id } : {}),
     ...(q.term_id ? { termId: q.term_id } : {}),
     ...(q.student_id ? { studentId: q.student_id } : {}),
+    ...(s
+      ? {
+          OR: [
+            { student: { name: { contains: s, mode: "insensitive" as const } } },
+            { student: { username: { contains: s, mode: "insensitive" as const } } },
+            { subject: { code: { contains: s, mode: "insensitive" as const } } },
+            { subject: { name: { contains: s, mode: "insensitive" as const } } },
+          ],
+        }
+      : {}),
   };
   const [total, rows] = await Promise.all([
     prisma.enrollment.count({ where }),
@@ -81,7 +129,7 @@ adminAssignments.get("/enrollments", async (req, res) => {
         studentId: true, subjectId: true, termId: true,
         student: { select: { id: true, username: true, name: true } },
         subject: { select: { id: true, code: true, name: true } },
-        term: { select: { id: true, name: true } },
+        term: { select: { id: true, name: true, isCurrent: true } },
       },
       orderBy: { subjectId: "asc" },
       ...page(q),

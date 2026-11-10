@@ -47,11 +47,11 @@ function checkOptions(t: (typeof TYPES)[number], options: string[], correct: str
 }
 
 async function doctorOwns(userId: string, subjectId: string): Promise<boolean> {
-  return (await prisma.doctorAssignment.count({ where: { doctorId: userId, subjectId } })) > 0;
+  return (await prisma.doctorAssignment.count({ where: { doctorId: userId, subjectId, term: { isCurrent: true } } })) > 0;
 }
 
 async function taTeaches(userId: string, subjectId: string): Promise<boolean> {
-  return (await prisma.section.count({ where: { taId: userId, subjectId } })) > 0;
+  return (await prisma.section.count({ where: { taId: userId, subjectId, term: { isCurrent: true } } })) > 0;
 }
 
 async function mayBank(userId: string, role: Role, subjectId: string): Promise<boolean> {
@@ -190,43 +190,33 @@ questionBank.delete("/:id", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const own = await ownQuestionOr403(a.userId, a.role, String(req.params.id));
   if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
-  const used = await prisma.studentExamQuestion.count({ where: { questionId: own.q.id } });
-  if (used > 0) return res.status(409).json({ error: "used in student exams" });
-  // Compensations reference by ID with Restrict: deleting would 500.
-  const comped = await prisma.examCompensation.count({ where: { questionId: own.q.id } });
-  if (comped > 0) return res.status(409).json({ error: "has compensations, void is history" });
-  // Hand-picked blueprints reference by ID without creating sittings yet —
-  // deleting would silently hollow out a locked exam.
-  const pinned = await prisma.exam.count({ where: { manualQuestionIds: { array_contains: own.q.id } } });
-  if (pinned > 0) return res.status(409).json({ error: "pinned in an exam blueprint" });
-  // Auto-sampled guard: a pending/approved exam samples its mix from live
-  // pool counts. Deleting the last questions of a tier would make hundreds
-  // of Start clicks 422 with "bank short for mix" on exam day.
-  // Time-bound to open/upcoming exams: long-finished exams must not block
-  // bank maintenance forever.
-  const now = new Date();
-  const dependent = await prisma.exam.findMany({
-    where: {
-      subjectId: own.q.subjectId,
-      status: { in: ["pending_approval", "approved"] },
-      endTime: { gte: now },
-    },
-    select: { id: true, difficultyMix: true, createdBy: true, type: true, questionSource: true, subjectId: true, manualQuestionIds: true },
-  });
-  const autoDependent = dependent.filter((ex) => {
-    const m = ex.manualQuestionIds as unknown;
-    return !Array.isArray(m) || (m as string[]).length === 0;
-  });
-  if (autoDependent.length) {
-    const { poolForExam } = await import("../lib/sampling.js");
-    const { poolCounts, mixShortfall } = await import("../lib/examRules.js");
+  const { poolForExam } = await import("../lib/sampling.js");
+  const { poolCounts, mixShortfall } = await import("../lib/examRules.js");
+  const conflict = await prisma.$transaction(async (tx) => {
+    const used = await tx.studentExamQuestion.count({ where: { questionId: own.q.id } });
+    if (used > 0) return { error: "used in student exams" };
+    const comped = await tx.examCompensation.count({ where: { questionId: own.q.id } });
+    if (comped > 0) return { error: "has compensations, void is history" };
+    const pinned = await tx.exam.count({ where: { manualQuestionIds: { array_contains: own.q.id } } });
+    if (pinned > 0) return { error: "pinned in an exam blueprint" };
+    const now = new Date();
+    const dependent = await tx.exam.findMany({
+      where: {
+        subjectId: own.q.subjectId,
+        status: { in: ["pending_approval", "approved"] },
+        endTime: { gte: now },
+      },
+      select: { id: true, difficultyMix: true, createdBy: true, type: true, questionSource: true, subjectId: true, manualQuestionIds: true },
+    });
+    const autoDependent = dependent.filter((ex) => {
+      const m = ex.manualQuestionIds as unknown;
+      return !Array.isArray(m) || (m as string[]).length === 0;
+    });
     for (const ex of autoDependent) {
-      const pool = await poolForExam(prisma, ex as never);
+      const pool = await poolForExam(tx as never, ex as never);
       if (!pool.ok) continue;
-      const counts = await poolCounts(prisma, pool.where);
-      // Simulate the pool AFTER this deletion (only matters if the question
-      // belongs to the exam's pool scope).
-      const inPool = await prisma.question.count({
+      const counts = await poolCounts(tx as never, pool.where);
+      const inPool = await tx.question.count({
         where: { id: own.q.id, ...(pool.where as object) },
       });
       if (!inPool) continue;
@@ -234,11 +224,13 @@ questionBank.delete("/:id", async (req, res) => {
       counts[tier] = Math.max(0, (counts[tier] ?? 0) - 1);
       const short = mixShortfall((ex.difficultyMix ?? {}) as never, counts);
       if (short) {
-        return res.status(409).json({ error: "exam depends on this bank tier", examId: ex.id, ...short });
+        return { error: "exam depends on this bank tier", examId: ex.id, ...short };
       }
     }
-  }
-  await prisma.question.delete({ where: { id: own.q.id } });
+    await tx.question.delete({ where: { id: own.q.id } });
+    return null;
+  });
+  if (conflict) return res.status(409).json(conflict);
   await audit(a.userId, "question.delete", "question", own.q.id);
   res.json({ ok: true });
 });

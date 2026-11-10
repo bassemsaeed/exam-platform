@@ -1,4 +1,4 @@
-import { useT } from "../lib/i18n";
+import { locale, useT } from "../lib/i18n";
 import { useEffect, useId, useRef, useState } from "react";
 import { Check, ChevronDown, Search, X } from "lucide-react";
 
@@ -167,7 +167,7 @@ export function DateTimeField({
     onChange(iso);
   }
   const pretty = value
-    ? new Date(value).toLocaleString(undefined, {
+    ? new Date(value).toLocaleString(locale(), {
         month: "short",
         day: "numeric",
         hour: "2-digit",

@@ -37,11 +37,11 @@ async function activeRawKeys(): Promise<string[]> {
   return out;
 }
 
-// SEB policy (single source of truth): midterms ALWAYS require Safe Exam
-// Browser; quizzes opt in per exam via sebRequired. Everything else —
-// readiness text, start/answer gates, builder copy — reads this.
+// SEB policy (single source of truth): exams opt in per exam via sebRequired
+// (both midterms and quizzes), keeping assessments testable in standard
+// browsers unless SEB is explicitly required.
 export function examNeedsSeb(exam: { purpose: string; sebRequired: boolean }): boolean {
-  return exam.purpose === "midterm" || exam.sebRequired;
+  return Boolean(exam.sebRequired);
 }
 
 /** Non-rejecting check: does this request carry a valid SEB header? */

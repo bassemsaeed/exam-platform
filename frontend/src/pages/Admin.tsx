@@ -1,8 +1,19 @@
 import { BulkUsers } from "../components/BulkUsers";
 import { useT } from "../lib/i18n";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useLocation } from "react-router-dom";
-import { Plus, Pencil, Trash2, ArrowUpRight } from "lucide-react";
+import {
+  Plus,
+  Pencil,
+  Trash2,
+  ArrowUpRight,
+  BookOpen,
+  Building2,
+  GraduationCap,
+  Layers,
+  Users,
+  X,
+} from "lucide-react";
 import type { SessionUser } from "../lib/api";
 import {
   useResource,
@@ -28,13 +39,15 @@ import {
 } from "../components/ui";
 import type { Field } from "../components/ui";
 import { Combo, MultiPicker } from "../components/builder";
+
 const options = (values: string[]) =>
   values.map((value) => ({ value, label: label(value) }));
 const pick = (rows: Entity[]) =>
   rows.map((r) => ({
     value: r.id,
-    label: String(r.name ?? r.username ?? r.id),
+    label: r.code && r.name ? `${String(r.code)} · ${String(r.name)}` : String(r.name ?? r.username ?? r.id),
   }));
+
 const baseFields: Record<string, Field[]> = {
   users: [
     { key: "name", label: "Full name", required: true },
@@ -48,7 +61,6 @@ const baseFields: Record<string, Field[]> = {
       options: options(["student", "doctor", "ta"]),
     },
     { key: "academicYear", label: "Academic year", type: "number", min: 1 },
-    { key: "college", label: "College" },
   ],
   subjects: [
     { key: "code", label: "Subject code", required: true },
@@ -80,6 +92,7 @@ const baseFields: Record<string, Field[]> = {
     },
   ],
 };
+
 const display = (value: unknown): string =>
   value == null
     ? "—"
@@ -91,6 +104,60 @@ const display = (value: unknown): string =>
             "—",
         )
       : String(value);
+
+interface SubjectDoctorAssignment {
+  doctorId: string;
+  termId: string;
+  doctor: { id: string; name: string; username: string };
+  term: { id: string; name: string; isCurrent?: boolean };
+}
+
+interface RichSubjectRow extends Entity {
+  code: string;
+  name: string;
+  departmentId?: string | null;
+  department?: {
+    id: string;
+    code: string;
+    name: string;
+    collegeId?: string | null;
+    college?: { id: string; code: string; name: string } | null;
+  } | null;
+  _count?: {
+    enrollments: number;
+    sections: number;
+    questions: number;
+    exams: number;
+  };
+  doctorAssignments?: SubjectDoctorAssignment[];
+}
+
+interface DoctorAssignmentRow extends Entity {
+  doctorId: string;
+  subjectId: string;
+  termId: string;
+  doctor: {
+    id: string;
+    username: string;
+    name: string;
+    email?: string;
+    department?: { id: string; code: string; name: string } | null;
+    collegeRef?: { id: string; code: string; name: string } | null;
+  };
+  subject: {
+    id: string;
+    code: string;
+    name: string;
+    department?: {
+      id: string;
+      code: string;
+      name: string;
+      college?: { id: string; code: string; name: string } | null;
+    } | null;
+  };
+  term: { id: string; name: string; isCurrent?: boolean };
+}
+
 function RosterEditor({
   user,
   sectionId,
@@ -178,68 +245,163 @@ export function AdminResource({ user }: { user: SessionUser }) {
   const [roleFilter, setRoleFilter] = useState("");
   const [activeFilter, setActiveFilter] = useState("");
   const [departmentFilter, setDepartmentFilter] = useState("");
+  const [collegeFilter, setCollegeFilter] = useState("");
+  const [termFilter, setTermFilter] = useState("");
   const [selectedUsers, setSelectedUsers] = useState<string[]>([]);
 
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [assignment, setAssignment] = useState("doctors");
+  const [assignViewMode, setAssignViewMode] = useState<"doctors" | "subjects" | "table">("doctors");
   const [resetUser, setResetUser] = useState<Entity | null>(null);
   const [resetSuccess, setResetSuccess] = useState("");
   const [resetMismatch, setResetMismatch] = useState("");
+
+  // Quick assignment modal states for Subject cards and Doctor cards
+  const [assignToSubject, setAssignToSubject] = useState<RichSubjectRow | null>(null);
+  const [assignToDoctor, setAssignToDoctor] = useState<{ id: string; name: string; username: string; assignedSubjectIds: string[] } | null>(null);
+  const [quickPickIds, setQuickPickIds] = useState<string[]>([]);
+  const [quickTermId, setQuickTermId] = useState("");
+  const [quickBusy, setQuickBusy] = useState(false);
+
   useEffect(
     () => setSelectedUsers([]),
-    [resource, page, roleFilter, activeFilter, departmentFilter, search],
+    [resource, page, roleFilter, activeFilter, departmentFilter, collegeFilter, search],
   );
   const [edit, setEdit] = useState<Entity | "new" | null>(null);
   const [remove, setRemove] = useState<Entity | null>(null);
   const [current, setCurrent] = useState<Entity | null>(null);
   const [roster, setRoster] = useState<Entity | null>(null);
+
   const path =
     resource === "assignments"
       ? assignment === "tas"
         ? "/api/v1/admin/sections"
         : "/api/v1/admin/assignments/" + assignment
       : "/api/v1/admin/" + resource;
+
+  const queryParams = useMemo(() => {
+    const p = new URLSearchParams();
+    p.set("page", String(page));
+    p.set("limit", resource === "subjects" || (resource === "assignments" && assignment === "doctors") ? "60" : "20");
+    if (resource === "users") {
+      if (roleFilter) p.set("role", roleFilter);
+      if (activeFilter) p.set("active", activeFilter);
+      if (departmentFilter) p.set("department_id", departmentFilter);
+      if (collegeFilter) p.set("college_id", collegeFilter);
+    }
+    if (resource === "subjects") {
+      if (departmentFilter) p.set("department_id", departmentFilter);
+      if (collegeFilter) p.set("college_id", collegeFilter);
+    }
+    if (resource === "departments" && collegeFilter) {
+      p.set("college_id", collegeFilter);
+    }
+    if (resource === "assignments" && termFilter) {
+      p.set("term_id", termFilter);
+    }
+    if (["users", "subjects", "departments", "sections", "assignments"].includes(resource) && search.trim()) {
+      p.set("search", search.trim());
+    }
+    return p.toString();
+  }, [resource, assignment, page, roleFilter, activeFilter, departmentFilter, collegeFilter, termFilter, search]);
+
   const query = useResource<Envelope<Entity> | Entity[]>(
     user,
-    `${path}?page=${page}&limit=20${resource === "users" ? `&role=${roleFilter}&active=${activeFilter}&department_id=${departmentFilter}` : ""}${["users", "subjects", "departments", "sections"].includes(resource) ? "&search=" + encodeURIComponent(search) : ""}`,
+    `${path}?${queryParams}`,
   );
-  const subjects = useResource<Envelope<Entity>>(
+  const subjects = useResource<Envelope<RichSubjectRow>>(
     user,
     "/api/v1/admin/subjects?limit=100",
-    ["sections", "assignments"].includes(resource),
+    ["sections", "assignments", "subjects"].includes(resource),
   );
   const terms = useResource<Entity[]>(
     user,
     "/api/v1/admin/terms",
+    ["sections", "assignments", "subjects"].includes(resource),
+  );
+  const doctorsPool = useResource<Envelope<Entity>>(
+    user,
+    "/api/v1/admin/users?role=doctor&limit=100",
+    ["subjects", "assignments"].includes(resource),
+  );
+  const tasPool = useResource<Envelope<Entity>>(
+    user,
+    "/api/v1/admin/users?role=ta&limit=100",
     ["sections", "assignments"].includes(resource),
   );
-  const users = useResource<Envelope<Entity>>(
+  const studentsPool = useResource<Envelope<Entity>>(
     user,
-    "/api/v1/admin/users?limit=100",
-    ["sections", "assignments"].includes(resource),
+    "/api/v1/admin/users?role=student&limit=100",
+    resource === "assignments" && assignment === "enrollments",
   );
   const departments = useResource<Envelope<Entity>>(
     user,
     "/api/v1/admin/departments?limit=100",
-    ["users", "subjects"].includes(resource),
+    ["users", "subjects", "departments"].includes(resource),
+  );
+  const colleges = useResource<Envelope<Entity>>(
+    user,
+    "/api/v1/admin/colleges?limit=100",
+    ["users", "subjects", "departments"].includes(resource),
   );
   const tasSections = useResource<Envelope<Entity>>(
     user,
     "/api/v1/admin/sections?limit=100",
     resource === "assignments" && assignment === "tas",
   );
-  const action = useAction(user, [path, "/api/v1/exams"]);
+  const action = useAction(user, [
+    path,
+    "/api/v1/admin/subjects",
+    "/api/v1/admin/assignments/doctors",
+    "/api/v1/admin/assignments/enrollments",
+    "/api/v1/exams",
+  ]);
+
+  const currentTerm = useMemo(
+    () => rowsOf(terms.data).find((x) => Boolean(x.isCurrent)) ?? rowsOf(terms.data)[0] ?? null,
+    [terms.data],
+  );
+
+  useEffect(() => {
+    if (currentTerm && !quickTermId) {
+      setQuickTermId(currentTerm.id);
+    }
+  }, [currentTerm, quickTermId]);
+
   useEffect(() => {
     setPage(1);
     setSearch(new URLSearchParams(location.search).get("search") ?? "");
     setRoleFilter("");
     setActiveFilter("");
     setDepartmentFilter("");
+    setCollegeFilter("");
+    setTermFilter("");
     setEdit(null);
     setRemove(null);
     setRoster(null);
+    setAssignToSubject(null);
+    setAssignToDoctor(null);
   }, [resource, location.search]);
+
+  async function submitBatchAssignments(
+    endpoint: string,
+    payloads: Record<string, unknown>[],
+    onDone: () => void,
+  ) {
+    setQuickBusy(true);
+    try {
+      await Promise.all(payloads.map((body) => action.mutateAsync({ path: endpoint, body })));
+      query.refetch();
+      subjects.refetch();
+      onDone();
+    } catch {
+      // surfaced via action.error
+    } finally {
+      setQuickBusy(false);
+    }
+  }
+
   const titles: Record<string, string> = {
     users: "Users",
     subjects: "Subjects",
@@ -254,6 +416,11 @@ export function AdminResource({ user }: { user: SessionUser }) {
   let fields = [...(baseFields[resource] ?? [])];
   if (resource === "users")
     fields.push(
+      {
+        key: "collegeId",
+        label: "College",
+        options: pick(rowsOf(colleges.data)),
+      },
       edit === "new"
         ? {
             key: "password",
@@ -275,6 +442,12 @@ export function AdminResource({ user }: { user: SessionUser }) {
       label: "Department",
       options: pick(rowsOf(departments.data)),
     });
+  if (resource === "departments")
+    fields.push({
+      key: "collegeId",
+      label: "College",
+      options: pick(rowsOf(colleges.data)),
+    });
   if (resource === "sections")
     fields.push(
       {
@@ -293,7 +466,7 @@ export function AdminResource({ user }: { user: SessionUser }) {
         key: "taId",
         label: "Teaching assistant",
         required: true,
-        options: pick(rowsOf(users.data).filter((r) => r.role === "ta")),
+        options: pick(rowsOf(tasPool.data)),
       },
     );
   if (resource === "assignments")
@@ -310,9 +483,7 @@ export function AdminResource({ user }: { user: SessionUser }) {
               key: "taId",
               label: "Teaching assistant",
               required: true,
-              options: pick(
-                rowsOf(users.data).filter((r) => r.role === "ta"),
-              ),
+              options: pick(rowsOf(tasPool.data)),
             },
           ]
         : [
@@ -321,10 +492,7 @@ export function AdminResource({ user }: { user: SessionUser }) {
               label: assignment === "doctors" ? "Educator" : "Student",
               required: true,
               options: pick(
-                rowsOf(users.data).filter(
-                  (r) =>
-                    r.role === (assignment === "doctors" ? "doctor" : "student"),
-                ),
+                rowsOf(assignment === "doctors" ? doctorsPool.data : studentsPool.data),
               ),
             },
             {
@@ -337,13 +505,15 @@ export function AdminResource({ user }: { user: SessionUser }) {
               key: "termId",
               label: "Term",
               required: true,
+              value: currentTerm?.id ?? "",
               options: pick(rowsOf(terms.data)),
             },
           ];
+
   const columns: Record<string, string[]> = {
-    users: ["name", "username", "role", "isActive"],
+    users: ["name", "username", "role", "department", "isActive"],
     subjects: ["code", "name", "department"],
-    departments: ["code", "name"],
+    departments: ["code", "name", "college"],
     terms: ["name", "startsOn", "endsOn", "isCurrent"],
     sections: ["name", "subject", "ta", "term"],
     assignments:
@@ -356,6 +526,60 @@ export function AdminResource({ user }: { user: SessionUser }) {
   const cols = columns[resource] ?? ["name"];
   const readOnly = resource === "audit";
   const rowList = rowsOf(query.data);
+
+  // Group doctor assignments by Doctor or by Subject for the rich card views
+  const doctorCardsData = useMemo(() => {
+    if (resource !== "assignments" || assignment !== "doctors") return [];
+    const assignRows = rowList as DoctorAssignmentRow[];
+    const docsMap = new Map<
+      string,
+      {
+        id: string;
+        name: string;
+        username: string;
+        departmentName?: string;
+        collegeName?: string;
+        assignments: DoctorAssignmentRow[];
+      }
+    >();
+    // Include all doctors from doctorsPool (filtered by search if active) so unassigned doctors can also be assigned subjects directly
+    for (const d of rowsOf(doctorsPool.data)) {
+      const q = search.trim().toLowerCase();
+      const deptObj = d.department as Entity | undefined;
+      const colObj = (d.collegeRef as Entity | undefined) ?? (deptObj?.college as Entity | undefined);
+      if (
+        q &&
+        !String(d.name ?? "").toLowerCase().includes(q) &&
+        !String(d.username ?? "").toLowerCase().includes(q) &&
+        !String(deptObj?.name ?? "").toLowerCase().includes(q)
+      ) {
+        continue;
+      }
+      docsMap.set(d.id, {
+        id: d.id,
+        name: String(d.name ?? d.username),
+        username: String(d.username ?? ""),
+        departmentName: deptObj?.name ? String(deptObj.name) : undefined,
+        collegeName: colObj?.name ? String(colObj.name) : d.college ? String(d.college) : undefined,
+        assignments: [],
+      });
+    }
+    for (const r of assignRows) {
+      if (!r.doctor) continue;
+      const existing = docsMap.get(r.doctor.id) ?? {
+        id: r.doctor.id,
+        name: r.doctor.name,
+        username: r.doctor.username,
+        departmentName: r.doctor.department?.name,
+        collegeName: r.doctor.collegeRef?.name,
+        assignments: [],
+      };
+      existing.assignments.push(r);
+      docsMap.set(r.doctor.id, existing);
+    }
+    return [...docsMap.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [resource, assignment, rowList, doctorsPool.data, search]);
+
   return (
     <>
       <PageTitle
@@ -363,7 +587,11 @@ export function AdminResource({ user }: { user: SessionUser }) {
         description={
           resource === "audit"
             ? t("Review administrative activity and accountability.")
-            : t("Manage university records and access.")
+            : resource === "subjects"
+              ? t("Course catalog, department links, question bank metrics, and assigned educators.")
+              : resource === "assignments"
+                ? t("Bind educators to subjects, enroll students, and assign teaching assistants.")
+                : t("Manage university records and access.")
         }
         action={
           !readOnly && (
@@ -394,33 +622,127 @@ export function AdminResource({ user }: { user: SessionUser }) {
       />
       <div className="toolbar">
         {resource === "assignments" ? (
-          <Combo
-            value={assignment}
-            options={[
-              { value: "doctors", label: t("Educator assignments") },
-              { value: "enrollments", label: t("Student enrollments") },
-              { value: "tas", label: t("Teaching assistant sections") },
-            ]}
-            onChange={(v) => {
-              setAssignment(v);
-              setPage(1);
-            }}
-            ariaLabel={t("Assignment type")}
-          />
-        ) : (
-          ["users", "subjects", "departments", "sections"].includes(
-            resource,
-          ) && (
+          <>
+            <Combo
+              value={assignment}
+              options={[
+                { value: "doctors", label: t("Educator assignments") },
+                { value: "enrollments", label: t("Student enrollments") },
+                { value: "tas", label: t("Teaching assistant sections") },
+              ]}
+              onChange={(v) => {
+                setAssignment(v);
+                setPage(1);
+              }}
+              ariaLabel={t("Assignment type")}
+            />
+            {assignment !== "tas" && (
+              <Combo
+                value={termFilter}
+                options={[
+                  { value: "", label: t("All terms") },
+                  ...rowsOf(terms.data).map((tr) => ({
+                    value: tr.id,
+                    label: `${String(tr.name)}${tr.isCurrent ? ` (${t("Current")})` : ""}`,
+                  })),
+                ]}
+                onChange={(v) => {
+                  setTermFilter(v);
+                  setPage(1);
+                }}
+                ariaLabel={t("Filter by term")}
+              />
+            )}
             <SearchBox
               value={search}
               onChange={(v) => {
                 setSearch(v);
                 setPage(1);
               }}
-              placeholder={t("Search {0}\u2026", {
-                "0": t(title.toLowerCase()),
-              })}
+              placeholder={
+                assignment === "doctors"
+                  ? t("Search educators or subjects…")
+                  : assignment === "enrollments"
+                    ? t("Search students or subjects…")
+                    : t("Search sections…")
+              }
             />
+            {assignment === "doctors" && (
+              <div className="segmented">
+                <button
+                  type="button"
+                  className={assignViewMode === "doctors" ? "active" : ""}
+                  onClick={() => setAssignViewMode("doctors")}
+                >
+                  {t("By Educator")}
+                </button>
+                <button
+                  type="button"
+                  className={assignViewMode === "subjects" ? "active" : ""}
+                  onClick={() => setAssignViewMode("subjects")}
+                >
+                  {t("By Subject")}
+                </button>
+                <button
+                  type="button"
+                  className={assignViewMode === "table" ? "active" : ""}
+                  onClick={() => setAssignViewMode("table")}
+                >
+                  {t("Table")}
+                </button>
+              </div>
+            )}
+          </>
+        ) : (
+          ["users", "subjects", "departments", "sections"].includes(
+            resource,
+          ) && (
+            <>
+              <SearchBox
+                value={search}
+                onChange={(v) => {
+                  setSearch(v);
+                  setPage(1);
+                }}
+                placeholder={t("Search {0}\u2026", {
+                  "0": t(title.toLowerCase()),
+                })}
+              />
+              {["subjects", "departments"].includes(resource) && (
+                <Combo
+                  value={collegeFilter}
+                  options={[
+                    { value: "", label: t("All colleges") },
+                    ...rowsOf(colleges.data).map((c) => ({
+                      value: c.id,
+                      label: `${String(c.code)} · ${String(c.name)}`,
+                    })),
+                  ]}
+                  onChange={(v) => {
+                    setCollegeFilter(v);
+                    setPage(1);
+                  }}
+                  ariaLabel={t("Filter college")}
+                />
+              )}
+              {resource === "subjects" && (
+                <Combo
+                  value={departmentFilter}
+                  options={[
+                    { value: "", label: t("All departments") },
+                    ...rowsOf(departments.data).map((d) => ({
+                      value: d.id,
+                      label: `${String(d.code)} · ${String(d.name)}`,
+                    })),
+                  ]}
+                  onChange={(v) => {
+                    setDepartmentFilter(v);
+                    setPage(1);
+                  }}
+                  ariaLabel={t("Filter department")}
+                />
+              )}
+            </>
           )
         )}
         <span className="subtle">
@@ -462,6 +784,21 @@ export function AdminResource({ user }: { user: SessionUser }) {
               ariaLabel={t("Filter account status")}
             />
             <Combo
+              value={collegeFilter}
+              options={[
+                { value: "", label: t("All colleges") },
+                ...rowsOf(colleges.data).map((c) => ({
+                  value: c.id,
+                  label: String(c.name),
+                })),
+              ]}
+              onChange={(v) => {
+                setCollegeFilter(v);
+                setPage(1);
+              }}
+              ariaLabel={t("Filter college")}
+            />
+            <Combo
               value={departmentFilter}
               options={[
                 { value: "", label: t("All departments") },
@@ -481,6 +818,7 @@ export function AdminResource({ user }: { user: SessionUser }) {
               onClick={() => {
                 setRoleFilter("");
                 setActiveFilter("");
+                setCollegeFilter("");
                 setDepartmentFilter("");
                 setSearch("");
                 setPage(1);
@@ -504,9 +842,372 @@ export function AdminResource({ user }: { user: SessionUser }) {
         </>
       )}
       <Feedback error={query.error} />
-      <Feedback error={!edit && !remove && !current ? action.error : null} />
+      <Feedback
+        error={
+          !edit && !remove && !current && !assignToSubject && !assignToDoctor
+            ? action.error
+            : null
+        }
+      />
       {query.isPending ? (
         <Loading />
+      ) : resource === "subjects" ? (
+        rowList.length ? (
+          <div className="exam-grid academic-card-grid">
+            {(rowList as RichSubjectRow[]).map((subj) => {
+              const docs = subj.doctorAssignments ?? [];
+              return (
+                <article className="exam-card academic-card" key={subj.id}>
+                  <div className="exam-card-top">
+                    <span className="assessment-icon">
+                      <BookOpen size={18} />
+                    </span>
+                    <div className="card-badge-group">
+                      <span className="code-pill">{subj.code}</span>
+                      {subj.department?.code && (
+                        <span className="dept-pill" title={subj.department.name}>
+                          {subj.department.code}
+                        </span>
+                      )}
+                      {subj.department?.college && (
+                        <Link
+                          to={`/colleges/${subj.department.college.id}`}
+                          className="college-pill"
+                          title={subj.department.college.name}
+                        >
+                          <Building2 size={12} /> {subj.department.college.code}
+                        </Link>
+                      )}
+                    </div>
+                  </div>
+                  <h2>{subj.name}</h2>
+                  <p className="card-subtitle">
+                    {subj.department?.name ?? t("No department assigned")}
+                  </p>
+                  <div className="card-metrics-grid">
+                    <div className="card-metric-pill">
+                      <Users size={14} />
+                      <strong>{subj._count?.enrollments ?? 0}</strong>
+                      <span>{t("Enrolled")}</span>
+                    </div>
+                    <div className="card-metric-pill">
+                      <Layers size={14} />
+                      <strong>{subj._count?.sections ?? 0}</strong>
+                      <span>{t("Sections")}</span>
+                    </div>
+                    <div className="card-metric-pill">
+                      <BookOpen size={14} />
+                      <strong>{subj._count?.questions ?? 0}</strong>
+                      <span>{t("Questions")}</span>
+                    </div>
+                    <div className="card-metric-pill">
+                      <strong>{subj._count?.exams ?? 0}</strong>
+                      <span>{t("Exams")}</span>
+                    </div>
+                  </div>
+                  <div className="card-educators-block">
+                    <div className="card-section-header">
+                      <span className="card-section-label">
+                        {t("Assigned Educators")} ({docs.length})
+                      </span>
+                      <button
+                        type="button"
+                        className="chip-add-btn"
+                        onClick={() => {
+                          action.reset();
+                          setQuickPickIds([]);
+                          if (currentTerm) setQuickTermId(currentTerm.id);
+                          setAssignToSubject(subj);
+                        }}
+                      >
+                        <Plus size={12} /> {t("Assign")}
+                      </button>
+                    </div>
+                    {docs.length > 0 ? (
+                      <div className="educator-chip-list">
+                        {docs.map((da) => (
+                          <span
+                            key={`${da.doctorId}-${da.termId}`}
+                            className="educator-chip removable"
+                            title={`${da.doctor.name} · ${da.term.name}`}
+                          >
+                            <GraduationCap size={13} />
+                            <Link to={`/admin/users/${da.doctor.id}`}>
+                              {da.doctor.name}
+                            </Link>
+                            <small>{da.term.name}</small>
+                            <button
+                              type="button"
+                              aria-label={t("Unassign {0}", { "0": da.doctor.name })}
+                              disabled={action.isPending}
+                              onClick={() =>
+                                action.mutate(
+                                  {
+                                    path: "/api/v1/admin/assignments/doctors",
+                                    method: "DELETE",
+                                    body: {
+                                      doctorId: da.doctorId,
+                                      subjectId: subj.id,
+                                      termId: da.termId,
+                                    },
+                                  },
+                                  {
+                                    onSuccess: () => {
+                                      query.refetch();
+                                      subjects.refetch();
+                                    },
+                                  },
+                                )
+                              }
+                            >
+                              <X size={12} />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="subtle">{t("No educators assigned yet")}</span>
+                    )}
+                  </div>
+                  <div className="exam-card-action">
+                    <button
+                      type="button"
+                      className="secondary small-btn"
+                      onClick={() => {
+                        action.reset();
+                        setEdit(subj);
+                      }}
+                    >
+                      <Pencil size={14} /> {t("Edit")}
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={t("Delete subject")}
+                      onClick={() => {
+                        action.reset();
+                        setRemove(subj);
+                      }}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+        ) : (
+          <Empty
+            title={t("No subjects found")}
+            text={t("Add a subject or clear your filters.")}
+          />
+        )
+      ) : resource === "assignments" &&
+        assignment === "doctors" &&
+        assignViewMode === "doctors" ? (
+        doctorCardsData.length ? (
+          <div className="exam-grid academic-card-grid">
+            {doctorCardsData.map((doc) => (
+              <article className="exam-card academic-card" key={doc.id}>
+                <div className="exam-card-top">
+                  <span className="assessment-icon">
+                    <GraduationCap size={18} />
+                  </span>
+                  <div className="card-badge-group">
+                    {doc.departmentName && (
+                      <span className="dept-pill">{doc.departmentName}</span>
+                    )}
+                    {doc.collegeName && (
+                      <span className="college-pill">
+                        <Building2 size={12} /> {doc.collegeName}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <small className="course-code">@{doc.username}</small>
+                <h2>
+                  <Link to={`/admin/users/${doc.id}`}>{doc.name}</Link>
+                </h2>
+                <div className="card-educators-block">
+                  <div className="card-section-header">
+                    <span className="card-section-label">
+                      {t("Assigned Subjects")} ({doc.assignments.length})
+                    </span>
+                    <button
+                      type="button"
+                      className="chip-add-btn"
+                      onClick={() => {
+                        action.reset();
+                        setQuickPickIds([]);
+                        if (currentTerm) setQuickTermId(currentTerm.id);
+                        setAssignToDoctor({
+                          id: doc.id,
+                          name: doc.name,
+                          username: doc.username,
+                          assignedSubjectIds: doc.assignments.map((a) => a.subjectId),
+                        });
+                      }}
+                    >
+                      <Plus size={12} /> {t("Assign subjects")}
+                    </button>
+                  </div>
+                  {doc.assignments.length > 0 ? (
+                    <div className="educator-chip-list">
+                      {doc.assignments.map((a) => (
+                        <span
+                          key={`${a.doctorId}-${a.subjectId}-${a.termId}`}
+                          className="subject-assign-chip removable"
+                          title={`${a.subject.name} · ${a.term.name}`}
+                        >
+                          <b>{a.subject.code}</b>
+                          <span>{a.subject.name}</span>
+                          <small>{a.term.name}</small>
+                          <button
+                            type="button"
+                            aria-label={t("Unassign {0}", { "0": a.subject.code })}
+                            disabled={action.isPending}
+                            onClick={() =>
+                              action.mutate(
+                                {
+                                  path: "/api/v1/admin/assignments/doctors",
+                                  method: "DELETE",
+                                  body: {
+                                    doctorId: a.doctorId,
+                                    subjectId: a.subjectId,
+                                    termId: a.termId,
+                                  },
+                                },
+                                {
+                                  onSuccess: () => {
+                                    query.refetch();
+                                    subjects.refetch();
+                                  },
+                                },
+                              )
+                            }
+                          >
+                            <X size={12} />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  ) : (
+                    <span className="subtle">
+                      {t("No subjects assigned for the selected term filter.")}
+                    </span>
+                  )}
+                </div>
+                <div className="exam-card-action">
+                  <Link className="button secondary small-btn" to={`/admin/users/${doc.id}`}>
+                    {t("Educator profile")} <ArrowUpRight size={14} />
+                  </Link>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <Empty title={t("No educators found")} />
+        )
+      ) : resource === "assignments" &&
+        assignment === "doctors" &&
+        assignViewMode === "subjects" ? (
+        rowsOf(subjects.data).length ? (
+          <div className="exam-grid academic-card-grid">
+            {rowsOf(subjects.data)
+              .filter(
+                (s) =>
+                  !search.trim() ||
+                  s.code.toLowerCase().includes(search.trim().toLowerCase()) ||
+                  s.name.toLowerCase().includes(search.trim().toLowerCase()),
+              )
+              .map((subj) => {
+                const docs = (subj.doctorAssignments ?? []).filter(
+                  (da) => !termFilter || da.termId === termFilter,
+                );
+                return (
+                  <article className="exam-card academic-card" key={subj.id}>
+                    <div className="exam-card-top">
+                      <span className="assessment-icon">
+                        <BookOpen size={18} />
+                      </span>
+                      <div className="card-badge-group">
+                        <span className="code-pill">{subj.code}</span>
+                        {subj.department?.code && (
+                          <span className="dept-pill">{subj.department.code}</span>
+                        )}
+                      </div>
+                    </div>
+                    <h2>{subj.name}</h2>
+                    <div className="card-educators-block">
+                      <div className="card-section-header">
+                        <span className="card-section-label">
+                          {t("Educators")} ({docs.length})
+                        </span>
+                        <button
+                          type="button"
+                          className="chip-add-btn"
+                          onClick={() => {
+                            action.reset();
+                            setQuickPickIds([]);
+                            if (currentTerm) setQuickTermId(currentTerm.id);
+                            setAssignToSubject(subj);
+                          }}
+                        >
+                          <Plus size={12} /> {t("Assign educator")}
+                        </button>
+                      </div>
+                      {docs.length > 0 ? (
+                        <div className="educator-chip-list">
+                          {docs.map((da) => (
+                            <span
+                              key={`${da.doctorId}-${da.termId}`}
+                              className="educator-chip removable"
+                            >
+                              <GraduationCap size={13} />
+                              <Link to={`/admin/users/${da.doctor.id}`}>
+                                {da.doctor.name}
+                              </Link>
+                              <small>{da.term.name}</small>
+                              <button
+                                type="button"
+                                aria-label={t("Unassign {0}", { "0": da.doctor.name })}
+                                disabled={action.isPending}
+                                onClick={() =>
+                                  action.mutate(
+                                    {
+                                      path: "/api/v1/admin/assignments/doctors",
+                                      method: "DELETE",
+                                      body: {
+                                        doctorId: da.doctorId,
+                                        subjectId: subj.id,
+                                        termId: da.termId,
+                                      },
+                                    },
+                                    {
+                                      onSuccess: () => {
+                                        query.refetch();
+                                        subjects.refetch();
+                                      },
+                                    },
+                                  )
+                                }
+                              >
+                                <X size={12} />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="subtle">{t("No educators assigned")}</span>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+          </div>
+        ) : (
+          <Empty title={t("No subjects found")} />
+        )
       ) : rowList.length ? (
         <section className="panel table-wrap">
           <table>
@@ -554,7 +1255,7 @@ export function AdminResource({ user }: { user: SessionUser }) {
             </thead>
             <tbody>
               {rowList.map((r, i) => (
-                <tr key={r.id ?? i}>
+                <tr key={r.id ?? `${r.doctorId ?? r.studentId}-${r.subjectId}-${r.termId}-${i}`}>
                   {resource === "users" && (
                     <td>
                       <input
@@ -699,6 +1400,138 @@ export function AdminResource({ user }: { user: SessionUser }) {
       {!Array.isArray(query.data) && (
         <Pagination data={query.data} page={page} setPage={setPage} />
       )}{" "}
+      {assignToSubject && (
+        <Dialog
+          title={t("Assign educators to {0} ({1})", {
+            "0": assignToSubject.name,
+            "1": assignToSubject.code,
+          })}
+          onClose={() => !quickBusy && setAssignToSubject(null)}
+        >
+          <div className="field">
+            <span className="field-label">{t("Academic term")}</span>
+            <Combo
+              value={quickTermId}
+              options={rowsOf(terms.data).map((tr) => ({
+                value: tr.id,
+                label: `${String(tr.name)}${tr.isCurrent ? ` (${t("Current")})` : ""}`,
+              }))}
+              onChange={setQuickTermId}
+              placeholder={t("Select term…")}
+              ariaLabel={t("Academic term")}
+            />
+          </div>
+          <div className="field">
+            <span className="field-label">{t("Educators (Doctors)")}</span>
+            <MultiPicker
+              options={rowsOf(doctorsPool.data).map((d) => ({
+                id: d.id,
+                name: String(d.name ?? d.username),
+                username: String(d.username ?? ""),
+                sub: (d.department as Entity | undefined)?.code
+                  ? String((d.department as Entity).code)
+                  : undefined,
+              }))}
+              value={quickPickIds}
+              onChange={setQuickPickIds}
+              placeholder={t("Search doctors by name or username…")}
+              emptyText={t("No doctors found.")}
+            />
+          </div>
+          <Feedback error={action.error} />
+          <div className="dialog-actions">
+            <button
+              type="button"
+              className="secondary"
+              disabled={quickBusy}
+              onClick={() => setAssignToSubject(null)}
+            >
+              {t("Cancel")}
+            </button>
+            <button
+              type="button"
+              className="primary"
+              disabled={!quickTermId || !quickPickIds.length || quickBusy}
+              onClick={() =>
+                void submitBatchAssignments(
+                  "/api/v1/admin/assignments/doctors",
+                  quickPickIds.map((doctorId) => ({
+                    doctorId,
+                    subjectId: assignToSubject.id,
+                    termId: quickTermId,
+                  })),
+                  () => setAssignToSubject(null),
+                )
+              }
+            >
+              {quickBusy ? t("Assigning…") : t("Assign selected educators")}
+            </button>
+          </div>
+        </Dialog>
+      )}
+      {assignToDoctor && (
+        <Dialog
+          title={t("Assign subjects to {0}", { "0": assignToDoctor.name })}
+          onClose={() => !quickBusy && setAssignToDoctor(null)}
+        >
+          <div className="field">
+            <span className="field-label">{t("Academic term")}</span>
+            <Combo
+              value={quickTermId}
+              options={rowsOf(terms.data).map((tr) => ({
+                value: tr.id,
+                label: `${String(tr.name)}${tr.isCurrent ? ` (${t("Current")})` : ""}`,
+              }))}
+              onChange={setQuickTermId}
+              placeholder={t("Select term…")}
+              ariaLabel={t("Academic term")}
+            />
+          </div>
+          <div className="field">
+            <span className="field-label">{t("Subjects")}</span>
+            <MultiPicker
+              options={rowsOf(subjects.data).map((s) => ({
+                id: s.id,
+                name: s.name,
+                sub: s.code,
+              }))}
+              value={quickPickIds}
+              onChange={setQuickPickIds}
+              placeholder={t("Search subjects by code or name…")}
+              emptyText={t("No subjects found.")}
+            />
+          </div>
+          <Feedback error={action.error} />
+          <div className="dialog-actions">
+            <button
+              type="button"
+              className="secondary"
+              disabled={quickBusy}
+              onClick={() => setAssignToDoctor(null)}
+            >
+              {t("Cancel")}
+            </button>
+            <button
+              type="button"
+              className="primary"
+              disabled={!quickTermId || !quickPickIds.length || quickBusy}
+              onClick={() =>
+                void submitBatchAssignments(
+                  "/api/v1/admin/assignments/doctors",
+                  quickPickIds.map((subjectId) => ({
+                    doctorId: assignToDoctor.id,
+                    subjectId,
+                    termId: quickTermId,
+                  })),
+                  () => setAssignToDoctor(null),
+                )
+              }
+            >
+              {quickBusy ? t("Assigning…") : t("Assign selected subjects")}
+            </button>
+          </div>
+        </Dialog>
+      )}
       {roster && (
         <Dialog
           title={t("{0} \u00B7 Roster", { "0": roster.name })}
@@ -709,7 +1542,7 @@ export function AdminResource({ user }: { user: SessionUser }) {
       )}
       {edit && (
         <Dialog
-          title={edit === "new" ? "Add record" : "Edit record"}
+          title={edit === "new" ? t("Add record") : t("Edit record")}
           onClose={() => setEdit(null)}
         >
           <FieldsForm
@@ -849,6 +1682,7 @@ export function AdminResource({ user }: { user: SessionUser }) {
     </>
   );
 }
+
 export function UserDetail({ user }: { user: SessionUser }) {
   const t = useT();
   const { id } = useParams();
@@ -873,13 +1707,19 @@ export function UserDetail({ user }: { user: SessionUser }) {
     user,
     "/api/v1/admin/departments?limit=100",
   );
+  const colleges = useResource<Envelope<Entity>>(
+    user,
+    "/api/v1/admin/colleges?limit=100",
+  );
   const doctorAssignments = useResource<Envelope<Entity> | Entity[]>(
     user,
-    "/api/v1/admin/assignments/doctors",
+    `/api/v1/admin/assignments/doctors?doctor_id=${id}&limit=100`,
+    !!id,
   );
   const enrollments = useResource<Envelope<Entity> | Entity[]>(
     user,
-    "/api/v1/admin/assignments/enrollments",
+    `/api/v1/admin/assignments/enrollments?student_id=${id}&limit=100`,
+    !!id,
   );
   const taSections = useResource<Envelope<Entity>>(
     user,
@@ -887,6 +1727,7 @@ export function UserDetail({ user }: { user: SessionUser }) {
   );
   const action = useAction(user, [
     "/api/v1/admin/users",
+    `/api/v1/admin/users/${id}`,
     "/api/v1/admin/permissions",
     "/api/v1/admin/assignments/doctors",
     "/api/v1/admin/assignments/enrollments",
@@ -904,10 +1745,21 @@ export function UserDetail({ user }: { user: SessionUser }) {
   const [stuTerm, setStuTerm] = useState("");
   const [taSection, setTaSection] = useState("");
   const [assignDone, setAssignDone] = useState("");
+
+  useEffect(() => {
+    const cur = rowsOf(terms.data).find((x) => Boolean(x.isCurrent)) ?? rowsOf(terms.data)[0];
+    if (cur) {
+      if (!docTerm) setDocTerm(cur.id);
+      if (!stuTerm) setStuTerm(cur.id);
+    }
+  }, [terms.data, docTerm, stuTerm]);
+
   async function addMany(path: string, bodies: Record<string, unknown>[], done: string, clear: () => void) {
     setAssignDone("");
     try {
       await Promise.all(bodies.map((body) => action.mutateAsync({ path, body })));
+      doctorAssignments.refetch();
+      enrollments.refetch();
       clear();
       setAssignDone(done);
     } catch {
@@ -942,11 +1794,15 @@ export function UserDetail({ user }: { user: SessionUser }) {
             <section className="panel">
               <h2>{t("Account")}</h2>
               <dl className="details-list">
-                {["username", "email", "role", "college", "academicYear"].map(
+                {["username", "email", "role", "college", "department", "academicYear"].map(
                   (k) => (
                     <div key={k}>
                       <dt>{t(label(k))}</dt>
-                      <dd>{display(query.data?.[k])}</dd>
+                      <dd>
+                        {k === "role"
+                          ? t(label(query.data?.[k]))
+                          : display(query.data?.[k])}
+                      </dd>
                     </div>
                   ),
                 )}
@@ -1040,23 +1896,29 @@ export function UserDetail({ user }: { user: SessionUser }) {
                       </thead>
                       <tbody>
                         {myDoctorRows.map((a, i) => (
-                          <tr key={String(a.id ?? i)}>
-                            <td>{display(a.subject)}</td>
+                          <tr key={String(a.id ?? `${a.subjectId}-${a.termId}-${i}`)}>
+                            <td>
+                              <b>{String((a.subject as Entity)?.code ?? "")}</b>{" "}
+                              {display(a.subject)}
+                            </td>
                             <td>{display(a.term)}</td>
                             <td>
                               <button
                                 className="text-button"
                                 disabled={action.isPending}
                                 onClick={() =>
-                                  action.mutate({
-                                    path: "/api/v1/admin/assignments/doctors",
-                                    method: "DELETE",
-                                    body: Object.fromEntries(
-                                      ["doctorId", "subjectId", "termId"]
-                                        .filter((k) => a[k])
-                                        .map((k) => [k, a[k]]),
-                                    ),
-                                  })
+                                  action.mutate(
+                                    {
+                                      path: "/api/v1/admin/assignments/doctors",
+                                      method: "DELETE",
+                                      body: Object.fromEntries(
+                                        ["doctorId", "subjectId", "termId"]
+                                          .filter((k) => a[k])
+                                          .map((k) => [k, a[k]]),
+                                      ),
+                                    },
+                                    { onSuccess: () => doctorAssignments.refetch() },
+                                  )
                                 }
                               >
                                 {t("Remove")}
@@ -1131,23 +1993,29 @@ export function UserDetail({ user }: { user: SessionUser }) {
                       </thead>
                       <tbody>
                         {myEnrollmentRows.map((a, i) => (
-                          <tr key={String(a.id ?? i)}>
-                            <td>{display(a.subject)}</td>
+                          <tr key={String(a.id ?? `${a.subjectId}-${a.termId}-${i}`)}>
+                            <td>
+                              <b>{String((a.subject as Entity)?.code ?? "")}</b>{" "}
+                              {display(a.subject)}
+                            </td>
                             <td>{display(a.term)}</td>
                             <td>
                               <button
                                 className="text-button"
                                 disabled={action.isPending}
                                 onClick={() =>
-                                  action.mutate({
-                                    path: "/api/v1/admin/assignments/enrollments",
-                                    method: "DELETE",
-                                    body: Object.fromEntries(
-                                      ["studentId", "subjectId", "termId"]
-                                        .filter((k) => a[k])
-                                        .map((k) => [k, a[k]]),
-                                    ),
-                                  })
+                                  action.mutate(
+                                    {
+                                      path: "/api/v1/admin/assignments/enrollments",
+                                      method: "DELETE",
+                                      body: Object.fromEntries(
+                                        ["studentId", "subjectId", "termId"]
+                                          .filter((k) => a[k])
+                                          .map((k) => [k, a[k]]),
+                                      ),
+                                    },
+                                    { onSuccess: () => enrollments.refetch() },
+                                  )
                                 }
                               >
                                 {t("Remove")}
@@ -1259,7 +2127,12 @@ export function UserDetail({ user }: { user: SessionUser }) {
                         method: "PATCH",
                         body: { taId: id },
                       },
-                      { onSuccess: () => setTaSection("") },
+                      {
+                        onSuccess: () => {
+                          setTaSection("");
+                          taSections.refetch();
+                        },
+                      },
                     )
                   }
                 >
@@ -1340,7 +2213,11 @@ export function UserDetail({ user }: { user: SessionUser }) {
                 type: "number",
                 min: 1,
               },
-              { key: "college", label: "College" },
+              {
+                key: "collegeId",
+                label: "College",
+                options: pick(rowsOf(colleges.data)),
+              },
               {
                 key: "departmentId",
                 label: "Department",

@@ -157,19 +157,22 @@ export function ExamWizard({ user }: { user: SessionUser }) {
   const [picked, setPicked] = useState<string[]>([]);
   const [error, setError] = useState("");
   const [restored, setRestored] = useState(false);
+  const [qSearch, setQSearch] = useState("");
   // Draft autosave: a refresh never wipes the wizard. Restored once on mount.
   useEffect(() => {
     const d = loadDraft(user.id);
     if (!d) return;
     if (
-      !d.subject && !d.startLocal && !d.endLocal &&
+      !d.subject && !d.startLocal && !d.endLocal && !d.title &&
       !(Array.isArray(d.picked) && d.picked.length) &&
       !(Array.isArray(d.sectionSel) && d.sectionSel.length) &&
       !(Array.isArray(d.pickedStudents) && d.pickedStudents.length)
     )
       return;
     if (typeof d.subject === "string") setSubject(d.subject);
-        if (typeof d.examToolsEnabled === "boolean") setExamToolsEnabled(d.examToolsEnabled);
+    if (typeof d.notesEnabled === "boolean") setNotesEnabled(d.notesEnabled);
+    if (typeof d.resultsReleased === "boolean") setResultsReleased(d.resultsReleased);
+    if (typeof d.examToolsEnabled === "boolean") setExamToolsEnabled(d.examToolsEnabled);
     if (typeof d.notesForDoctorEnabled === "boolean") setNotesForDoctorEnabled(d.notesForDoctorEnabled);
     if (typeof d.maxReentries === "number") setMaxReentries(d.maxReentries);
     if (typeof d.duration === "number") setDuration(d.duration);
@@ -202,14 +205,14 @@ export function ExamWizard({ user }: { user: SessionUser }) {
       sessionStorage.setItem(
         DRAFT_KEY(user.id),
         JSON.stringify({
-          subject, duration, purpose, title, sebRequired, notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel,
+          subject, duration, purpose, title, sebRequired, notesEnabled, resultsReleased, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel,
           pickedStudents, source, manual, mix, picked, step,
         }),
       );
     } catch {
       // storage full/blocked: builder still works, just not resumable
     }
-  }, [user.id, subject, duration, purpose, title, sebRequired, notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel, pickedStudents, source, manual, mix, picked, step ]);
+  }, [user.id, draftDirty, subject, duration, purpose, title, sebRequired, notesEnabled, resultsReleased, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel, pickedStudents, source, manual, mix, picked, step]);
 
   const sections = useResource<Envelope<Entity>>(
     user,
@@ -218,6 +221,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
   );
   const roster = useResource<{
     totalEnrolled: number;
+    enrolledStudents?: { id: string; username: string; name: string }[];
     sections: {
       id: string;
       name: string;
@@ -259,7 +263,41 @@ export function ExamWizard({ user }: { user: SessionUser }) {
     const dt = new Date(b + Math.max(60, duration) * 60000);
     const iso = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}T${String(dt.getHours()).padStart(2, "0")}:${String(dt.getMinutes()).padStart(2, "0")}`;
     setEndLocal(iso);
-  }, [startLocal, duration, closeTouched ]);
+  }, [startLocal, duration, closeTouched]);
+
+  const studentPickerOptions = useMemo(() => {
+    const secNamesByStudent = new Map<string, string[]>();
+    for (const sec of roster.data?.sections ?? []) {
+      for (const st of sec.students) {
+        const list = secNamesByStudent.get(st.id) ?? [];
+        if (!list.includes(sec.name)) list.push(sec.name);
+        secNamesByStudent.set(st.id, list);
+      }
+    }
+    if (roster.data?.enrolledStudents?.length) {
+      return roster.data.enrolledStudents.map((st) => ({
+        id: st.id,
+        name: st.name,
+        username: st.username,
+        sub: secNamesByStudent.get(st.id)?.join(", ") || t("Enrolled"),
+      }));
+    }
+    const seen = new Set<string>();
+    const out: { id: string; name: string; username: string; sub: string }[] = [];
+    for (const sec of roster.data?.sections ?? []) {
+      for (const st of sec.students) {
+        if (seen.has(st.id)) continue;
+        seen.add(st.id);
+        out.push({
+          id: st.id,
+          name: st.name,
+          username: st.username,
+          sub: secNamesByStudent.get(st.id)?.join(", ") || sec.name,
+        });
+      }
+    }
+    return out;
+  }, [roster.data, t]);
 
   function valid(s: number): string {
     if (s === 0) {
@@ -304,7 +342,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
           type: user.role === "ta" ? "ta_quiz" : "doctor_exam",
           title: title.trim(),
           purpose: canMidterm ? purpose : "quiz",
-          ...(purpose === "quiz" ? { sebRequired } : {}),
+          sebRequired,
           startTime,
           endTime,
           durationMinutes: duration,
@@ -334,6 +372,11 @@ export function ExamWizard({ user }: { user: SessionUser }) {
     setMix((m) => ({ ...m, [k]: Math.max(0, (m[k] ?? 0) + d) }));
   const subjName =
     rowsOf(subjects.data).find((s) => s.id === subject)?.name ?? "";
+  const filteredBankRows = rowsOf(bank.data).filter((q) =>
+    !qSearch.trim() ||
+    q.text.toLowerCase().includes(qSearch.trim().toLowerCase()) ||
+    q.difficulty.toLowerCase().includes(qSearch.trim().toLowerCase()),
+  );
 
   return (
     <>
@@ -358,10 +401,24 @@ export function ExamWizard({ user }: { user: SessionUser }) {
                 // ignore
               }
               setSubject("");
+              setTitle("");
+              setPurpose(canMidterm ? "midterm" : "quiz");
+              setSebRequired(false);
+              setNotesEnabled(false);
+              setResultsReleased(false);
+              setExamToolsEnabled(true);
+              setNotesForDoctorEnabled(false);
+              setMaxReentries(3);
+              setDuration(45);
               setStartLocal("");
               setEndLocal("");
+              setCloseTouched(false);
+              setScope(user.role === "ta" ? "sections" : "subject");
               setSectionSel([]);
               setPickedStudents([]);
+              setSource("shared");
+              setManual(false);
+              setMix({ easy: 3, medium: 2, hard: 1 });
               setPicked([]);
               setStep(0);
               setRestored(false);
@@ -455,20 +512,16 @@ export function ExamWizard({ user }: { user: SessionUser }) {
                 ariaLabel={t("Subject")}
               />
             </div>
-<div className="field">
-  <label><input type="checkbox" checked={notesEnabled} onChange={(e) => setNotesEnabled(e.target.checked)} /> {t("Allow student notes")}</label>
-  {purpose === "midterm" ? (
-    <small role="note">{t("Safe Exam Browser is always required for midterms.")}</small>
-  ) : (
-    <label><input type="checkbox" checked={sebRequired} onChange={(e) => setSebRequired(e.target.checked)} /> {t("Require Safe Exam Browser")}</label>
-  )}
-  <label><input type="checkbox" checked={resultsReleased} onChange={(e) => setResultsReleased(e.target.checked)} /> {t("Show grades to students immediately")}</label>
-  <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
-  <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>
-  <label>{t("Maximum re-entries (excluding the first entry)")}
-    <input type="number" min={0} max={20} value={maxReentries} onChange={(e) => setMaxReentries(Math.min(20, Math.max(0, Number.isFinite(Number(e.target.value)) ? Number(e.target.value) : 0)))} required />
-  </label>
-</div>
+            <div className="field">
+              <label><input type="checkbox" checked={notesEnabled} onChange={(e) => setNotesEnabled(e.target.checked)} /> {t("Allow student notes")}</label>
+              <label><input type="checkbox" checked={sebRequired} onChange={(e) => setSebRequired(e.target.checked)} /> {t("Require Safe Exam Browser")}</label>
+              <label><input type="checkbox" checked={resultsReleased} onChange={(e) => setResultsReleased(e.target.checked)} /> {t("Show grades to students immediately")}</label>
+              <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
+              <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>
+              <label>{t("Maximum re-entries (excluding the first entry)")}
+                <input type="number" min={0} max={20} value={maxReentries} onChange={(e) => setMaxReentries(Math.min(20, Math.max(0, Number.isFinite(Number(e.target.value)) ? Number(e.target.value) : 0)))} required />
+              </label>
+            </div>
             <div className="field">
               <span className="field-label">{t("Duration")}</span>
               <div className="stepper">
@@ -590,14 +643,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
                   <p className="subtle">{t("Loading enrolled students…")}</p>
                 ) : (
                   <MultiPicker
-                    options={(roster.data?.sections ?? []).flatMap((sec) =>
-                      sec.students.map((st) => ({
-                        id: st.id,
-                        name: st.name,
-                        username: st.username,
-                        sub: sec.name,
-                      })),
-                    )}
+                    options={studentPickerOptions}
                     value={pickedStudents}
                     onChange={setPickedStudents}
                     placeholder="Search enrolled students…"
@@ -674,14 +720,23 @@ export function ExamWizard({ user }: { user: SessionUser }) {
                 ) : (
                 <>
                 {!bank.isPending && !bank.error && (
-                  <p className="subtle">
-                    {t("{0} questions in your bank", {
-                      "0": bank.data?.total ?? rowsOf(bank.data).length,
-                    })}
-                  </p>
+                  <div className="toolbar">
+                    <input
+                      type="search"
+                      value={qSearch}
+                      onChange={(e) => setQSearch(e.target.value)}
+                      placeholder={t("Filter questions by text or difficulty…")}
+                      aria-label={t("Filter questions")}
+                    />
+                    <span className="subtle">
+                      {t("{0} questions in your bank", {
+                        "0": bank.data?.total ?? rowsOf(bank.data).length,
+                      })}
+                    </span>
+                  </div>
                 )}
                 <div className="question-pick-list modern">
-                  {rowsOf(bank.data).map((q) => (
+                  {filteredBankRows.map((q) => (
                     <button
                       key={q.id}
                       type="button"
@@ -788,7 +843,13 @@ export function ExamWizard({ user }: { user: SessionUser }) {
               </button>
             ) : (
               <button type="button" className="primary" disabled={action.isPending} onClick={submit}>
-                {action.isPending ? t("Creating…") : user.role === "ta" ? t("Create quiz") : t("Submit for approval")}
+                {action.isPending
+                  ? t("Creating…")
+                  : user.role === "ta" || purpose === "quiz"
+                    ? t("Create quiz")
+                    : user.role === "admin"
+                      ? t("Create assessment")
+                      : t("Submit for approval")}
               </button>
             )}
           </span>
@@ -1049,7 +1110,7 @@ export function EditExamWindow({
       durationMinutes: dur,
       title: title.trim(),
       ...(canMidterm ? { purpose } : {}),
-      ...(canMidterm && purpose === "quiz" ? { sebRequired } : {}),
+      sebRequired,
       notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, resultsReleased,
     });
   }
@@ -1112,22 +1173,27 @@ export function EditExamWindow({
               {m}m
             </button>
           ))}
+          <span className="stepper-custom">
+            <button type="button" onClick={() => setDur(Math.max(1, dur - 5))} aria-label={t("Shorter")}>
+              <Minus size={13} />
+            </button>
+            <b>{dur}m</b>
+            <button type="button" onClick={() => setDur(dur + 5)} aria-label={t("Longer")}>
+              <Plus size={13} />
+            </button>
+          </span>
         </div>
       </div>
-<div className="field">
-  <label><input type="checkbox" checked={notesEnabled} onChange={(e) => setNotesEnabled(e.target.checked)} /> {t("Allow student notes")}</label>
-  {purpose === "midterm" ? (
-    <small role="note">{t("Safe Exam Browser is always required for midterms.")}</small>
-  ) : (
-    <label><input type="checkbox" checked={sebRequired} onChange={(e) => setSebRequired(e.target.checked)} /> {t("Require Safe Exam Browser")}</label>
-  )}
-  <label><input type="checkbox" checked={resultsReleased} onChange={(e) => setResultsReleased(e.target.checked)} /> {t("Show grades to students immediately")}</label>
-  <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
-  <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>
-  <label>{t("Maximum re-entries (excluding the first entry)")}
-    <input type="number" min={0} max={20} value={maxReentries} onChange={(e) => setMaxReentries(Math.min(20, Math.max(0, Number.isFinite(Number(e.target.value)) ? Number(e.target.value) : 0)))} required />
-  </label>
-</div>
+      <div className="field">
+        <label><input type="checkbox" checked={notesEnabled} onChange={(e) => setNotesEnabled(e.target.checked)} /> {t("Allow student notes")}</label>
+        <label><input type="checkbox" checked={sebRequired} onChange={(e) => setSebRequired(e.target.checked)} /> {t("Require Safe Exam Browser")}</label>
+        <label><input type="checkbox" checked={resultsReleased} onChange={(e) => setResultsReleased(e.target.checked)} /> {t("Show grades to students immediately")}</label>
+        <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
+        <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>
+        <label>{t("Maximum re-entries (excluding the first entry)")}
+          <input type="number" min={0} max={20} value={maxReentries} onChange={(e) => setMaxReentries(Math.min(20, Math.max(0, Number.isFinite(Number(e.target.value)) ? Number(e.target.value) : 0)))} required />
+        </label>
+      </div>
       <Feedback error={err || error} />
       <div className="dialog-actions">
         <button type="button" className="primary" disabled={busy} onClick={save}>

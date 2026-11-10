@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { Router, type Router as RouterType } from "express";
 import { hashPassword } from "better-auth/crypto";
 import multer from "multer";
@@ -103,7 +104,7 @@ function parseWorkbook(buf: Buffer): { rows: ParsedRow[]; errors: { line: number
 export const adminImports: RouterType = Router();
 adminImports.use(requireAuth, requireRole("admin"));
 
-// College free text → entity link (case-insensitive). Unknown names resolve
+// College free text → entity link (case-insensitive by name or code). Unknown names resolve
 // to nothing: the text is still stored, the link stays empty, and the caller
 // reports the names so an admin can create/merge colleges afterwards.
 async function resolveCollegeIds(texts: string[]): Promise<{ byText: Map<string, string>; unknown: string[] }> {
@@ -111,7 +112,15 @@ async function resolveCollegeIds(texts: string[]): Promise<{ byText: Map<string,
   const byText = new Map<string, string>();
   const unknown: string[] = [];
   for (const text of uniq) {
-    const row = await prisma.college.findFirst({ where: { name: { equals: text, mode: "insensitive" } }, select: { id: true } });
+    const row = await prisma.college.findFirst({
+      where: {
+        OR: [
+          { name: { equals: text, mode: "insensitive" } },
+          { code: { equals: text, mode: "insensitive" } },
+        ],
+      },
+      select: { id: true },
+    });
     if (row) byText.set(text.toLowerCase(), row.id);
     else unknown.push(text);
   }
@@ -232,7 +241,7 @@ adminImports.post("/commit", rateLimit(30, 60_000, "admin-import:commit"), async
               data: { name: r.fullName, email: targetEmail, role: r.role, canChangePassword: defaultCanChangePassword(r.role), ...cohort },
             })
           : await tx.user.create({
-              data: { id: `u_${r.username}`, name: r.fullName, email: email.toLowerCase(), emailVerified: false, username: r.username, role: r.role, canChangePassword: defaultCanChangePassword(r.role), isActive: true, academicYear: r.academicYear ?? null, college: r.college ?? null, collegeId },
+              data: { id: `u_${crypto.randomUUID()}`, name: r.fullName, email: email.toLowerCase(), emailVerified: false, username: r.username, role: r.role, canChangePassword: defaultCanChangePassword(r.role), isActive: true, academicYear: r.academicYear ?? null, college: r.college ?? null, collegeId },
             });
         // Role changes de-escalate fully here too (overrides win over role
         // defaults — see PATCH /admin/users/:id).

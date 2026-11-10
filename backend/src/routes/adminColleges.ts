@@ -103,7 +103,7 @@ adminColleges.get("/students/search", async (req, res) => {
   res.json(rows);
 });
 
-// GET /api/v1/admin/colleges/:id — info, counts, departments, subjects, years present.
+// GET /api/v1/admin/colleges/:id — info, counts, departments, subjects, doctors, years present.
 adminColleges.get("/:id", async (req, res) => {
   const row = await prisma.college.findUnique({
     where: { id: String(req.params.id) },
@@ -112,20 +112,54 @@ adminColleges.get("/:id", async (req, res) => {
     },
   });
   if (!row) return res.status(404).json({ error: "not found" });
-  const [students, doctors, years, subjectTotal, subjects] = await Promise.all([
+  const [students, doctors, years, subjectTotal, subjects, doctorsList] = await Promise.all([
     prisma.user.count({ where: { collegeId: row.id, role: "student" } }),
-    prisma.user.count({ where: { collegeId: row.id, role: "doctor" } }),
+    prisma.user.count({ where: { role: "doctor", OR: [{ collegeId: row.id }, { department: { collegeId: row.id } }] } }),
     prisma.user.groupBy({ by: ["academicYear"], where: { collegeId: row.id, role: "student", academicYear: { not: null } }, _count: true, orderBy: { academicYear: "asc" } }),
     prisma.subject.count({ where: { department: { collegeId: row.id } } }),
     prisma.subject.findMany({
       where: { department: { collegeId: row.id } },
       select: {
         id: true, code: true, name: true,
-        department: { select: { id: true, name: true } },
-        _count: { select: { questions: true, exams: true, enrollments: true } },
+        department: { select: { id: true, name: true, code: true } },
+        _count: { select: { questions: true, exams: true, enrollments: true, sections: true } },
+        doctorAssignments: {
+          where: { term: { isCurrent: true } },
+          select: {
+            doctorId: true,
+            termId: true,
+            doctor: { select: { id: true, name: true, username: true } },
+            term: { select: { id: true, name: true } },
+          },
+        },
       },
       orderBy: { code: "asc" },
       take: 200,
+    }),
+    prisma.user.findMany({
+      where: {
+        role: "doctor",
+        OR: [{ collegeId: row.id }, { department: { collegeId: row.id } }],
+      },
+      select: {
+        id: true,
+        username: true,
+        name: true,
+        email: true,
+        isActive: true,
+        department: { select: { id: true, code: true, name: true } },
+        doctorAssignments: {
+          where: { term: { isCurrent: true } },
+          select: {
+            subjectId: true,
+            termId: true,
+            subject: { select: { id: true, code: true, name: true } },
+            term: { select: { id: true, name: true } },
+          },
+        },
+      },
+      orderBy: { name: "asc" },
+      take: 100,
     }),
   ]);
   res.json({
@@ -136,6 +170,7 @@ adminColleges.get("/:id", async (req, res) => {
     subjects,
     subjectTotal,
     subjectsTruncated: subjectTotal > subjects.length,
+    doctorsList,
   });
 });
 

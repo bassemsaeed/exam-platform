@@ -10,15 +10,25 @@ adminDepartments.use(requireAuth, requireRole("admin"));
 
 // GET /api/v1/admin/departments — catalog with member/subject counts.
 adminDepartments.get("/", async (req, res) => {
-  const q = pageQuery.extend({ search: z.string().optional() }).parse(req.query);
-  const where = q.search
-    ? { OR: [{ code: { contains: q.search, mode: "insensitive" as const } }, { name: { contains: q.search, mode: "insensitive" as const } }] }
-    : {};
+  const q = pageQuery.extend({ search: z.string().optional(), college_id: z.string().optional() }).parse(req.query);
+  const where = {
+    ...(q.search
+      ? { OR: [{ code: { contains: q.search, mode: "insensitive" as const } }, { name: { contains: q.search, mode: "insensitive" as const } }] }
+      : {}),
+    ...(q.college_id ? { collegeId: q.college_id } : {}),
+  };
   const [total, rows] = await Promise.all([
     prisma.department.count({ where }),
     prisma.department.findMany({
       where,
-      select: { id: true, code: true, name: true, _count: { select: { users: true, subjects: true } } },
+      select: {
+        id: true,
+        code: true,
+        name: true,
+        collegeId: true,
+        college: { select: { id: true, code: true, name: true } },
+        _count: { select: { users: true, subjects: true } },
+      },
       orderBy: { code: "asc" },
       ...page(q),
     }),
@@ -27,8 +37,22 @@ adminDepartments.get("/", async (req, res) => {
 });
 
 adminDepartments.post("/", async (req, res) => {
-  const body = z.object({ code: z.string().min(2).max(20).regex(/^[a-zA-Z0-9_.-]+$/), name: z.string().min(2).max(200) }).parse(req.body);
-  const row = await prisma.department.create({ data: { code: body.code.toUpperCase(), name: body.name.trim() } });
+  const body = z.object({
+    code: z.string().min(2).max(20).regex(/^[a-zA-Z0-9_.-]+$/),
+    name: z.string().min(2).max(200),
+    collegeId: z.string().uuid().nullable().optional(),
+  }).parse(req.body);
+  if (body.collegeId) {
+    const college = await prisma.college.findUnique({ where: { id: body.collegeId }, select: { id: true } });
+    if (!college) return res.status(422).json({ error: "college not found" });
+  }
+  const row = await prisma.department.create({
+    data: {
+      code: body.code.toUpperCase(),
+      name: body.name.trim(),
+      ...(body.collegeId !== undefined ? { collegeId: body.collegeId } : {}),
+    },
+  });
   await audit((req as unknown as AuthedRequest).userId, "department.create", "department", row.id, body);
   res.status(201).json(row);
 });

@@ -1,4 +1,4 @@
-import { locale } from "./i18n";
+import { locale, translate } from "./i18n";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { api, type SessionUser } from "./api";
 import { queryClient } from "./query";
@@ -153,6 +153,7 @@ export function useAction<T = Entity>(user: SessionUser, roots: string[]) {
 export const label = (s: unknown) =>
   String(s ?? "—")
     .replaceAll("_", " ")
+    .replaceAll("-", " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
 export const date = (s: unknown) =>
   s
@@ -173,4 +174,4 @@ export const nameOf = (exam: Exam, subjects: Subject[] = []) =>
   exam.title ||
   (exam.subject?.name ??
     subjects.find((s) => s.id === exam.subjectId)?.name ??
-    "Exam");
+    translate("Exam"));

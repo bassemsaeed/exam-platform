@@ -105,25 +105,64 @@ exams.get("/roster", async (req, res) => {
     const assigned = await prisma.doctorAssignment.count({ where: { doctorId: a.userId, subjectId: q.subject_id, termId } });
     if (!assigned) return res.status(403).json({ error: "not assigned to subject for this term" });
   }
-  const sections = await prisma.section.findMany({
-    where: { subjectId: q.subject_id, termId, ...(a.role === "ta" ? { taId: a.userId } : {}) },
-    select: {
-      id: true, name: true,
-      ta: { select: { id: true, name: true, username: true } },
-      memberships: {
-        select: { student: { select: { id: true, username: true, name: true, email: true, isActive: true, academicYear: true, collegeRef: { select: { id: true, name: true } } } } },
-        orderBy: { student: { name: "asc" } },
-        take: config.lists.membersMax,
+  const [sections, total, enrolledRows] = await Promise.all([
+    prisma.section.findMany({
+      where: { subjectId: q.subject_id, termId, ...(a.role === "ta" ? { taId: a.userId } : {}) },
+      select: {
+        id: true, name: true,
+        ta: { select: { id: true, name: true, username: true } },
+        memberships: {
+          select: {
+            student: {
+              select: {
+                id: true,
+                username: true,
+                name: true,
+                email: true,
+                isActive: true,
+                academicYear: true,
+                college: true,
+                collegeRef: { select: { id: true, code: true, name: true } },
+                department: { select: { id: true, code: true, name: true } },
+              },
+            },
+          },
+          orderBy: { student: { name: "asc" } },
+          take: config.lists.membersMax,
+        },
       },
-    },
-    orderBy: { name: "asc" },
-  });
-  const total = await prisma.enrollment.count({ where: { subjectId: q.subject_id, termId } });
+      orderBy: { name: "asc" },
+    }),
+    prisma.enrollment.count({ where: { subjectId: q.subject_id, termId } }),
+    a.role === "ta"
+      ? Promise.resolve([])
+      : prisma.enrollment.findMany({
+          where: { subjectId: q.subject_id, termId },
+          select: {
+            student: {
+              select: {
+                id: true,
+                username: true,
+                name: true,
+                email: true,
+                isActive: true,
+                academicYear: true,
+                college: true,
+                collegeRef: { select: { id: true, code: true, name: true } },
+                department: { select: { id: true, code: true, name: true } },
+              },
+            },
+          },
+          orderBy: { student: { name: "asc" } },
+          take: config.lists.membersMax,
+        }),
+  ]);
   await audit(a.userId, "roster.view", "subject", q.subject_id, { sections: sections.length }).catch(() => {});
   res.json({
     subjectId: q.subject_id,
     termId,
     totalEnrolled: total,
+    enrolledStudents: enrolledRows.map((e) => e.student),
     sections: sections.map((s) => ({
       id: s.id,
       name: s.name,
@@ -848,9 +887,10 @@ exams.get("/:id/results", async (req, res) => {
         : {}),
       ...(a.role === "ta" ? { taId: a.userId } : {}),
     },
-    select: { id: true, name: true, ta: { select: { name: true } } },
+    select: { id: true, name: true, ta: { select: { name: true, username: true } } },
     orderBy: { name: "asc" },
   });
+  const sectorsSeen = new Set<string>();
   const groups = [];
   for (const s of sections) {
     // Full roster per section (default 500, not page 20): a 40-seat lab must
@@ -859,18 +899,66 @@ exams.get("/:id/results", async (req, res) => {
       prisma.sectionMembership.count({ where: { sectionId: s.id } }),
       prisma.sectionMembership.findMany({
         where: { sectionId: s.id },
-        select: { student: { select: { id: true, username: true, name: true } } },
+        select: { student: { select: { id: true, username: true, name: true, email: true, academicYear: true } } },
         orderBy: { student: { name: "asc" } },
         take: q.limit,
       }),
     ]);
     const ids = memberships.map((m) => m.student.id);
+    for (const id of ids) sectorsSeen.add(id);
     const grades = await prisma.studentExam.findMany({
       where: { examId: exam.id, studentId: { in: ids } },
       select: { studentId: true, status: true, totalGrade: true, submittedAt: true, notesForDoctor: true, questions: { select: { question: { select: { grade: true } } } } },
     });
     const byId = new Map(grades.map((g) => [g.studentId, { ...g, totalMarks: g.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0), questions: undefined }]));
-    groups.push({ sectionId: s.id, sectionName: s.name, taName: s.ta.name, total, rows: memberships.map((m) => ({ ...m.student, exam: byId.get(m.student.id) ?? null })) });
+    groups.push({ sectionId: s.id, sectionName: s.name, taName: s.ta.name, taUsername: s.ta.username, total, rows: memberships.map((m) => ({ ...m.student, exam: byId.get(m.student.id) ?? null })) });
+  }
+  if (a.role !== "ta" && exam.targetScope !== "sections") {
+    const [extraSittings, extraEnrolled] = await Promise.all([
+      prisma.studentExam.findMany({
+        where: { examId: exam.id, ...(sectorsSeen.size > 0 ? { studentId: { notIn: [...sectorsSeen] } } : {}) },
+        select: { studentId: true, status: true, totalGrade: true, submittedAt: true, notesForDoctor: true, student: { select: { id: true, username: true, name: true, email: true, academicYear: true } }, questions: { select: { question: { select: { grade: true } } } } },
+      }),
+      exam.targetScope === "student_list"
+        ? prisma.examTargetStudent.findMany({
+            where: { examId: exam.id, ...(sectorsSeen.size > 0 ? { studentId: { notIn: [...sectorsSeen] } } : {}) },
+            select: { student: { select: { id: true, username: true, name: true, email: true, academicYear: true } } },
+          })
+        : prisma.enrollment.findMany({
+            where: { subjectId: exam.subjectId, termId: exam.termId, ...(sectorsSeen.size > 0 ? { studentId: { notIn: [...sectorsSeen] } } : {}) },
+            select: { student: { select: { id: true, username: true, name: true, email: true, academicYear: true } } },
+            take: q.limit,
+          }),
+    ]);
+    const extraStudentMap = new Map<string, { id: string; username: string | null; name: string; email?: string; academicYear?: number | null }>();
+    for (const e of extraEnrolled) extraStudentMap.set(e.student.id, e.student);
+    const sittingById = new Map(
+      extraSittings.map((g) => {
+        extraStudentMap.set(g.student.id, g.student);
+        return [
+          g.studentId,
+          {
+            studentId: g.studentId,
+            status: g.status,
+            totalGrade: g.totalGrade,
+            submittedAt: g.submittedAt,
+            notesForDoctor: g.notesForDoctor,
+            totalMarks: g.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0),
+          },
+        ];
+      }),
+    );
+    if (extraStudentMap.size > 0) {
+      const extraStudents = [...extraStudentMap.values()].sort((x, y) => x.name.localeCompare(y.name));
+      groups.push({
+        sectionId: "unassigned",
+        sectionName: "Direct Enrollment (No Section)",
+        taName: "—",
+        taUsername: null,
+        total: extraStudents.length,
+        rows: extraStudents.map((st) => ({ ...st, exam: sittingById.get(st.id) ?? null })),
+      });
+    }
   }
   await audit(a.userId, "results.view", "exam", exam.id, { groups: groups.length, limit: q.limit });
   res.json({ examId: exam.id, groups });

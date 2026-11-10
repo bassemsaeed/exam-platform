@@ -27,8 +27,14 @@ export function rateLimit(max: number, windowMs: number, scope?: string) {
     try {
       const r = await redis();
       if (r) {
-        const count = await r.incr(key);
-        if (count === 1) await r.pexpire(key, windowMs);
+        const count = Number(
+          await r.eval(
+            `local c = redis.call("INCR", KEYS[1]); if c == 1 or redis.call("PTTL", KEYS[1]) < 0 then redis.call("PEXPIRE", KEYS[1], ARGV[1]) end; return c`,
+            1,
+            key,
+            String(windowMs),
+          ),
+        );
         if (count > max) return res.status(429).json({ error: "too many requests" });
         return next();
       }

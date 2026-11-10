@@ -945,7 +945,7 @@ export const arabic: Record<string, string> = {
   "Verified by server": "تم التحقق من الخادم",
   "Open this exam in Safe Exam Browser": "افتح الامتحان في متصفح الامتحان الآمن",
   Live: "متصل",
-  "Server unreachable": "الخادم غير reachable",
+  "Server unreachable": "الخادم غير متاح",
   "Enrollment & window": "التسجيل ونافذة الامتحان",
   "Waiting for server…": "بانتظار الخادم…",
   "Eligible · window open until {0}": "مؤهل · النافذة مفتوحة حتى {0}",
@@ -1070,4 +1070,108 @@ export const arabic: Record<string, string> = {
   "No subjects yet": "لا توجد مقررات بعد",
   "This college's departments have no subjects yet.": "لا توجد مقررات في أقسام هذه الكلية بعد.",
   "Departments in this college, with their subjects.": "أقسام هذه الكلية وموادها.",
+
+  // College and assignment screens.
+  "Academic departments belonging to this college and their course catalog.":
+    "الأقسام الأكاديمية التابعة لهذه الكلية ودليل مقرراتها.",
+  "Add a subject or clear your filters.": "أضف مقررًا أو امسح عوامل التصفية.",
+  "All colleges": "جميع الكليات",
+  "All terms": "جميع الفصول الدراسية",
+  "Assign": "إسناد",
+  "Assign doctors to this college or one of its departments in Users.":
+    "أسند أعضاء هيئة التدريس إلى هذه الكلية أو أحد أقسامها من صفحة المستخدمين.",
+  "Assign educator": "إسناد عضو هيئة تدريس",
+  "Assign educators to {0} ({1})": "إسناد أعضاء هيئة التدريس إلى {0} ({1})",
+  "Assign selected educators": "إسناد أعضاء هيئة التدريس المحددين",
+  "Assign selected subjects": "إسناد المقررات المحددة",
+  "Assign subjects": "إسناد المقررات",
+  "Assign subjects to {0}": "إسناد المقررات إلى {0}",
+  "Assigned Educators": "أعضاء هيئة التدريس المسندون",
+  "Assigned subjects": "المقررات المسندة",
+  "Assigned Subjects": "المقررات المسندة",
+  "Assigning…": "جارٍ الإسناد…",
+  "Bind educators to subjects, enroll students, and assign teaching assistants.":
+    "اربط أعضاء هيئة التدريس بالمقررات، وسجّل الطلاب، وأسند المعيدين.",
+  "By Educator": "حسب عضو هيئة التدريس",
+  "By Subject": "حسب المقرر",
+  "Course catalog, department links, question bank metrics, and assigned educators.":
+    "دليل المقررات وروابط الأقسام وإحصاءات بنك الأسئلة وأعضاء هيئة التدريس المسندون.",
+  "courses in departments": "مقررات في الأقسام",
+  "Courses offered by this college's departments and their assigned educators.":
+    "المقررات التي تقدمها أقسام هذه الكلية وأعضاء هيئة التدريس المسندون إليها.",
+  "Delete subject": "حذف المقرر",
+  "Depts": "الأقسام",
+  "Doctors affiliated with this college or its departments and their current-term subjects.":
+    "أعضاء هيئة التدريس المنتسبون لهذه الكلية أو أقسامها ومقرراتهم في الفصل الحالي.",
+  "doctors in this college": "عضو هيئة تدريس في هذه الكلية",
+  "Educator profile": "ملف عضو هيئة التدريس",
+  "Educators": "أعضاء هيئة التدريس",
+  "Educators (Doctors)": "أعضاء هيئة التدريس",
+  "Faculties, academic departments, educators, and enrolled cohorts.":
+    "الكليات والأقسام الأكاديمية وأعضاء هيئة التدريس والدفعات المسجلة.",
+  "Filter by term": "تصفية حسب الفصل الدراسي",
+  "Filter college": "تصفية حسب الكلية",
+  "Filter colleges or find a student by name / username…":
+    "صفِّ الكليات أو ابحث عن طالب بالاسم / اسم المستخدم…",
+  "Filter exam kind": "تصفية حسب نوع الامتحان",
+  "Filter questions": "تصفية الأسئلة",
+  "Filter questions by text or difficulty…": "صفِّ الأسئلة حسب النص أو الصعوبة…",
+  "Link an existing department to organize subjects and educators under this college.":
+    "اربط قسمًا موجودًا لتنظيم المقررات وأعضاء هيئة التدريس تحت هذه الكلية.",
+  "Link department": "ربط قسم",
+  "Link department to {0}": "ربط قسم بـ {0}",
+  "Linking…": "جارٍ الربط…",
+  "Manage all subjects": "إدارة جميع المقررات",
+  "Manage assignments": "إدارة الإسنادات",
+  "Manage college": "إدارة الكلية",
+  "Matching students across colleges": "طلاب مطابقون في جميع الكليات",
+  "No current-term subjects assigned": "لا توجد مقررات مسندة في الفصل الحالي",
+  "No department assigned": "لم يُسند قسم",
+  "No departments linked yet": "لا توجد أقسام مرتبطة بعد",
+  "No doctors found.": "لا يوجد أعضاء هيئة تدريس.",
+  "No educator assigned": "لم يُسند عضو هيئة تدريس",
+  "No educators assigned": "لا يوجد أعضاء هيئة تدريس مسندون",
+  "No educators assigned yet": "لم يُسند أعضاء هيئة تدريس بعد",
+  "No educators found": "لا يوجد أعضاء هيئة تدريس",
+  "No educators in this college yet": "لا يوجد أعضاء هيئة تدريس في هذه الكلية بعد",
+  "No subjects assigned for the selected term filter.":
+    "لا توجد مقررات مسندة للفصل الدراسي المحدد.",
+  "No subjects found": "لا توجد مقررات",
+  "Profile & assignments": "الملف والإسنادات",
+  "Search departments…": "ابحث في الأقسام…",
+  "Search doctors by name or username…":
+    "ابحث عن أعضاء هيئة التدريس بالاسم أو اسم المستخدم…",
+  "Search educators or subjects…":
+    "ابحث عن أعضاء هيئة التدريس أو المقررات…",
+  "Search students or subjects…": "ابحث عن الطلاب أو المقررات…",
+  "Search subjects by code or name…": "ابحث عن المقررات بالرمز أو الاسم…",
+  "Select an existing department to attach to this college.":
+    "اختر قسمًا موجودًا لإرفاقه بهذه الكلية.",
+  "Select term…": "اختر الفصل الدراسي…",
+  "Table": "جدول",
+  "This exam has started or has sittings. Deleting kicks out connected students and permanently discards their sittings and grades.":
+    "بدأ هذا الامتحان أو لديه محاولات. الحذف يُخرج الطلاب المتصلين ويتخلص نهائيًا من محاولاتهم ودرجاتهم.",
+  "This is permanent. Sittings, events and compensations for this assessment are deleted with it.":
+    "هذا إجراء نهائي. تُحذف معه محاولات هذا التقييم وأحداثه وتعويضاته.",
+  "Unassign {0}": "إلغاء إسناد {0}",
+  "You can open and take this exam in your normal browser. Follow your exam rules and instructions.":
+    "يمكنك فتح هذا الامتحان وأدائه في متصفحك العادي. اتبع قواعد الامتحان وتعليماته.",
+
+  // Values derived from API enums through label().
+  "Draft": "مسودة",
+  "Doctor Exam": "امتحان أستاذ المادة",
+  "Ta Quiz": "اختبار معيد",
+  "Delta": "فرق",
+  "Set": "تعيين",
+  "Csv": "CSV",
+  "Xlsx": "XLSX",
+  "Processing": "قيد المعالجة",
+  "Export Grades": "تصدير الدرجات",
+
+  // Preview/API fallback errors shown in the UI.
+  "Not found": "غير موجود",
+  "Start the exam first": "ابدأ الامتحان أولًا",
+  "Passwords do not match.": "كلمتا المرور غير متطابقتين.",
+  "Profile updated.": "تم تحديث الملف الشخصي.",
+  "Password reset.": "تمت إعادة تعيين كلمة المرور.",
 };

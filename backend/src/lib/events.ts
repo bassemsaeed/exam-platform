@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { prisma } from "./prisma.js";
 import { redis } from "./redis.js";
@@ -17,6 +18,7 @@ export interface ExamEventData {
 // Redis bridge only adds cross-instance delivery.
 const examEventBus = new EventEmitter();
 examEventBus.setMaxListeners(10_000);
+const instanceId = randomUUID();
 
 const subscribedChannels = new Set<string>();
 let subClient: { subscribe(c: string): Promise<unknown>; on(e: string, l: (...a: never[]) => void): unknown } | null = null;
@@ -33,7 +35,9 @@ async function ensureRedisSub(channel: string): Promise<void> {
       (subClient as unknown as { on(e: string, l: (ch: string, msg: string) => void): void }).on("message", (ch: string, msg: string) => {
         if (!ch.startsWith("exam:")) return;
         try {
-          const ev = JSON.parse(msg) as ExamEventData;
+          const parsed = JSON.parse(msg) as ExamEventData & { _origin?: string };
+          if (parsed._origin === instanceId) return;
+          const { _origin: _ignored, ...ev } = parsed;
           examEventBus.emit(ch, ev);
         } catch {
           // corrupt publish ignored
@@ -72,7 +76,7 @@ export async function emitExamEvent(
   examEventBus.emit(`exam:${examId}`, eventData);
   try {
     const r = await redis();
-    if (r) await r.publish(`exam:${examId}`, JSON.stringify(eventData));
+    if (r) await r.publish(`exam:${examId}`, JSON.stringify({ ...eventData, _origin: instanceId }));
   } catch {
     // local emit already delivered; redis is best-effort fan-out
   }
@@ -84,7 +88,7 @@ export function broadcastExamEvent(ev: ExamEventData): void {
   void (async () => {
     try {
       const r = await redis();
-      if (r) await r.publish(`exam:${ev.examId}`, JSON.stringify(ev));
+      if (r) await r.publish(`exam:${ev.examId}`, JSON.stringify({ ...ev, _origin: instanceId }));
     } catch {
       // ignore
     }

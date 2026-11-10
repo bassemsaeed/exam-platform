@@ -12,6 +12,14 @@ import {
   RefreshCw,
   Radio,
   Image as ImageIcon,
+  Users,
+  GraduationCap,
+  BookOpen,
+  LayoutGrid,
+  List,
+  CheckCircle2,
+  Mail,
+  Building2,
 } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { api, type SessionUser } from "../lib/api";
@@ -353,6 +361,7 @@ function CompTargetPicker({
   const t = useT();
   const roster = useResource<{
     totalEnrolled: number;
+    enrolledStudents?: { id: string; username: string; name: string }[];
     sections: {
       id: string;
       name: string;
@@ -369,14 +378,41 @@ function CompTargetPicker({
         <p className="subtle">{t("Loading enrolled students…")}</p>
       ) : (
         <MultiPicker
-          options={(roster.data?.sections ?? []).flatMap((sec) =>
-            sec.students.map((st) => ({
-              id: st.id,
-              name: st.name,
-              username: st.username,
-              sub: sec.name,
-            })),
-          )}
+          options={(() => {
+            const sectionMap = new Map<string, string[]>();
+            for (const sec of roster.data?.sections ?? []) {
+              for (const st of sec.students) {
+                const list = sectionMap.get(st.id) ?? [];
+                list.push(sec.name);
+                sectionMap.set(st.id, list);
+              }
+            }
+            const seen = new Map<
+              string,
+              { id: string; name: string; username: string; sub: string }
+            >();
+            for (const st of roster.data?.enrolledStudents ?? []) {
+              seen.set(st.id, {
+                id: st.id,
+                name: st.name,
+                username: st.username,
+                sub: sectionMap.get(st.id)?.join(", ") || t("Enrolled (no section)"),
+              });
+            }
+            for (const sec of roster.data?.sections ?? []) {
+              for (const st of sec.students) {
+                if (!seen.has(st.id)) {
+                  seen.set(st.id, {
+                    id: st.id,
+                    name: st.name,
+                    username: st.username,
+                    sub: sectionMap.get(st.id)?.join(", ") || sec.name,
+                  });
+                }
+              }
+            }
+            return [...seen.values()].sort((a, b) => a.name.localeCompare(b.name));
+          })()}
           value={value}
           onChange={onChange}
           placeholder="Search enrolled students…"
@@ -1500,6 +1536,41 @@ export function QuestionBank({ user }: { user: SessionUser }) {
     </>
   );
 }
+function studentInitials(name?: string | null) {
+  if (!name) return "ST";
+  const parts = name
+    .replace(/^(Dr\.?|Prof\.?|Eng\.?)\s+/i, "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (!parts.length) return "ST";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+}
+
+function downloadCsvFile(
+  filename: string,
+  headers: string[],
+  rows: (string | number | null | undefined)[][],
+) {
+  const esc = (v: string | number | null | undefined) => {
+    const s = v == null ? "" : String(v);
+    return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const csv = [headers.map(esc).join(","), ...rows.map((r) => r.map(esc).join(","))].join(
+    "\r\n",
+  );
+  const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 export function Results({ user }: { user: SessionUser }) {
   const t = useT();
   const location = useLocation();
@@ -1514,7 +1585,14 @@ export function Results({ user }: { user: SessionUser }) {
   const [selected, setSelected] = useState(
     new URLSearchParams(location.search).get("exam") ?? "",
   );
-  const selectedId = selected || exams.data?.rows[0]?.id || "";
+  const [search, setSearch] = useState("");
+  const [sectionFilter, setSectionFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [sortBy, setSortBy] = useState<"name" | "grade_desc" | "grade_asc" | "status">("name");
+
+  const examRows = rowsOf(exams.data);
+  const selectedId = selected || examRows[0]?.id || "";
+  const selectedExam = examRows.find((e) => e.id === selectedId);
   const mine = useResource<StudentResult[]>(
     user,
     "/api/v1/student/results",
@@ -1522,7 +1600,10 @@ export function Results({ user }: { user: SessionUser }) {
   );
   const grouped = useResource<{
     groups: {
+      sectionId?: string;
       sectionName: string;
+      taName?: string;
+      taUsername?: string | null;
       total: number;
       rows: Entity[];
     }[];
@@ -1531,6 +1612,124 @@ export function Results({ user }: { user: SessionUser }) {
     `/api/v1/exams/${selectedId}/results?limit=1000`,
     !student && !!selectedId,
   );
+
+  const rawGroups = grouped.data?.groups ?? [];
+  const allRows = rawGroups.flatMap((g) =>
+    g.rows.map((r) => ({ ...r, _sectionName: g.sectionName, _taName: g.taName })),
+  );
+  const totalStudents = allRows.length;
+  const submittedRows = allRows.filter((r) => {
+    const st = String((r.exam as Entity)?.status ?? "not_started");
+    return st === "submitted" || st === "auto_submitted";
+  });
+  const inProgressRows = allRows.filter(
+    (r) => String((r.exam as Entity)?.status ?? "not_started") === "in_progress",
+  );
+  const notStartedRows = allRows.filter(
+    (r) => String((r.exam as Entity)?.status ?? "not_started") === "not_started",
+  );
+
+  const gradedPercentages = submittedRows
+    .map((r) => {
+      const ex = r.exam as Entity | null;
+      const g = Number(ex?.totalGrade);
+      const m = Number(ex?.totalMarks);
+      return Number.isFinite(g) && Number.isFinite(m) && m > 0 ? (g / m) * 100 : null;
+    })
+    .filter((v): v is number => v !== null);
+  const avgPct = gradedPercentages.length
+    ? Math.round(gradedPercentages.reduce((a, b) => a + b, 0) / gradedPercentages.length)
+    : null;
+
+  const q = search.trim().toLowerCase();
+  const filteredGroups = rawGroups
+    .filter((g) => !sectionFilter || g.sectionName === sectionFilter)
+    .map((g) => {
+      const rows = g.rows
+        .filter((r) => {
+          const ex = (r.exam as Entity) ?? null;
+          const st = String(ex?.status ?? "not_started");
+          if (statusFilter === "submitted" && st !== "submitted" && st !== "auto_submitted") {
+            return false;
+          }
+          if (statusFilter === "in_progress" && st !== "in_progress") return false;
+          if (statusFilter === "not_started" && st !== "not_started") return false;
+          if (!q) return true;
+          const hay = `${r.name ?? ""} ${r.username ?? ""} ${r.email ?? ""} ${ex?.notesForDoctor ?? ""} ${g.sectionName}`.toLowerCase();
+          return hay.includes(q);
+        })
+        .slice()
+        .sort((a, b) => {
+          const exA = (a.exam as Entity) ?? null;
+          const exB = (b.exam as Entity) ?? null;
+          const gA = exA?.totalGrade != null ? Number(exA.totalGrade) : -1;
+          const gB = exB?.totalGrade != null ? Number(exB.totalGrade) : -1;
+          if (sortBy === "grade_desc") return gB - gA || String(a.name).localeCompare(String(b.name));
+          if (sortBy === "grade_asc") return gA - gB || String(a.name).localeCompare(String(b.name));
+          if (sortBy === "status") {
+            return (
+              String(exA?.status ?? "not_started").localeCompare(
+                String(exB?.status ?? "not_started"),
+              ) || String(a.name).localeCompare(String(b.name))
+            );
+          }
+          return String(a.name ?? "").localeCompare(String(b.name ?? ""));
+        });
+      return { ...g, filteredRows: rows };
+    })
+    .filter((g) => g.filteredRows.length > 0 || (!q && !statusFilter));
+
+  function exportFilteredCsv() {
+    const csvRows: (string | number | null | undefined)[][] = [];
+    for (const g of filteredGroups) {
+      for (const r of g.filteredRows) {
+        const ex = (r.exam as Entity) ?? null;
+        const grade = ex?.totalGrade != null ? Number(ex.totalGrade) : null;
+        const marks = ex?.totalMarks != null ? Number(ex.totalMarks) : null;
+        const pct =
+          grade != null && marks != null && marks > 0
+            ? `${Math.round((grade / marks) * 100)}%`
+            : "";
+        csvRows.push([
+          g.sectionName,
+          g.taName ?? "",
+          String(r.name ?? ""),
+          String(r.username ?? ""),
+          String(r.email ?? ""),
+          r.academicYear != null ? String(r.academicYear) : "",
+          grade != null ? grade : "",
+          marks != null ? marks : "",
+          pct,
+          String(ex?.status ?? "not_started"),
+          ex?.submittedAt ? `${date(String(ex.submittedAt))} ${time(String(ex.submittedAt))}` : "",
+          ex?.notesForDoctor ? String(ex.notesForDoctor) : "",
+        ]);
+      }
+    }
+    const slug = (selectedExam ? nameOf(selectedExam) : "exam-results")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "");
+    downloadCsvFile(
+      `${slug || "results"}-roster.csv`,
+      [
+        "Section",
+        "TA",
+        "Student Name",
+        "Username",
+        "Email",
+        "Academic Year",
+        "Grade",
+        "Total Marks",
+        "Percentage",
+        "Status",
+        "Submitted At",
+        "Student Note",
+      ],
+      csvRows,
+    );
+  }
+
   return (
     <>
       <PageTitle
@@ -1538,36 +1737,166 @@ export function Results({ user }: { user: SessionUser }) {
         description={
           student
             ? t("Grades from your completed assessments.")
-            : t("Assessment grades grouped by teaching section.")
+            : t("Student grades, attempt statuses, and section performance.")
+        }
+        action={
+          !student && selectedId ? (
+            <div className="roster-header-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={exportFilteredCsv}
+                disabled={!allRows.length}
+              >
+                <Download size={15} />
+                {t(" Quick CSV ")}
+              </button>
+              <Link className="button primary" to={"/exports?exam=" + selectedId}>
+                <ArrowUpRight size={15} />
+                {t(" Official export ")}
+              </Link>
+            </div>
+          ) : undefined
         }
       />
       {!student && (
-        <div className="toolbar">
-          <select
-            aria-label={t("Select assessment")}
-            value={selectedId}
-            onChange={(e) => setSelected(e.target.value)}
-          >
-            {rowsOf(exams.data).map((e) => (
-              <option value={e.id} key={e.id}>
-                {nameOf(e)} · {date(e.startTime)} · {t(label(e.type))}
-              </option>
-            ))}
-          </select>
-          <Link className="button secondary" to={"/exports?exam=" + selectedId}>
-            <Download size={15} />
-            {t(" Export results ")}
-          </Link>
-          {typeof exams.data?.total === "number" &&
-            exams.data.total > rowsOf(exams.data).length && (
-              <span className="subtle">
-                {t("Showing first {0} of {1}.", {
-                  "0": rowsOf(exams.data).length,
-                  "1": exams.data.total,
-                })}
-              </span>
-            )}
-        </div>
+        <>
+          <div className="toolbar">
+            <Combo
+              value={selectedId}
+              options={examRows.map((e) => ({
+                value: e.id,
+                label: `${nameOf(e)} · ${date(e.startTime)} · ${t(label(e.type))}`,
+              }))}
+              onChange={(v) => {
+                setSelected(v);
+                setSectionFilter("");
+              }}
+              placeholder={t("Select assessment…")}
+              ariaLabel={t("Select assessment")}
+            />
+            <button className="secondary" onClick={() => grouped.refetch()}>
+              <RefreshCw size={15} />
+              {t(" Refresh ")}
+            </button>
+            {typeof exams.data?.total === "number" &&
+              exams.data.total > examRows.length && (
+                <span className="subtle">
+                  {t("Showing first {0} of {1}.", {
+                    "0": examRows.length,
+                    "1": exams.data.total,
+                  })}
+                </span>
+              )}
+          </div>
+
+          {!grouped.isPending && allRows.length > 0 && (
+            <>
+              <div className="stat-grid four-col">
+                <div className="stat-card">
+                  <div>
+                    <span>{t("Total students")}</span>
+                    <Users size={18} />
+                  </div>
+                  <strong>{totalStudents}</strong>
+                  <small>
+                    {rawGroups.length} {t("sections in this assessment")}
+                  </small>
+                </div>
+                <div className="stat-card">
+                  <div>
+                    <span>{t("Submitted")}</span>
+                    <CheckCircle2 size={18} />
+                  </div>
+                  <strong>
+                    {submittedRows.length}
+                    <span className="stat-inline-pct">
+                      {totalStudents > 0
+                        ? ` (${Math.round((submittedRows.length / totalStudents) * 100)}%)`
+                        : ""}
+                    </span>
+                  </strong>
+                  <small>{t("Completed and graded attempts")}</small>
+                </div>
+                <div className="stat-card">
+                  <div>
+                    <span>{t("In progress / Not started")}</span>
+                    <Clock size={18} />
+                  </div>
+                  <strong>
+                    {inProgressRows.length} / {notStartedRows.length}
+                  </strong>
+                  <small>
+                    {inProgressRows.length} {t("taking now")} · {notStartedRows.length}{" "}
+                    {t("not started")}
+                  </small>
+                </div>
+                <div className="stat-card">
+                  <div>
+                    <span>{t("Average score")}</span>
+                    <GraduationCap size={18} />
+                  </div>
+                  <strong>{avgPct !== null ? `${avgPct}%` : "—"}</strong>
+                  <small>
+                    {gradedPercentages.length
+                      ? `${gradedPercentages.length} ${t("graded submissions")}`
+                      : t("No graded submissions yet")}
+                  </small>
+                </div>
+              </div>
+
+              <div className="roster-filter-bar panel">
+                <SearchBox
+                  value={search}
+                  onChange={setSearch}
+                  placeholder={t("Search student name, @username, email, or note…")}
+                />
+                {rawGroups.length > 1 && (
+                  <Combo
+                    value={sectionFilter}
+                    options={[
+                      { value: "", label: `${t("All sections")} (${rawGroups.length})` },
+                      ...rawGroups.map((g) => ({
+                        value: g.sectionName,
+                        label: `${g.sectionName} (${g.rows.length})`,
+                      })),
+                    ]}
+                    onChange={setSectionFilter}
+                    ariaLabel={t("Filter by section")}
+                  />
+                )}
+                <Combo
+                  value={sortBy}
+                  options={[
+                    { value: "name", label: t("Sort: Name (A–Z)") },
+                    { value: "grade_desc", label: t("Sort: Highest grade") },
+                    { value: "grade_asc", label: t("Sort: Lowest grade") },
+                    { value: "status", label: t("Sort: Attempt status") },
+                  ]}
+                  onChange={(v) => setSortBy((v || "name") as typeof sortBy)}
+                  ariaLabel={t("Sort students")}
+                />
+                <div className="segmented" role="group" aria-label={t("Filter attempt status")}>
+                  {[
+                    ["", `${t("All")} (${totalStudents})`],
+                    ["submitted", `${t("Submitted")} (${submittedRows.length})`],
+                    ["in_progress", `${t("Taking")} (${inProgressRows.length})`],
+                    ["not_started", `${t("Not started")} (${notStartedRows.length})`],
+                  ].map(([val, lbl]) => (
+                    <button
+                      type="button"
+                      key={val}
+                      className={statusFilter === val ? "active" : ""}
+                      onClick={() => setStatusFilter(val)}
+                    >
+                      {lbl}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          )}
+        </>
       )}
       <Feedback error={student ? mine.error : grouped.error || exams.error} />
       {student ? (
@@ -1618,62 +1947,180 @@ export function Results({ user }: { user: SessionUser }) {
         )
       ) : grouped.isPending && selectedId ? (
         <Loading />
-      ) : grouped.data?.groups.length ? (
-        grouped.data.groups.map((g, i) => (
-          <section className="panel" key={i}>
-            <div className="panel-heading">
-              <div>
-                <h2>{g.sectionName}</h2>
-                <p>
-                  {g.total}
-                  {t(" enrolled students")}
-                </p>
+      ) : filteredGroups.length ? (
+        filteredGroups.map((g, i) => {
+          const secSubmitted = g.rows.filter((r) => {
+            const st = String((r.exam as Entity)?.status ?? "not_started");
+            return st === "submitted" || st === "auto_submitted";
+          });
+          const secGrades = secSubmitted
+            .map((r) => {
+              const ex = r.exam as Entity | null;
+              const gr = Number(ex?.totalGrade);
+              const mk = Number(ex?.totalMarks);
+              return Number.isFinite(gr) && Number.isFinite(mk) && mk > 0 ? (gr / mk) * 100 : null;
+            })
+            .filter((v): v is number => v !== null);
+          const secAvg = secGrades.length
+            ? Math.round(secGrades.reduce((a, b) => a + b, 0) / secGrades.length)
+            : null;
+
+          return (
+            <section className="panel roster-section-panel" key={g.sectionId ?? i}>
+              <div className="panel-heading">
+                <div>
+                  <div className="section-title-row">
+                    <h2>{g.sectionName}</h2>
+                    {g.taName && g.taName !== "—" && (
+                      <span className="ta-pill">
+                        {t("TA")}: <b>{g.taName}</b>
+                        {g.taUsername ? ` (@${g.taUsername})` : ""}
+                      </span>
+                    )}
+                    <span className="code-pill">
+                      {g.filteredRows.length}
+                      {g.filteredRows.length !== g.total ? ` / ${g.total}` : ""}{" "}
+                      {t("students")}
+                    </span>
+                    <span className="dept-pill">
+                      {secSubmitted.length}/{g.rows.length} {t("submitted")}
+                    </span>
+                    {secAvg !== null && (
+                      <span
+                        className={`score-pct-pill ${
+                          secAvg >= 75 ? "good" : secAvg >= 50 ? "fair" : "low"
+                        }`}
+                      >
+                        {t("Avg")}: {secAvg}%
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
-            </div>
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th scope="col">{t("Student")}</th>
-                    <th scope="col">{t("Username")}</th>
-                    <th scope="col">{t("Grade")}</th>
-                    <th scope="col">{t("Status")}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {g.rows.map((r) => (
-                    <tr key={r.id}>
-                      <td>{r.name}</td>
-                      <td>{r.username}</td>
-                      <td>
-                        {String((r.exam as Entity)?.totalGrade ?? "-")}/
-                        {String((r.exam as Entity)?.totalMarks ?? "-")}
-                      </td>
-                      <td>
-                        <Badge
-                          value={(r.exam as Entity)?.status ?? "not_started"}
-                        />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            {g.total > g.rows.length && (
-              <p className="subtle">
-                {t(" Showing ")}
-                {g.rows.length}
-                {t(" of ")}
-                {g.total}
-                {t(". Export for the complete roster. ")}
-              </p>
-            )}
-          </section>
-        ))
+              {g.filteredRows.length ? (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th scope="col">{t("Student")}</th>
+                        <th scope="col">{t("Grade & Percentage")}</th>
+                        <th scope="col">{t("Submitted")}</th>
+                        <th scope="col">{t("Status")}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {g.filteredRows.map((r) => {
+                        const ex = (r.exam as Entity) ?? null;
+                        const statusVal = String(ex?.status ?? "not_started");
+                        const gradeNum =
+                          ex?.totalGrade != null ? Number(ex.totalGrade) : null;
+                        const marksNum =
+                          ex?.totalMarks != null ? Number(ex.totalMarks) : null;
+                        const pct =
+                          gradeNum != null && marksNum != null && marksNum > 0
+                            ? Math.round((gradeNum / marksNum) * 100)
+                            : null;
+                        const note = ex?.notesForDoctor ? String(ex.notesForDoctor) : "";
+                        return (
+                          <tr key={r.id}>
+                            <td>
+                              <div className="student-cell">
+                                <span className="student-avatar-sm">
+                                  {studentInitials(String(r.name ?? ""))}
+                                </span>
+                                <div>
+                                  <b>{r.name}</b>
+                                  <small className="student-meta-line">
+                                    <span>@{r.username}</span>
+                                    {r.email && <span>· {String(r.email)}</span>}
+                                    {r.academicYear != null && (
+                                      <span className="year-chip">
+                                        {t("Year")} {String(r.academicYear)}
+                                      </span>
+                                    )}
+                                  </small>
+                                  {note && (
+                                    <div className="student-doctor-note">
+                                      <b>{t("Note")}:</b> {note}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            </td>
+                            <td>
+                              {gradeNum != null && marksNum != null ? (
+                                <div className="grade-cell-wrap">
+                                  <div className="grade-score-line">
+                                    <strong>
+                                      {gradeNum} / {marksNum}
+                                    </strong>
+                                    {pct !== null && (
+                                      <span
+                                        className={`score-pct-pill ${
+                                          pct >= 75 ? "good" : pct >= 50 ? "fair" : "low"
+                                        }`}
+                                      >
+                                        {pct}%
+                                      </span>
+                                    )}
+                                  </div>
+                                  {pct !== null && (
+                                    <div className="mini-score-bar" aria-hidden="true">
+                                      <span
+                                        className={
+                                          pct >= 75 ? "good" : pct >= 50 ? "fair" : "low"
+                                        }
+                                        style={{ width: `${Math.min(100, Math.max(4, pct))}%` }}
+                                      />
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="subtle">—</span>
+                              )}
+                            </td>
+                            <td>
+                              {ex?.submittedAt ? (
+                                <div className="submitted-time-cell">
+                                  <span>{date(String(ex.submittedAt))}</span>
+                                  <small>{time(String(ex.submittedAt))}</small>
+                                </div>
+                              ) : (
+                                <span className="subtle">—</span>
+                              )}
+                            </td>
+                            <td>
+                              <Badge value={statusVal} />
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <Empty title={t("No students match your filter in this section")} />
+              )}
+              {g.total > g.rows.length && (
+                <p className="subtle">
+                  {t(" Showing ")}
+                  {g.rows.length}
+                  {t(" of ")}
+                  {g.total}
+                  {t(". Export for the complete roster. ")}
+                </p>
+              )}
+            </section>
+          );
+        })
       ) : (
         <Empty
-          title={t("No section results")}
-          text={t("Select an assessment to review its roster.")}
+          title={search || statusFilter ? t("No matching student results") : t("No section results")}
+          text={
+            search || statusFilter
+              ? t("Try clearing your search or status filter.")
+              : t("Select an assessment to review its roster.")
+          }
         />
       )}
     </>
@@ -2373,19 +2820,23 @@ export function Imports({ user }: { user: SessionUser }) {
   );
 }
 
+export interface RosterStudent {
+  id: string;
+  username: string;
+  name: string;
+  email: string;
+  isActive: boolean;
+  academicYear?: number | null;
+  college?: string | null;
+  collegeRef?: { id: string; code?: string; name: string } | null;
+  department?: { id: string; code?: string; name: string } | null;
+}
+
 export interface RosterSection {
   id: string;
   name: string;
   ta: { id: string; name: string; username: string };
-  students: {
-    id: string;
-    username: string;
-    name: string;
-    email: string;
-    isActive: boolean;
-    academicYear?: number | null;
-    collegeRef?: { id: string; name: string } | null;
-  }[];
+  students: RosterStudent[];
 }
 
 // Staff roster: my subjects' sections with TAs and students. Doctors see
@@ -2396,84 +2847,717 @@ export function Roster({ user }: { user: SessionUser }) {
     user,
     "/api/v1/exams/subjects?limit=100",
   );
+  const subjectList = rowsOf(subjects.data);
   const [subject, setSubject] = useState("");
-  const selected = subject || rowsOf(subjects.data)[0]?.id || "";
+  const [search, setSearch] = useState("");
+  const [sectionFilter, setSectionFilter] = useState("");
+  const [yearFilter, setYearFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [sortBy, setSortBy] = useState<"name" | "username" | "year" | "section">("name");
+  const [viewMode, setViewMode] = useState<"sections" | "cards" | "directory">("sections");
+
+  const selected = subject || subjectList[0]?.id || "";
+  const selectedSubj = subjectList.find((s) => s.id === selected);
   const roster = useResource<{
     totalEnrolled: number;
+    enrolledStudents?: RosterStudent[];
     sections: RosterSection[];
   }>(user, `/api/v1/exams/roster?subject_id=${selected}`, !!selected);
+
   const secs = roster.data?.sections ?? [];
+  const enrolledList = roster.data?.enrolledStudents ?? [];
+
+  // Map each student to all sections they belong to in this subject.
+  const studentSectionsMap = new Map<
+    string,
+    { sectionId: string; sectionName: string; taName: string; taUsername: string }[]
+  >();
+  for (const s of secs) {
+    for (const st of s.students) {
+      const arr = studentSectionsMap.get(st.id) ?? [];
+      arr.push({
+        sectionId: s.id,
+        sectionName: s.name,
+        taName: s.ta.name,
+        taUsername: s.ta.username,
+      });
+      studentSectionsMap.set(st.id, arr);
+    }
+  }
+
+  // Build deduplicated master student directory + identify students not in any section.
+  const allStudentsMap = new Map<string, RosterStudent>();
+  for (const st of enrolledList) allStudentsMap.set(st.id, st);
+  for (const s of secs) {
+    for (const st of s.students) {
+      if (!allStudentsMap.has(st.id)) allStudentsMap.set(st.id, st);
+    }
+  }
+  const allStudents = [...allStudentsMap.values()];
+  const inSectionCount = studentSectionsMap.size;
+  const unassignedStudents = allStudents.filter((st) => !studentSectionsMap.has(st.id));
+
+  // Build effective sections list (including an "Unassigned / Direct Enrollment" group when applicable).
+  const displaySections: (RosterSection & { isUnassigned?: boolean })[] = [
+    ...secs,
+    ...(unassignedStudents.length > 0
+      ? [
+          {
+            id: "__unassigned__",
+            name: t("Direct Enrollment (No Section)"),
+            ta: { id: "", name: "—", username: "" },
+            students: unassignedStudents,
+            isUnassigned: true,
+          },
+        ]
+      : []),
+  ];
+
+  const uniqueTas = new Set(secs.map((s) => s.ta.id).filter(Boolean));
+  const activeStudentsCount = allStudents.filter((st) => st.isActive).length;
+  const availableYears = [
+    ...new Set(
+      allStudents
+        .map((st) => st.academicYear)
+        .filter((y): y is number => typeof y === "number"),
+    ),
+  ].sort((a, b) => a - b);
+
+  const q = search.trim().toLowerCase();
+  const matchesStudent = (st: RosterStudent, secName?: string, taName?: string) => {
+    if (yearFilter && String(st.academicYear ?? "") !== yearFilter) return false;
+    if (statusFilter === "active" && !st.isActive) return false;
+    if (statusFilter === "inactive" && st.isActive) return false;
+    if (!q) return true;
+    const secLabels =
+      secName ??
+      (studentSectionsMap.get(st.id)?.map((x) => `${x.sectionName} ${x.taName}`).join(" ") || "");
+    const hay = `${st.name} ${st.username} ${st.email} ${st.collegeRef?.name ?? st.college ?? ""} ${st.department?.name ?? ""} ${secLabels} ${taName ?? ""}`.toLowerCase();
+    return hay.includes(q);
+  };
+
+  const sortStudents = (list: RosterStudent[]) =>
+    list.slice().sort((a, b) => {
+      if (sortBy === "username") return a.username.localeCompare(b.username);
+      if (sortBy === "year") {
+        return (a.academicYear ?? 99) - (b.academicYear ?? 99) || a.name.localeCompare(b.name);
+      }
+      if (sortBy === "section") {
+        const sA = studentSectionsMap.get(a.id)?.[0]?.sectionName ?? "zzz";
+        const sB = studentSectionsMap.get(b.id)?.[0]?.sectionName ?? "zzz";
+        return sA.localeCompare(sB) || a.name.localeCompare(b.name);
+      }
+      return a.name.localeCompare(b.name);
+    });
+
+  const filteredSections = displaySections
+    .filter((s) => !sectionFilter || s.id === sectionFilter)
+    .map((s) => ({
+      ...s,
+      filteredStudents: sortStudents(
+        s.students.filter((st) => matchesStudent(st, s.name, s.ta.name)),
+      ),
+    }))
+    .filter(
+      (s) => s.filteredStudents.length > 0 || (!q && !yearFilter && !statusFilter),
+    );
+
+  const filteredAllStudents = sortStudents(
+    allStudents.filter((st) => {
+      if (sectionFilter) {
+        if (sectionFilter === "__unassigned__") {
+          if (studentSectionsMap.has(st.id)) return false;
+        } else {
+          const secsForSt = studentSectionsMap.get(st.id) ?? [];
+          if (!secsForSt.some((x) => x.sectionId === sectionFilter)) return false;
+        }
+      }
+      return matchesStudent(st);
+    }),
+  );
+
+  function exportRosterCsv() {
+    const rows: (string | number | null | undefined)[][] = filteredAllStudents.map((st) => {
+      const secsForSt = studentSectionsMap.get(st.id) ?? [];
+      return [
+        st.name,
+        st.username,
+        st.email,
+        secsForSt.map((x) => x.sectionName).join("; ") || t("Direct Enrollment (No Section)"),
+        secsForSt.map((x) => x.taName).join("; ") || "—",
+        st.academicYear ?? "",
+        st.department?.name ?? "",
+        st.collegeRef?.name ?? st.college ?? "",
+        st.isActive ? "active" : "inactive",
+      ];
+    });
+    const code = (selectedSubj?.code || "subject").toLowerCase().replace(/[^a-z0-9]+/g, "-");
+    downloadCsvFile(
+      `${code}-student-roster.csv`,
+      [
+        "Student Name",
+        "Username",
+        "Email",
+        "Sections",
+        "Teaching Assistant",
+        "Academic Year",
+        "Department",
+        "College",
+        "Status",
+      ],
+      rows,
+    );
+  }
+
   return (
     <>
       <PageTitle
-        title={t("Roster")}
-        description={t("Sections, teaching assistants, and enrolled students in your subjects.")}
+        title={t("Student Roster")}
+        description={
+          user.role === "ta"
+            ? t("Your assigned teaching sections and enrolled students.")
+            : t("Sections, teaching assistants, and enrolled students across your subjects.")
+        }
+        action={
+          selected && allStudents.length > 0 ? (
+            <div className="roster-header-actions">
+              <button type="button" className="secondary" onClick={() => roster.refetch()}>
+                <RefreshCw size={15} />
+                {t(" Refresh ")}
+              </button>
+              <button type="button" className="primary" onClick={exportRosterCsv}>
+                <Download size={15} />
+                {t(" Export CSV ")} ({filteredAllStudents.length})
+              </button>
+            </div>
+          ) : undefined
+        }
       />
-      <div className="toolbar">
-        <Combo
-          value={selected}
-          options={rowsOf(subjects.data).map((s) => ({
-            value: s.id,
-            label: `${s.code} · ${s.name}`,
-          }))}
-          onChange={setSubject}
-          placeholder="Search subjects…"
-          ariaLabel={t("Subject")}
-        />
-        <span className="subtle">
-          {roster.data?.totalEnrolled ?? 0} {t(" enrolled · ")}
-          {secs.length} {t(" sections")}
-        </span>
+
+      {/* Subject Switcher Bar */}
+      <div className="roster-subject-bar panel">
+        <div className="roster-subject-picker">
+          <Combo
+            value={selected}
+            options={subjectList.map((s) => ({
+              value: s.id,
+              label: `${s.code} · ${s.name}`,
+            }))}
+            onChange={(v) => {
+              setSubject(v);
+              setSectionFilter("");
+            }}
+            placeholder={t("Search subjects…")}
+            ariaLabel={t("Subject")}
+          />
+          {selectedSubj && (
+            <div className="card-badge-group">
+              <span className="code-pill">{selectedSubj.code}</span>
+              {(selectedSubj as Entity).department && (
+                <span className="dept-pill">
+                  {String(((selectedSubj as Entity).department as Entity)?.name ?? "")}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+        {subjectList.length > 1 && subjectList.length <= 8 && (
+          <div className="subject-quick-pills" role="tablist" aria-label={t("Quick subject switch")}>
+            {subjectList.map((s) => (
+              <button
+                type="button"
+                key={s.id}
+                className={`subject-quick-pill ${s.id === selected ? "active" : ""}`}
+                onClick={() => {
+                  setSubject(s.id);
+                  setSectionFilter("");
+                }}
+              >
+                <b>{s.code}</b>
+                <span>{s.name}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
+
       <Feedback error={subjects.error || roster.error} />
+
       {roster.isPending && selected ? (
         <Loading />
-      ) : secs.length ? (
-        secs.map((s) => (
-          <section className="panel" key={s.id}>
-            <div className="panel-heading">
+      ) : allStudents.length > 0 || secs.length > 0 ? (
+        <>
+          {/* Summary Metrics */}
+          <div className="stat-grid four-col">
+            <div className="stat-card">
               <div>
-                <h2>{s.name}</h2>
-                <p>
-                  {t("TA")}: {s.ta.name} ({s.ta.username}) · {s.students.length}{" "}
-                  {t("students")}
-                </p>
+                <span>{t("Total students")}</span>
+                <Users size={18} />
               </div>
+              <strong>{roster.data?.totalEnrolled || allStudents.length}</strong>
+              <small>
+                {user.role === "ta"
+                  ? t("Students across your sections")
+                  : t("Enrolled in this subject")}
+              </small>
             </div>
-            {s.students.length ? (
-              <div className="table-wrap">
+            <div className="stat-card">
+              <div>
+                <span>{t("Teaching sections")}</span>
+                <BookOpen size={18} />
+              </div>
+              <strong>{secs.length}</strong>
+              <small>
+                {uniqueTas.size} {t("teaching assistants assigned")}
+              </small>
+            </div>
+            <div className="stat-card">
+              <div>
+                <span>{t("Section placement")}</span>
+                <Building2 size={18} />
+              </div>
+              <strong>
+                {inSectionCount}
+                {unassignedStudents.length > 0 ? ` / ${allStudents.length}` : ""}
+              </strong>
+              <small>
+                {unassignedStudents.length > 0
+                  ? `${unassignedStudents.length} ${t("in direct enrollment (no section)")}`
+                  : t("All students placed in sections")}
+              </small>
+            </div>
+            <div className="stat-card">
+              <div>
+                <span>{t("Active accounts")}</span>
+                <GraduationCap size={18} />
+              </div>
+              <strong>
+                {activeStudentsCount}
+                <span className="stat-inline-pct">
+                  {allStudents.length > 0
+                    ? ` (${Math.round((activeStudentsCount / allStudents.length) * 100)}%)`
+                    : ""}
+                </span>
+              </strong>
+              <small>
+                {availableYears.length
+                  ? `${t("Academic years")}: ${availableYears.map((y) => `Y${y}`).join(", ")}`
+                  : t("Verified student accounts")}
+              </small>
+            </div>
+          </div>
+
+          {/* Interactive Section Overview Cards */}
+          {displaySections.length > 1 && (
+            <div className="roster-section-strip">
+              <button
+                type="button"
+                className={`roster-sec-card ${sectionFilter === "" ? "active" : ""}`}
+                onClick={() => setSectionFilter("")}
+              >
+                <div className="roster-sec-card-top">
+                  <b>{t("All Sections")}</b>
+                  <span className="code-pill">{allStudents.length}</span>
+                </div>
+                <small>
+                  {secs.length} {t("sections")} · {uniqueTas.size} {t("TAs")}
+                </small>
+              </button>
+              {displaySections.map((s) => (
+                <button
+                  type="button"
+                  key={s.id}
+                  className={`roster-sec-card ${sectionFilter === s.id ? "active" : ""} ${
+                    s.isUnassigned ? "unassigned" : ""
+                  }`}
+                  onClick={() =>
+                    setSectionFilter((cur) => (cur === s.id ? "" : s.id))
+                  }
+                >
+                  <div className="roster-sec-card-top">
+                    <b>{s.name}</b>
+                    <span className={s.isUnassigned ? "college-pill" : "code-pill"}>
+                      {s.students.length}
+                    </span>
+                  </div>
+                  <small>
+                    {s.isUnassigned
+                      ? t("Not assigned to a TA section")
+                      : `${t("TA")}: ${s.ta.name} (@${s.ta.username})`}
+                  </small>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Search, Filter, Sort & View Mode Toolbar */}
+          <div className="roster-filter-bar panel">
+            <SearchBox
+              value={search}
+              onChange={setSearch}
+              placeholder={t("Search by student name, @username, email, college, or TA…")}
+            />
+            {displaySections.length > 1 && (
+              <Combo
+                value={sectionFilter}
+                options={[
+                  { value: "", label: `${t("All sections")} (${allStudents.length})` },
+                  ...displaySections.map((s) => ({
+                    value: s.id,
+                    label: `${s.name} (${s.students.length})`,
+                  })),
+                ]}
+                onChange={setSectionFilter}
+                ariaLabel={t("Filter by section")}
+              />
+            )}
+            {availableYears.length > 1 && (
+              <Combo
+                value={yearFilter}
+                options={[
+                  { value: "", label: t("All academic years") },
+                  ...availableYears.map((y) => ({
+                    value: String(y),
+                    label: `${t("Year")} ${y}`,
+                  })),
+                ]}
+                onChange={setYearFilter}
+                ariaLabel={t("Filter by academic year")}
+              />
+            )}
+            <Combo
+              value={statusFilter}
+              options={[
+                { value: "", label: t("All statuses") },
+                { value: "active", label: t("Active only") },
+                { value: "inactive", label: t("Inactive only") },
+              ]}
+              onChange={setStatusFilter}
+              ariaLabel={t("Filter by account status")}
+            />
+            <Combo
+              value={sortBy}
+              options={[
+                { value: "name", label: t("Sort: Name (A–Z)") },
+                { value: "username", label: t("Sort: Username") },
+                { value: "year", label: t("Sort: Academic year") },
+                { value: "section", label: t("Sort: Section") },
+              ]}
+              onChange={(v) => setSortBy((v || "name") as typeof sortBy)}
+              ariaLabel={t("Sort students")}
+            />
+            <div className="segmented" role="group" aria-label={t("View mode")}>
+              <button
+                type="button"
+                className={viewMode === "sections" ? "active" : ""}
+                onClick={() => setViewMode("sections")}
+              >
+                <List size={14} />
+                {t("Sections")}
+              </button>
+              <button
+                type="button"
+                className={viewMode === "cards" ? "active" : ""}
+                onClick={() => setViewMode("cards")}
+              >
+                <LayoutGrid size={14} />
+                {t("Cards")}
+              </button>
+              <button
+                type="button"
+                className={viewMode === "directory" ? "active" : ""}
+                onClick={() => setViewMode("directory")}
+              >
+                <Users size={14} />
+                {t("Directory")}
+              </button>
+            </div>
+          </div>
+
+          {/* Active Filter Summary Chip Bar */}
+          {(search || sectionFilter || yearFilter || statusFilter) && (
+            <div className="active-filters-bar">
+              <span className="subtle">
+                {t("Showing")} <b>{filteredAllStudents.length}</b> {t("of")}{" "}
+                {allStudents.length} {t("students")}
+              </span>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => {
+                  setSearch("");
+                  setSectionFilter("");
+                  setYearFilter("");
+                  setStatusFilter("");
+                }}
+              >
+                {t("Clear all filters")}
+              </button>
+            </div>
+          )}
+
+          {/* VIEW 1: Grouped by Section */}
+          {viewMode === "sections" &&
+            (filteredSections.length ? (
+              filteredSections.map((s) => (
+                <section className="panel roster-section-panel" key={s.id}>
+                  <div className="panel-heading">
+                    <div>
+                      <div className="section-title-row">
+                        <h2>{s.name}</h2>
+                        {!s.isUnassigned ? (
+                          <span className="ta-pill">
+                            {t("TA")}: <b>{s.ta.name}</b> (@{s.ta.username})
+                          </span>
+                        ) : (
+                          <span className="college-pill">
+                            {t("Enrolled in subject · No section assigned")}
+                          </span>
+                        )}
+                        <span className="code-pill">
+                          {s.filteredStudents.length}
+                          {s.filteredStudents.length !== s.students.length
+                            ? ` / ${s.students.length}`
+                            : ""}{" "}
+                          {t("students")}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  {s.filteredStudents.length ? (
+                    <div className="table-wrap">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th scope="col">{t("Student")}</th>
+                            <th scope="col">{t("Email")}</th>
+                            <th scope="col">{t("Academic Year")}</th>
+                            <th scope="col">{t("College & Department")}</th>
+                            <th scope="col">{t("Status")}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {s.filteredStudents.map((st) => (
+                            <tr key={st.id}>
+                              <td>
+                                <div className="student-cell">
+                                  <span className="student-avatar-sm">
+                                    {studentInitials(st.name)}
+                                  </span>
+                                  <div>
+                                    <b>{st.name}</b>
+                                    <small className="student-meta-line">
+                                      @{st.username}
+                                    </small>
+                                  </div>
+                                </div>
+                              </td>
+                              <td>
+                                <span className="student-email-cell">
+                                  <Mail size={13} />
+                                  {st.email}
+                                </span>
+                              </td>
+                              <td>
+                                {st.academicYear != null ? (
+                                  <span className="year-chip">
+                                    {t("Year")} {st.academicYear}
+                                  </span>
+                                ) : (
+                                  <span className="subtle">—</span>
+                                )}
+                              </td>
+                              <td>
+                                <div className="card-badge-group">
+                                  {(st.collegeRef?.name || st.college) && (
+                                    <span className="college-pill">
+                                      {st.collegeRef?.code || st.collegeRef?.name || st.college}
+                                    </span>
+                                  )}
+                                  {st.department?.name && (
+                                    <span className="dept-pill">{st.department.name}</span>
+                                  )}
+                                  {!st.collegeRef?.name && !st.college && !st.department?.name && (
+                                    <span className="subtle">—</span>
+                                  )}
+                                </div>
+                              </td>
+                              <td>
+                                <Badge value={st.isActive ? "active" : "inactive"} />
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  ) : (
+                    <Empty title={t("No students in this section")} />
+                  )}
+                </section>
+              ))
+            ) : (
+              <Empty
+                title={t("No students match your filters")}
+                text={t("Try clearing your search query or section filters.")}
+              />
+            ))}
+
+          {/* VIEW 2: Student Cards Grid */}
+          {viewMode === "cards" &&
+            (filteredAllStudents.length ? (
+              <div className="student-roster-grid">
+                {filteredAllStudents.map((st) => {
+                  const secsForSt = studentSectionsMap.get(st.id) ?? [];
+                  return (
+                    <article className="student-roster-card" key={st.id}>
+                      <div className="student-roster-card-head">
+                        <span className="student-avatar-lg">
+                          {studentInitials(st.name)}
+                        </span>
+                        <div className="student-roster-card-title">
+                          <h3>{st.name}</h3>
+                          <small>@{st.username}</small>
+                        </div>
+                        <Badge value={st.isActive ? "active" : "inactive"} />
+                      </div>
+                      <div className="student-roster-card-meta">
+                        <div className="student-meta-item">
+                          <Mail size={13} />
+                          <span>{st.email}</span>
+                        </div>
+                        <div className="card-badge-group">
+                          {st.academicYear != null && (
+                            <span className="year-chip">
+                              {t("Year")} {st.academicYear}
+                            </span>
+                          )}
+                          {(st.collegeRef?.name || st.college) && (
+                            <span className="college-pill">
+                              {st.collegeRef?.name || st.college}
+                            </span>
+                          )}
+                          {st.department?.name && (
+                            <span className="dept-pill">{st.department.name}</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="student-roster-card-footer">
+                        {secsForSt.length ? (
+                          secsForSt.map((sec) => (
+                            <div className="student-sec-tag" key={sec.sectionId}>
+                              <b>{sec.sectionName}</b>
+                              <span>
+                                {t("TA")}: {sec.taName}
+                              </span>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="student-sec-tag unassigned">
+                            <b>{t("Direct Enrollment")}</b>
+                            <span>{t("No TA section assigned")}</span>
+                          </div>
+                        )}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <Empty
+                title={t("No students match your filters")}
+                text={t("Try clearing your search query or section filters.")}
+              />
+            ))}
+
+          {/* VIEW 3: Unified Directory Table */}
+          {viewMode === "directory" &&
+            (filteredAllStudents.length ? (
+              <section className="panel table-wrap">
                 <table>
                   <thead>
                     <tr>
-                      <th scope="col">{t("Name")}</th>
-                      <th scope="col">{t("Username")}</th>
+                      <th scope="col">{t("Student")}</th>
+                      <th scope="col">{t("Section & TA")}</th>
+                      <th scope="col">{t("Academic Year")}</th>
+                      <th scope="col">{t("College & Department")}</th>
                       <th scope="col">{t("Email")}</th>
-                      <th scope="col">{t("Year")}</th>
-                      <th scope="col">{t("College")}</th>
                       <th scope="col">{t("Status")}</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {s.students.map((st) => (
-                      <tr key={st.id}>
-                        <td><b>{st.name}</b></td>
-                        <td>{st.username}</td>
-                        <td>{st.email}</td>
-                        <td>{st.academicYear ?? "—"}</td>
-                        <td>{st.collegeRef?.name ?? "—"}</td>
-                        <td>
-                          <Badge value={st.isActive ? "active" : "inactive"} />
-                        </td>
-                      </tr>
-                    ))}
+                    {filteredAllStudents.map((st) => {
+                      const secsForSt = studentSectionsMap.get(st.id) ?? [];
+                      return (
+                        <tr key={st.id}>
+                          <td>
+                            <div className="student-cell">
+                              <span className="student-avatar-sm">
+                                {studentInitials(st.name)}
+                              </span>
+                              <div>
+                                <b>{st.name}</b>
+                                <small className="student-meta-line">
+                                  @{st.username}
+                                </small>
+                              </div>
+                            </div>
+                          </td>
+                          <td>
+                            {secsForSt.length ? (
+                              <div className="card-badge-group">
+                                {secsForSt.map((sec) => (
+                                  <span className="ta-pill" key={sec.sectionId}>
+                                    <b>{sec.sectionName}</b> · {sec.taName}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="college-pill">
+                                {t("Direct Enrollment")}
+                              </span>
+                            )}
+                          </td>
+                          <td>
+                            {st.academicYear != null ? (
+                              <span className="year-chip">
+                                {t("Year")} {st.academicYear}
+                              </span>
+                            ) : (
+                              <span className="subtle">—</span>
+                            )}
+                          </td>
+                          <td>
+                            <div className="card-badge-group">
+                              {(st.collegeRef?.name || st.college) && (
+                                <span className="college-pill">
+                                  {st.collegeRef?.code || st.collegeRef?.name || st.college}
+                                </span>
+                              )}
+                              {st.department?.name && (
+                                <span className="dept-pill">{st.department.name}</span>
+                              )}
+                              {!st.collegeRef?.name && !st.college && !st.department?.name && (
+                                <span className="subtle">—</span>
+                              )}
+                            </div>
+                          </td>
+                          <td>{st.email}</td>
+                          <td>
+                            <Badge value={st.isActive ? "active" : "inactive"} />
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
-              </div>
+              </section>
             ) : (
-              <Empty title={t("No students in this section")} />
-            )}
-          </section>
-        ))
+              <Empty
+                title={t("No students match your filters")}
+                text={t("Try clearing your search query or section filters.")}
+              />
+            ))}
+        </>
       ) : (
         !roster.error && (
           <Empty
@@ -2485,3 +3569,4 @@ export function Roster({ user }: { user: SessionUser }) {
     </>
   );
 }
+

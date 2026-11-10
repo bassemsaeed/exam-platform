@@ -107,6 +107,17 @@ app.all(
       ) {
         return res.status(403).json({ error: "password managed by admin" });
       }
+      const uid = session!.user.id;
+      const sid = session?.session?.id;
+      res.on("finish", () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          void prisma.session
+            .deleteMany({
+              where: { userId: uid, ...(sid ? { id: { not: sid } } : {}) },
+            })
+            .catch(() => {});
+        }
+      });
     }
     next();
   },
@@ -170,11 +181,18 @@ app.use("/api/v1/student", student);
 // Auth-gated (V-04): question diagrams must never be anonymously fetchable by
 // guessing /uploads/questions/<code>/<hash>-*.png. Any logged-in user may
 // load them (students need them mid-exam); outsiders get 401 before static.
-// nosniff: stored files must never be MIME-sniffed into scripts.
+// Gradebook exports under /uploads/exports/* are strictly blocked here and
+// served only through the ownership-checked GET /api/v1/exports/:id/download.
 if (isLocalStorage()) {
   app.use(
     "/uploads",
     requireAuth,
+    (req, res, next) => {
+      if (/^\/exports(?:\/|$)/i.test(req.path)) {
+        return res.status(403).json({ error: "forbidden" });
+      }
+      next();
+    },
     express.static(localUploadsDir(), {
       maxAge: "1h",
       setHeaders: (res) => res.setHeader("X-Content-Type-Options", "nosniff"),

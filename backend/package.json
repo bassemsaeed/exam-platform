@@ -14,7 +14,7 @@
     "seed:test": "tsx --env-file=.env src/seedTestData.ts",
     "seed:exams": "tsx --env-file=.env src/seedExams.ts",
     "auth:generate": "pnpm dlx auth@latest generate --output prisma/schema.better-auth.prisma",
-    "test:exam-experience": "node --env-file=.env scripts/verify-exam-experience.mjs"
+    "test:exam-experience": "node --env-file=.env ../scripts/verify-exam-experience.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1144.0",

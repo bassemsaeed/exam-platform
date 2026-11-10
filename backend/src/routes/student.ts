@@ -194,6 +194,7 @@ interface CompRow {
   adjustmentType: string;
   adjustmentValue: unknown;
   studentIds: string[];
+  reason: string;
 }
 
 async function compensationMap(
@@ -202,6 +203,10 @@ async function compensationMap(
 ) {
   const rows = await tx.examCompensation.findMany({ where: { examId } });
   return new Map(rows.map((c) => [c.questionId, c]));
+}
+
+function compensationApplies(studentId: string, comp?: CompRow): boolean {
+  return Boolean(comp && (comp.studentIds.length === 0 || comp.studentIds.includes(studentId)));
 }
 
 function gradeWithCompensation(
@@ -214,7 +219,7 @@ function gradeWithCompensation(
   const full = Number(grade);
   let v = selectedAnswer !== null && selectedAnswer === correctAnswer ? full : 0;
   // Wrong scope = no compensation for this student.
-  if (comp && (comp.studentIds.length === 0 || comp.studentIds.includes(studentId))) {
+  if (compensationApplies(studentId, comp) && comp) {
     if (comp.adjustmentType === "full_credit") v = full;
     else if (comp.adjustmentType === "set") v = Math.min(Math.max(Number(comp.adjustmentValue ?? 0), 0), full);
     else v = Math.max(0, Math.min(full, v + Number(comp.adjustmentValue ?? 0)));
@@ -225,7 +230,7 @@ function gradeWithCompensation(
 // Helper: auto-submit exam on wall-clock expiry. Accepts null answers and scores them 0.
 // Runs once per instance (callers check status first); emits the submitted event
 // + audit so expiry is as observable as a manual submit.
-// Exported for the background sweeper (no import cycle: worker â†’ route only).
+// Exported for the background sweeper (no import cycle: worker → route only).
 export async function autoSubmitExam(studentExamId: string) {
   const computed = await prisma.$transaction(async (tx) => {
     const se = await tx.studentExam.findUnique({
@@ -238,17 +243,24 @@ export async function autoSubmitExam(studentExamId: string) {
     // Compute all awards first (no I/O), then write concurrently: the old
     // sequential per-question loop issued 50 serial UPDATEs per dropout (5k
     // statements per sweeper tick). Promise.all keeps one round-trip set.
-    const awards = se.questions.map((q) => ({
-      id: q.id,
-      awarded: gradeWithCompensation(q.selectedAnswer, q.question.correctAnswer, q.question.grade, se.studentId, comps.get(q.questionId)),
-    }));
+    const awards = se.questions.map((q) => {
+      const comp = comps.get(q.questionId);
+      return {
+        id: q.id,
+        awarded: gradeWithCompensation(q.selectedAnswer, q.question.correctAnswer, q.question.grade, se.studentId, comp),
+        reason: compensationApplies(se.studentId, comp) ? (comp?.reason ?? null) : undefined,
+      };
+    });
     let total = new Prisma.Decimal(0);
     for (const aw of awards) total = total.plus(aw.awarded);
     await Promise.all(
       awards.map((aw) =>
         tx.studentExamQuestion.update({
           where: { id: aw.id },
-          data: { gradeAwarded: aw.awarded },
+          data: {
+            gradeAwarded: aw.awarded,
+            ...(aw.reason !== undefined ? { creditAdjustmentReason: aw.reason } : {}),
+          },
         }),
       ),
     );
@@ -364,7 +376,7 @@ student.get(
       resultsReleased: exam.resultsReleased,
       // SEB posture, computed live: whether this exam demands the locked
       // browser, and whether THIS request carries a valid header for it.
-      sebRequired: exam.purpose === "midterm" || exam.sebRequired,
+      sebRequired: Boolean(exam.sebRequired),
       startTime: exam.startTime,
       endTime: exam.endTime,
       requiresCode: !!exam.accessCodeHash,
@@ -372,10 +384,10 @@ student.get(
       submitted,
       ready: !submitted && (resumable || available),
       serverTime: now,
-      // Honest SEB posture: required = policy (midterm or flagged quiz);
+      // Honest SEB posture: required = policy (flagged midterm or quiz);
       // verified = this request actually carries a valid SEB header.
       // The checklist must show THESE, never infer SEB from "data loaded".
-      sebVerified: exam.purpose === "midterm" || exam.sebRequired ? await hasValidSebHeader(req) : true,
+      sebVerified: exam.sebRequired ? await hasValidSebHeader(req) : true,
       attemptStatus: existing?.status ?? null,
       examStatus: exam.status,
     });
@@ -952,14 +964,26 @@ student.post(
       const stillUnanswered = fresh.questions.filter((q) => q.selectedAnswer === null || q.selectedAnswer === "");
       if (stillUnanswered.length > 0) return { outcome: "unanswered" as const, count: stillUnanswered.length };
       const comps = await compensationMap(tx as never, se.examId);
-      const awards = fresh.questions.map((q) => ({
-        id: q.id,
-        awarded: gradeWithCompensation(q.selectedAnswer, q.question.correctAnswer, q.question.grade, fresh.studentId, comps.get(q.questionId)),
-      }));
+      const awards = fresh.questions.map((q) => {
+        const comp = comps.get(q.questionId);
+        return {
+          id: q.id,
+          awarded: gradeWithCompensation(q.selectedAnswer, q.question.correctAnswer, q.question.grade, fresh.studentId, comp),
+          reason: compensationApplies(fresh.studentId, comp) ? (comp?.reason ?? null) : undefined,
+        };
+      });
       let total = new Prisma.Decimal(0);
       for (const aw of awards) total = total.plus(aw.awarded);
       await Promise.all(
-        awards.map((aw) => tx.studentExamQuestion.update({ where: { id: aw.id }, data: { gradeAwarded: aw.awarded } })),
+        awards.map((aw) =>
+          tx.studentExamQuestion.update({
+            where: { id: aw.id },
+            data: {
+              gradeAwarded: aw.awarded,
+              ...(aw.reason !== undefined ? { creditAdjustmentReason: aw.reason } : {}),
+            },
+          }),
+        ),
       );
 
       const closed = await tx.studentExam.updateMany({
