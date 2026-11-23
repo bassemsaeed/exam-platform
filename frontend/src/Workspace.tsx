@@ -26,6 +26,7 @@ import {
   FileDown,
   ShieldCheck,
   History,
+  Bell,
   LogOut,
   Settings,
   Menu,
@@ -117,46 +118,61 @@ export default function Workspace({
 
   const compact = useUIStore((s) => s.compact);
   const setCompact = useUIStore((s) => s.setCompact);
-  const nav = [
-    { to: "/", title: "Overview", icon: LayoutDashboard },
-    { to: "/notifications", title: "Notifications", icon: History },
+  const navGroups: { label: string; items: { to: string; title: string; icon: typeof LayoutDashboard }[] }[] = [
     {
-      to: "/exams",
-      title: user.role === "student" ? "My exams" : "Exams & quizzes",
-      icon: ClipboardList,
+      label: "Workspace",
+      items: [
+        { to: "/", title: "Overview", icon: LayoutDashboard },
+        { to: "/notifications", title: "Notifications", icon: Bell },
+        {
+          to: "/exams",
+          title: user.role === "student" ? "My exams" : "Exams & quizzes",
+          icon: ClipboardList,
+        },
+        { to: "/results", title: "Results", icon: GraduationCap },
+      ],
     },
-    { to: "/results", title: "Results", icon: GraduationCap },
     ...(user.role === "student"
       ? []
       : [
-          { to: "/questions", title: "Question bank", icon: BookOpen },
-          { to: "/roster", title: "Roster", icon: Users },
-          { to: "/exports", title: "Exports", icon: FileDown },
+          {
+            label: "Teaching",
+            items: [
+              { to: "/questions", title: "Question bank", icon: BookOpen },
+              { to: "/roster", title: "Roster", icon: Users },
+              { to: "/exports", title: "Exports", icon: FileDown },
+            ],
+          },
         ]),
     ...(user.role === "admin"
       ? [
-          { to: "/admin/users", title: "Users", icon: Users },
-          { to: "/support", title: "Account requests", icon: ShieldCheck },
-          { to: "/admin/subjects", title: "Subjects", icon: BookOpen },
-          { to: "/admin/sections", title: "Sections", icon: Layers },
-          { to: "/colleges", title: "Colleges", icon: Building2 },
-          { to: "/admin/departments", title: "Departments", icon: Building2 },
-          { to: "/admin/terms", title: "Academic terms", icon: CalendarDays },
           {
-            to: "/admin/assignments",
-            title: "Assignments",
-            icon: GraduationCap,
+            label: "Academic directory",
+            items: [
+              { to: "/admin/users", title: "Users", icon: Users },
+              { to: "/colleges", title: "Colleges", icon: Building2 },
+              { to: "/admin/departments", title: "Departments", icon: Building2 },
+              { to: "/admin/subjects", title: "Subjects", icon: BookOpen },
+              { to: "/admin/sections", title: "Sections", icon: Layers },
+              { to: "/admin/terms", title: "Academic terms", icon: CalendarDays },
+              { to: "/admin/assignments", title: "Assignments", icon: GraduationCap },
+            ],
           },
-          { to: "/imports", title: "Imports", icon: FileDown },
           {
-            to: "/admin/seb-keys",
-            title: "Browser security",
-            icon: ShieldCheck,
+            label: "System & security",
+            items: [
+              { to: "/support", title: "Account requests", icon: ShieldCheck },
+              { to: "/imports", title: "Imports", icon: FileDown },
+              { to: "/admin/seb-keys", title: "Browser security", icon: ShieldCheck },
+              { to: "/admin/audit", title: "Audit log", icon: History },
+            ],
           },
-          { to: "/admin/audit", title: "Audit log", icon: History },
         ]
       : []),
-    { to: "/profile", title: "My account", icon: Settings },
+    {
+      label: "Account",
+      items: [{ to: "/profile", title: "My account", icon: Settings }],
+    },
   ];
   function changeRole(role: Role) {
     if (!previewMode) return;
@@ -194,16 +210,23 @@ export default function Workspace({
         </Link>
         <div className="sidebar-section-title">{t("EXAMINATION PORTAL")}</div>
         <nav aria-label={t("Main navigation")}>
-          {nav.map(({ to, title, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={to === "/"}
-              onClick={() => setOpen(false)}
-            >
-              <Icon size={17} />
-              <span>{t(title)}</span>
-            </NavLink>
+          {navGroups.map((group, gi) => (
+            <div className="nav-group" key={group.label}>
+              {(gi > 0 || navGroups.length > 2) && (
+                <div className="nav-group-label">{t(group.label)}</div>
+              )}
+              {group.items.map(({ to, title, icon: Icon }) => (
+                <NavLink
+                  key={to}
+                  to={to}
+                  end={to === "/"}
+                  onClick={() => setOpen(false)}
+                >
+                  <Icon size={16} />
+                  <span>{t(title)}</span>
+                </NavLink>
+              ))}
+            </div>
           ))}
         </nav>
         <div className="sidebar-bottom">

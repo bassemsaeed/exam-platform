@@ -28,17 +28,20 @@ const DIFFS = ["easy", "medium", "hard"] as const;
 const questionBody = z.object({
   subjectId: z.string(),
   questionType: z.enum(TYPES),
-  text: z.string().min(1),
-  options: z.array(z.string().min(1)).min(2).max(6),
-  correctAnswer: z.string().min(1),
+  text: z.string().trim().min(1),
+  options: z.array(z.string().trim().min(1)).min(2).max(6),
+  correctAnswer: z.string().trim().min(1),
   grade: z.number().positive(),
   difficulty: z.enum(DIFFS),
 });
 
 function checkOptions(t: (typeof TYPES)[number], options: string[], correct: string): string | null {
-  if (!options.includes(correct)) return "correctAnswer must be one of options";
+  const trimmed = options.map((o) => o.trim());
+  if (trimmed.some((o) => !o)) return "options cannot be empty";
+  if (new Set(trimmed).size !== trimmed.length) return "options must be unique";
+  if (!trimmed.includes(correct.trim())) return "correctAnswer must be one of options";
   if (t === "true_false") {
-    const low = options.map((o) => o.toLowerCase());
+    const low = trimmed.map((o) => o.toLowerCase());
     if (low.length !== 2 || !low.includes("true") || !low.includes("false")) {
       return "true_false requires options [True, False]";
     }
@@ -107,7 +110,12 @@ questionBank.get("/counts", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const q = z.object({ subject_id: z.string(), mine: z.enum(["true", "false"]).optional().transform((v) => (v === undefined ? undefined : v === "true")) }).parse(req.query);
   if (!(await mayBank(a.userId, a.role, q.subject_id))) return res.status(403).json({ error: "not your subject" });
-  const owner = a.role === "doctor" ? { ownerType: "doctor" as const, doctorId: a.userId } : { ownerType: "ta_shared" as const, ...(q.mine ? { addedByTaId: a.userId } : {}) };
+  const owner =
+    a.role === "admin"
+      ? {}
+      : a.role === "doctor"
+        ? { ownerType: "doctor" as const, doctorId: a.userId }
+        : { ownerType: "ta_shared" as const, ...(q.mine ? { addedByTaId: a.userId } : {}) };
   const rows = await prisma.question.groupBy({ by: ["difficulty"], where: { subjectId: q.subject_id, ...owner }, _count: true });
   const out: Record<string, number> = { easy: 0, medium: 0, hard: 0 };
   for (const r of rows) out[r.difficulty] = r._count;
@@ -180,6 +188,63 @@ questionBank.patch("/:id", async (req, res) => {
     const c = body.correctAnswer ?? own.q.correctAnswer;
     const optErr = checkOptions(t, o, c);
     if (optErr) return res.status(422).json({ error: optErr });
+  }
+  const structuralChange =
+    body.options !== undefined ||
+    body.correctAnswer !== undefined ||
+    body.grade !== undefined ||
+    body.difficulty !== undefined ||
+    body.questionType !== undefined;
+  if (structuralChange) {
+    const { poolForExam } = await import("../lib/sampling.js");
+    const { poolCounts, mixShortfall } = await import("../lib/examRules.js");
+    const result = await prisma.$transaction(async (tx) => {
+      const used = await tx.studentExamQuestion.count({ where: { questionId: own.q.id } });
+      if (used > 0) return { conflict: { error: "cannot change grading or options of a question already used in student exams" } };
+      const comped = await tx.examCompensation.count({ where: { questionId: own.q.id } });
+      if (comped > 0) return { conflict: { error: "has compensations, void is history" } };
+      const pinned = await tx.exam.count({
+        where: { manualQuestionIds: { array_contains: own.q.id }, status: "approved" },
+      });
+      if (pinned > 0) return { conflict: { error: "cannot modify grading or options of a question pinned in an approved exam" } };
+      if (body.difficulty && body.difficulty !== own.q.difficulty) {
+        const now = new Date();
+        const dependent = await tx.exam.findMany({
+          where: {
+            subjectId: own.q.subjectId,
+            status: { in: ["pending_approval", "approved"] },
+            endTime: { gte: now },
+          },
+          select: { id: true, difficultyMix: true, createdBy: true, type: true, questionSource: true, subjectId: true, manualQuestionIds: true },
+        });
+        const autoDependent = dependent.filter((ex) => {
+          const m = ex.manualQuestionIds as unknown;
+          return !Array.isArray(m) || (m as string[]).length === 0;
+        });
+        for (const ex of autoDependent) {
+          const pool = await poolForExam(tx as never, ex as never);
+          if (!pool.ok) continue;
+          const counts = await poolCounts(tx as never, pool.where);
+          const inPool = await tx.question.count({
+            where: { id: own.q.id, ...(pool.where as object) },
+          });
+          if (!inPool) continue;
+          const oldTier = own.q.difficulty as string;
+          const newTier = body.difficulty as string;
+          counts[oldTier] = Math.max(0, (counts[oldTier] ?? 0) - 1);
+          counts[newTier] = (counts[newTier] ?? 0) + 1;
+          const short = mixShortfall((ex.difficultyMix ?? {}) as never, counts);
+          if (short) {
+            return { conflict: { error: "exam depends on this bank tier", examId: ex.id, ...short } };
+          }
+        }
+      }
+      const row = await tx.question.update({ where: { id: own.q.id }, data: body });
+      return { row };
+    });
+    if ("conflict" in result) return res.status(409).json(result.conflict);
+    await audit(a.userId, "question.update", "question", result.row.id, body);
+    return res.json(result.row);
   }
   const row = await prisma.question.update({ where: { id: own.q.id }, data: body });
   await audit(a.userId, "question.update", "question", row.id, body);
@@ -262,9 +327,7 @@ questionBank.delete("/:id/image", async (req, res) => {
   const own = await ownQuestionOr403(a.userId, a.role, String(req.params.id));
   if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
   if (!own.q.imageUrl) return res.status(404).json({ error: "no image attached" });
-  const key = own.q.imageUrl.startsWith(`${storage.publicBase}/`)
-    ? own.q.imageUrl.slice(storage.publicBase.length + 1)
-    : null;
+  const key = storage.keyFromUrl(own.q.imageUrl);
   const row = await prisma.question.update({ where: { id: own.q.id }, data: { imageUrl: null } });
   if (key) {
     try {
@@ -301,11 +364,44 @@ interface BankRow {
   imageFilename?: string;
 }
 
+async function readZipEntryBounded(
+  entry: { stream: () => NodeJS.ReadableStream },
+  maxFileBytes: number,
+  remainingTotal: number,
+): Promise<Buffer> {
+  return new Promise<Buffer>((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let bytes = 0;
+    const s = entry.stream();
+    let settled = false;
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      (s as unknown as { destroy?: () => void }).destroy?.();
+      reject(err);
+    };
+    s.on("data", (chunk: Buffer | Uint8Array) => {
+      const b = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      bytes += b.length;
+      if (bytes > maxFileBytes) return fail(new Error("zip entry too large"));
+      if (bytes > remainingTotal) return fail(new Error("zip decompresses too large"));
+      chunks.push(b);
+    });
+    s.on("error", (err) => fail(err instanceof Error ? err : new Error("invalid or corrupted zip archive")));
+    s.on("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(Buffer.concat(chunks, bytes));
+    });
+  });
+}
+
 async function zipMap(buf?: Buffer): Promise<Map<string, Buffer>> {
   const map = new Map<string, Buffer>();
   if (!buf) return map;
   // Zip-bomb caps: multer limits COMPRESSED bytes; decompressed output is
-  // bounded here (entries, per-file, total) before anything hits the heap.
+  // streamed with running per-entry and total byte counters so a bomb aborts
+  // before exhausting the heap.
   try {
     const dir = await unzipper.Open.buffer(buf);
     let total = 0;
@@ -313,10 +409,8 @@ async function zipMap(buf?: Buffer): Promise<Map<string, Buffer>> {
     for (const f of dir.files) {
       if (f.type !== "File") continue;
       if (++files > config.zip.maxFiles) throw new Error("zip has too many files");
-      const content = await f.buffer();
-      if (content.length > config.zip.maxFileBytes) throw new Error("zip entry too large");
+      const content = await readZipEntryBounded(f, config.zip.maxFileBytes, config.zip.maxTotalBytes - total);
       total += content.length;
-      if (total > config.zip.maxTotalBytes) throw new Error("zip decompresses too large");
       const name = f.path.split("/").pop() ?? "";
       if (name) map.set(name, content);
     }
@@ -348,8 +442,8 @@ questionBank.post("/import/dry-run", rateLimit(30, 60_000, "bank-import:dry-run"
   let images: Map<string, Buffer>;
   try {
     images = await zipMap(files?.images?.[0]?.buffer);
-  } catch {
-    return res.status(422).json({ error: "invalid or corrupted zip archive" });
+  } catch (e) {
+    return res.status(422).json({ error: e instanceof Error ? e.message : "invalid or corrupted zip archive" });
   }
 
   let wb: XLSX.WorkBook;
@@ -387,6 +481,15 @@ questionBank.post("/import/dry-run", rateLimit(30, 60_000, "bank-import:dry-run"
     const u = await prisma.user.findUnique({ where: { username: uname }, select: { id: true, role: true } });
     if (u) users.set(uname, u);
   }
+  const bankScopeMemo = new Map<string, boolean>();
+  const canBankCached = async (uid: string, role: Role, sid: string): Promise<boolean> => {
+    const k = `${uid}:${role}:${sid}`;
+    const hit = bankScopeMemo.get(k);
+    if (hit !== undefined) return hit;
+    const ok = await mayBank(uid, role, sid);
+    bankScopeMemo.set(k, ok);
+    return ok;
+  };
 
   for (const [i, r] of raw.entries()) {
     const line = i + 2;
@@ -422,13 +525,13 @@ questionBank.post("/import/dry-run", rateLimit(30, 60_000, "bank-import:dry-run"
       if ((ot === "doctor" && owner.role !== "doctor") || (ot === "ta_shared" && owner.role !== "ta")) return fail("owner role mismatch");
       ownerType = ot;
       ownerId = owner.id;
-      if (!(await mayBank(ownerId, owner.role, subjectId))) return fail("owner not scoped to subject");
+      if (!(await canBankCached(ownerId, owner.role, subjectId))) return fail("owner not scoped to subject");
     } else if (a.role === "doctor") {
-      if (!(await mayBank(a.userId, a.role, subjectId))) return fail("not your subject");
+      if (!(await canBankCached(a.userId, a.role, subjectId))) return fail("not your subject");
       ownerType = "doctor";
       ownerId = a.userId;
     } else {
-      if (!(await mayBank(a.userId, a.role, subjectId))) return fail("not your subject");
+      if (!(await canBankCached(a.userId, a.role, subjectId))) return fail("not your subject");
       ownerType = "ta_shared";
       ownerId = a.userId;
     }
@@ -483,8 +586,8 @@ questionBank.post("/import/commit", rateLimit(30, 60_000, "bank-import:commit"),
   let cimages: Map<string, Buffer>;
   try {
     cimages = await zipMap(cfiles?.images?.[0]?.buffer);
-  } catch {
-    return res.status(422).json({ error: "invalid or corrupted zip archive" });
+  } catch (e) {
+    return res.status(422).json({ error: e instanceof Error ? e.message : "invalid or corrupted zip archive" });
   }
   const stagedPre = pre.payload as unknown as { rows: BankRow[] };
   const owners = new Map<string, { id: string; role: Role }>();
@@ -494,7 +597,11 @@ questionBank.post("/import/commit", rateLimit(30, 60_000, "bank-import:commit"),
       if (u) owners.set(r.ownerId, u);
     }
   }
+  const checkedScopes = new Set<string>();
   for (const r of stagedPre.rows) {
+    const scopeKey = `${r.ownerId}:${r.subjectId}`;
+    if (checkedScopes.has(scopeKey)) continue;
+    checkedScopes.add(scopeKey);
     const o = owners.get(r.ownerId);
     if (!o || !(await mayBank(r.ownerId, o.role, r.subjectId))) {
       return res.status(409).json({ error: "owner lost subject scope since dry-run" });

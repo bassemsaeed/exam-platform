@@ -14,7 +14,11 @@ interface CachedResponse {
   expiresAt: number;
 }
 
+const MAX_STORE_ENTRIES = 10_000;
+const MAX_KEY_LEN = 128;
+const LOCK_TTL_SEC = 30;
 const store = new Map<string, CachedResponse>();
+const inFlight = new Set<string>();
 
 // Periodic eviction of expired idempotency keys
 setInterval(() => {
@@ -54,16 +58,50 @@ async function writeCache(cacheKey: string, entry: CachedResponse): Promise<void
   } catch {
     // fall through to memory
   }
+  if (store.size >= MAX_STORE_ENTRIES) {
+    const oldest = store.keys().next().value;
+    if (oldest !== undefined) store.delete(oldest);
+  }
   store.set(cacheKey, entry);
 }
 
+async function acquireLock(lockKey: string): Promise<boolean> {
+  try {
+    const r = await redis();
+    if (r) {
+      const ok = await r.set(lockKey, "1", "EX", LOCK_TTL_SEC, "NX");
+      return ok === "OK";
+    }
+  } catch {
+    // fall through to memory
+  }
+  if (inFlight.has(lockKey)) return false;
+  inFlight.add(lockKey);
+  return true;
+}
+
+async function releaseLock(lockKey: string): Promise<void> {
+  inFlight.delete(lockKey);
+  try {
+    const r = await redis();
+    if (r) await r.del(lockKey);
+  } catch {
+    // lock expires via TTL
+  }
+}
+
 export function idempotency(req: Request, res: Response, next: NextFunction) {
-  const idKey = req.header("Idempotency-Key");
-  if (!idKey) return next();
+  const rawKey = req.header("Idempotency-Key");
+  if (!rawKey) return next();
+  const idKey = rawKey.trim();
+  if (!idKey || idKey.length > MAX_KEY_LEN) {
+    return res.status(400).json({ error: "invalid Idempotency-Key" });
+  }
 
   void (async () => {
     const userId = (req as unknown as AuthedRequest).userId || req.ip || "anon";
     const cacheKey = `idem:${userId}:${req.method}:${req.baseUrl}${req.path}:${idKey}`;
+    const lockKey = `${cacheKey}:lock`;
 
     const cached = await readCache(cacheKey);
     if (cached && Date.now() < cached.expiresAt) {
@@ -71,7 +109,27 @@ export function idempotency(req: Request, res: Response, next: NextFunction) {
       return res.status(cached.status).json(cached.body);
     }
 
-    // Intercept json() to cache the response before sending.
+    const locked = await acquireLock(lockKey);
+    if (!locked) {
+      // Another identical request is already in flight.
+      const raced = await readCache(cacheKey);
+      if (raced && Date.now() < raced.expiresAt) {
+        res.setHeader("Idempotent-Replay", "true");
+        return res.status(raced.status).json(raced.body);
+      }
+      return res.status(409).json({ error: "request with this Idempotency-Key is already in progress" });
+    }
+
+    let released = false;
+    const cleanup = () => {
+      if (released) return;
+      released = true;
+      void releaseLock(lockKey);
+    };
+    res.on("finish", cleanup);
+    res.on("close", cleanup);
+
+    // Intercept json() to cache 2xx responses before sending.
     const originalJson = res.json.bind(res);
     res.json = (body: unknown): Response => {
       if (res.statusCode >= 200 && res.statusCode < 300) {

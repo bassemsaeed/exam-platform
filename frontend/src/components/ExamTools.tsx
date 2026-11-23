@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { request, type Sitting } from "../lib/platform";
 import { useT } from "../lib/i18n";
 import { Feedback } from "./ui";
@@ -10,8 +10,12 @@ import {
   type AngleMode,
 } from "../lib/calculator";
 
-export function ExamTools({ userId, examId, sitting, disabled }: {
-  userId: string; examId: string; sitting: Sitting; disabled: boolean;
+export function ExamTools({ userId, examId, sitting, disabled, flushRef }: {
+  userId: string;
+  examId: string;
+  sitting: Sitting;
+  disabled: boolean;
+  flushRef?: { current: (() => Promise<void>) | null };
 }) {
   const t = useT();
   const [tool, setTool] = useState<"calculator" | "notes" | "doctor-notes" | null>(null);
@@ -33,6 +37,32 @@ export function ExamTools({ userId, examId, sitting, disabled }: {
   const [doctorRetry, setDoctorRetry] = useState(0);
   const saving = useRef(false);
   const doctorSaving = useRef(false);
+  const latestRef = useRef({ notes, saved, doctorNotes, doctorSaved, disabled });
+  latestRef.current = { notes, saved, doctorNotes, doctorSaved, disabled };
+  useEffect(() => {
+    if (!flushRef) return;
+    flushRef.current = async () => {
+      const cur = latestRef.current;
+      if (cur.disabled) return;
+      const tasks: Promise<void>[] = [];
+      if (sitting.notesEnabled && cur.notes !== cur.saved) {
+        tasks.push(
+          request(`/api/v1/student/exams/${examId}/notes`, "PATCH", { notes: cur.notes })
+            .then(() => { setSaved(cur.notes); setError(null); })
+            .catch(() => undefined),
+        );
+      }
+      if (sitting.notesForDoctorEnabled && cur.doctorNotes !== cur.doctorSaved) {
+        tasks.push(
+          request(`/api/v1/student/exams/${examId}/notes-for-doctor`, "PATCH", { notes: cur.doctorNotes })
+            .then(() => { setDoctorSaved(cur.doctorNotes); setDoctorError(null); })
+            .catch(() => undefined),
+        );
+      }
+      await Promise.all(tasks);
+    };
+    return () => { flushRef.current = null; };
+  }, [flushRef, examId, sitting.notesEnabled, sitting.notesForDoctorEnabled]);
   useEffect(() => {
     if (!sitting.notesEnabled || disabled || notes === saved) return;
     try { sessionStorage.setItem(key, notes); } catch { /* server save still works */ }
@@ -174,7 +204,13 @@ function Calculator() {
     smartInsert(key, /^[+\-*/^!%)]$/.test(key));
   }
   const digitOk = (d: string): boolean =>
-    base === 10 || (base === 16 ? /^[0-9A-Fa-f]$/.test(d) : base === 8 ? /^[0-7]$/.test(d) : /^[01]$/.test(d));
+    base === 10
+      ? /^[0-9]$/.test(d)
+      : base === 16
+        ? /^[0-9A-Fa-f]$/.test(d)
+        : base === 8
+          ? /^[0-7]$/.test(d)
+          : /^[01]$/.test(d);
   // Decimal value of whatever is showing, for the base-conversion readout.
   // A pinned exact value (from a base switch) wins until the next edit.
   const decReadout = (() => {
@@ -219,8 +255,8 @@ function Calculator() {
       return;
     }
     let key: string | null = null;
-    if (/^[0-9a-fA-F]$/.test(k) && digitOk(k.toUpperCase()) && (base === 10 || base === 16 || /^[01]$/.test(k) || /^[0-7]$/.test(k))) {
-      if (base === 10 || digitOk(k.toUpperCase())) key = k.toUpperCase();
+    if (/^[0-9a-fA-F]$/.test(k) && digitOk(k)) {
+      key = k.toUpperCase();
     } else if (".+-^%()!".includes(k)) {
       key = k === "." && base !== 10 ? null : k;
     } else if (k === "*" || k === "/") {

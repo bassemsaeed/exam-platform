@@ -19,6 +19,13 @@ const MIME: Record<string, string> = {
   ".svg": "image/svg+xml",
   ".csv": "text/csv",
   ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".ogg": "audio/ogg",
+  ".m4a": "audio/mp4",
+  ".webm": "video/webm",
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
 };
 
 export function contentTypeFor(filename: string): string {
@@ -45,6 +52,49 @@ export function sniffImage(buf: Buffer): { ext: string; mime: string } | null {
   return null;
 }
 
+// Magic-byte audio/video sniffing for pre-exam briefing media. Rejects HTML/JS/
+// executables masquerading as media files before anything touches storage.
+export function sniffMedia(
+  buf: Buffer,
+  hint?: "audio" | "video",
+): { kind: "audio" | "video"; ext: string; mime: string } | null {
+  if (buf.length < 12) return null;
+  // WAV: RIFF....WAVE
+  if (buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WAVE") {
+    return { kind: "audio", ext: ".wav", mime: "audio/wav" };
+  }
+  // OGG (Opus/Vorbis/Theora): OggS
+  if (buf.toString("ascii", 0, 4) === "OggS") {
+    const kind = hint === "video" ? "video" : "audio";
+    return { kind, ext: ".ogg", mime: kind === "video" ? "video/ogg" : "audio/ogg" };
+  }
+  // MP3: ID3 tag or MPEG audio frame sync
+  if (
+    buf.toString("ascii", 0, 3) === "ID3" ||
+    (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0 && (buf[1] & 0x06) !== 0)
+  ) {
+    return { kind: "audio", ext: ".mp3", mime: "audio/mpeg" };
+  }
+  // WebM / Matroska (EBML header: 1A 45 DF A3) — browser MediaRecorder outputs
+  // both audio/webm and video/webm with this header.
+  if (buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) {
+    const kind = hint === "audio" ? "audio" : "video";
+    return { kind, ext: ".webm", mime: kind === "audio" ? "audio/webm" : "video/webm" };
+  }
+  // ISO BMFF (MP4 / M4A / MOV): bytes 4..8 === "ftyp"
+  if (buf.toString("ascii", 4, 8) === "ftyp") {
+    const brand = buf.toString("ascii", 8, 12);
+    if (brand === "M4A " || brand === "M4B " || hint === "audio") {
+      return { kind: "audio", ext: ".m4a", mime: "audio/mp4" };
+    }
+    if (brand === "qt  ") {
+      return { kind: "video", ext: ".mov", mime: "video/quicktime" };
+    }
+    return { kind: "video", ext: ".mp4", mime: "video/mp4" };
+  }
+  return null;
+}
+
 function keyFor(prefix: string, filename: string, buf: Buffer): string {
   if (prefix.includes("..")) throw new Error("path traversal forbidden");
   const safePrefix = prefix
@@ -60,6 +110,7 @@ function keyFor(prefix: string, filename: string, buf: Buffer): string {
 export interface Storage {
   put(prefix: string, filename: string, buf: Buffer): Promise<StoredFile>;
   delete(key: string): Promise<void>;
+  keyFromUrl(url: string): string | null;
   readonly publicBase: string; // served prefix for local driver ("" when S3)
 }
 
@@ -69,6 +120,10 @@ class LocalStorage implements Storage {
 
   constructor() {
     this.dir = localUploadsDir();
+  }
+
+  keyFromUrl(url: string): string | null {
+    return url.startsWith(`${this.publicBase}/`) ? url.slice(this.publicBase.length + 1) : null;
   }
 
   async put(prefix: string, filename: string, buf: Buffer): Promise<StoredFile> {
@@ -118,11 +173,15 @@ class S3Storage implements Storage {
     this.base = (s.s3PublicUrl || `${s.s3Endpoint}/${s.s3Bucket}`).replace(/\/$/, "");
   }
 
+  keyFromUrl(url: string): string | null {
+    return url.startsWith(`${this.base}/`) ? url.slice(this.base.length + 1) : null;
+  }
+
   async put(prefix: string, filename: string, buf: Buffer): Promise<StoredFile> {
     const key = keyFor(prefix, filename, buf);
-    // Serve the sniffed image type, not the claimed extension: a renamed
+    // Serve the sniffed content type, not the claimed extension: a renamed
     // payload must never be stored or served as something it isn't.
-    const contentType = sniffImage(buf)?.mime ?? contentTypeFor(filename);
+    const contentType = sniffImage(buf)?.mime ?? sniffMedia(buf)?.mime ?? contentTypeFor(filename);
     await this.client.send(
       new PutObjectCommand({ Bucket: this.bucket, Key: key, Body: buf, ContentType: contentType }),
     );

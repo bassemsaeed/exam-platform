@@ -1,16 +1,30 @@
 import { Router, type Router as RouterType } from "express";
+import multer from "multer";
 import { z } from "zod";
 import { audit } from "../lib/audit.js";
 import { config } from "../lib/config.js";
+import { hashEntryCode } from "../lib/sebCrypto.js";
 import { checkMix, checkWindow, mixShortfall, poolCounts } from "../lib/examRules.js";
 import { Prisma } from "../generated/prisma/client.js";
 import { poolForExam } from "../lib/sampling.js";
+import { sniffMedia, storage } from "../lib/storage.js";
 import { envelope, page, pageQuery } from "../lib/pagination.js";
 import { prisma } from "../lib/prisma.js";
 import { hasPermission, requireAuth, type AuthedRequest } from "../middleware/auth.js";
 
 export const exams: RouterType = Router();
 exams.use(requireAuth);
+
+const INSTRUCTION_MEDIA_MAX_BYTES = 25 * 1024 * 1024;
+const instructionMediaUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: INSTRUCTION_MEDIA_MAX_BYTES },
+});
+const MEDIA_EXTS = [".mp3", ".wav", ".ogg", ".m4a", ".webm", ".mp4", ".mov"] as const;
+function mediaExtOk(filename: string): boolean {
+  const dot = filename.lastIndexOf(".");
+  return dot >= 0 && (MEDIA_EXTS as readonly string[]).includes(filename.slice(dot).toLowerCase());
+}
 
 const mixInput = z.record(z.string(), z.number().int().min(0));
 
@@ -157,11 +171,15 @@ exams.get("/roster", async (req, res) => {
           take: config.lists.membersMax,
         }),
   ]);
+  const taUniqueStudents =
+    a.role === "ta"
+      ? new Set(sections.flatMap((s) => s.memberships.map((m) => m.student.id))).size
+      : total;
   await audit(a.userId, "roster.view", "subject", q.subject_id, { sections: sections.length }).catch(() => {});
   res.json({
     subjectId: q.subject_id,
     termId,
-    totalEnrolled: total,
+    totalEnrolled: taUniqueStudents,
     enrolledStudents: enrolledRows.map((e) => e.student),
     sections: sections.map((s) => ({
       id: s.id,
@@ -172,18 +190,48 @@ exams.get("/roster", async (req, res) => {
   });
 });
 
-// GET /exams/mine?term_id&status — staff's own creations.
+function toSafeExam<T extends { accessCodeHash: string | null }>(exam: T) {
+  const { accessCodeHash, ...safe } = exam;
+  return { ...safe, hasAccessCode: accessCodeHash !== null };
+}
+
+// GET /exams/mine?term_id&status&include_subject — staff's own creations (plus
+// subject TA quizzes for doctors with view_all_grades when include_subject=true).
 exams.get("/mine", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   if (a.role === "student") return res.status(403).json({ error: "forbidden" });
-  const q = pageQuery.extend({ term_id: z.string().optional(), status: z.string().optional() }).parse(req.query);
+  const q = pageQuery
+    .extend({
+      term_id: z.string().optional(),
+      status: z.string().optional(),
+      include_subject: z.enum(["true", "false"]).optional(),
+    })
+    .parse(req.query);
   const termId = q.term_id ?? (await currentTermId());
-  const where = { createdBy: a.userId, ...(termId ? { termId } : {}), ...(q.status ? { status: q.status as never } : {}) };
+  let where: Prisma.ExamWhereInput = {
+    createdBy: a.userId,
+    ...(termId ? { termId } : {}),
+    ...(q.status ? { status: q.status as never } : {}),
+  };
+  if (a.role === "doctor" && q.include_subject === "true" && (await hasPermission(a.userId, a.role, "view_all_grades"))) {
+    const assigned = await prisma.doctorAssignment.findMany({
+      where: { doctorId: a.userId, ...(termId ? { termId } : {}) },
+      select: { subjectId: true },
+    });
+    const subjectIds = assigned.map((d) => d.subjectId);
+    if (subjectIds.length) {
+      where = {
+        ...(termId ? { termId } : {}),
+        ...(q.status ? { status: q.status as never } : {}),
+        OR: [{ createdBy: a.userId }, { subjectId: { in: subjectIds } }],
+      };
+    }
+  }
   const [total, rows] = await Promise.all([
     prisma.exam.count({ where }),
     prisma.exam.findMany({ where, orderBy: { startTime: "desc" }, ...page(q) }),
   ]);
-  res.json(envelope(total, q, rows));
+  res.json(envelope(total, q, rows.map(toSafeExam)));
 });
 
 // POST /exams — doctor→pending_approval, TA quiz→approved. Mix validated vs pool.
@@ -206,6 +254,9 @@ exams.post("/", async (req, res) => {
       maxReentries: z.number().int().min(0).max(20).default(3),
       resultsReleased: z.boolean().default(false),
       sebRequired: z.boolean().default(false),
+      accessCode: z.string().trim().min(4).max(64).optional().or(z.literal("")),
+      instructionsText: z.string().trim().max(10_000).nullable().optional(),
+      instructionsRequireCompletion: z.boolean().default(false),
       difficultyMix: mixInput.optional(),
       // Manual blueprint: hand-picked question IDs in author order (sampling
       // bypassed). Either this or a non-empty difficultyMix is required.
@@ -320,6 +371,12 @@ exams.post("/", async (req, res) => {
         maxReentries: body.maxReentries,
         resultsReleased: body.resultsReleased,
         sebRequired: body.sebRequired,
+        accessCodeHash:
+          body.accessCode?.trim() && (body.purpose === "quiz" || a.role === "admin")
+            ? hashEntryCode(body.accessCode.trim())
+            : null,
+        instructionsText: body.instructionsText?.trim() || null,
+        instructionsRequireCompletion: body.instructionsRequireCompletion,
         difficultyMix: mix,
         manualQuestionIds: manual.length ? manual : Prisma.DbNull,
         questionSource: a.role === "ta" ? source : "own",
@@ -342,7 +399,7 @@ exams.post("/", async (req, res) => {
   } catch {
     // Warning is advisory only — creation already committed.
   }
-  res.status(201).json({ ...row, warnings });
+  res.status(201).json({ ...toSafeExam(row), warnings });
 });
 
 // Windows overlap when a.start < b.end && b.start < a.end. Same subject+term,
@@ -416,6 +473,9 @@ exams.get("/live", async (req, res) => {
     },
     select: {
       id: true,
+      title: true,
+      purpose: true,
+      sebRequired: true,
       type: true,
       status: true,
       startTime: true,
@@ -447,8 +507,7 @@ exams.get("/:id", async (req, res) => {
   const permErr = await creatorPermissionError(a.userId, a.role);
   if (permErr) return res.status(403).json(permErr);
   // Same rule as the admin detail: presence only, never the hash.
-  const { accessCodeHash: _dropped, ...safe } = own.exam;
-  res.json({ ...safe, hasAccessCode: _dropped !== null });
+  res.json(toSafeExam(own.exam));
 });
 
 // GET /exams/:id/blueprint — everything about one exam on a single page:
@@ -494,9 +553,8 @@ exams.get("/:id/blueprint", async (req, res) => {
     }),
     prisma.examTargetStudent.count({ where: { examId: exam.id } }),
   ]);
-  const { accessCodeHash: _dropped, ...safe } = exam;
   res.json({
-    exam: { ...safe, hasAccessCode: _dropped !== null },
+    exam: toSafeExam(exam),
     mode: manual.length ? "manual" : "sample",
     questions,
     targets: { sections: targetSections.map((t) => t.section), studentCount: targetStudentCount },
@@ -506,7 +564,22 @@ exams.get("/:id/blueprint", async (req, res) => {
 exams.patch("/:id", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   const body = z
-    .object({ title: z.string().trim().min(1).max(120).optional(), purpose: z.enum(["midterm", "quiz"]).optional(), notesEnabled: z.boolean().optional(), notesForDoctorEnabled: z.boolean().optional(), examToolsEnabled: z.boolean().optional(), maxReentries: z.number().int().min(0).max(20).optional(), resultsReleased: z.boolean().optional(), sebRequired: z.boolean().optional(), startTime: z.string().datetime().optional(), endTime: z.string().datetime().optional(), durationMinutes: z.number().int().positive().optional(), difficultyMix: mixInput.optional() })
+    .object({
+      title: z.string().trim().min(1).max(120).optional(),
+      purpose: z.enum(["midterm", "quiz"]).optional(),
+      notesEnabled: z.boolean().optional(),
+      notesForDoctorEnabled: z.boolean().optional(),
+      examToolsEnabled: z.boolean().optional(),
+      maxReentries: z.number().int().min(0).max(20).optional(),
+      resultsReleased: z.boolean().optional(),
+      sebRequired: z.boolean().optional(),
+      instructionsText: z.string().trim().max(10_000).nullable().optional(),
+      instructionsRequireCompletion: z.boolean().optional(),
+      startTime: z.string().datetime().optional(),
+      endTime: z.string().datetime().optional(),
+      durationMinutes: z.number().int().positive().optional(),
+      difficultyMix: mixInput.optional(),
+    })
     .parse(req.body);
   // NOTE: hand-picked blueprints lock at creation (sittings may reference
   // exact IDs) — PATCH covers window/duration/mix only, and mix patches on a
@@ -516,6 +589,9 @@ exams.patch("/:id", async (req, res) => {
   if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
   const permErr = await creatorPermissionError(a.userId, a.role);
   if (permErr) return res.status(403).json(permErr);
+  if ((a.role === "ta" || own.exam.type === "ta_quiz") && body.purpose === "midterm") {
+    return res.status(403).json({ error: "TAs create quizzes only" });
+  }
   if (own.exam.startTime.getTime() <= Date.now()) return res.status(409).json({ error: "locked", reason: "exam window has started" });
   const manual = Array.isArray(own.exam.manualQuestionIds) ? (own.exam.manualQuestionIds as string[]) : [];
   if (manual.length && body.difficultyMix) {
@@ -538,14 +614,127 @@ exams.patch("/:id", async (req, res) => {
       if (short) return res.status(422).json({ error: "bank short for mix", ...short });
     }
   }
+  const needsReapproval =
+    own.exam.status === "approved" &&
+    a.role !== "admin" &&
+    (own.exam.purpose === "midterm" || (body.purpose !== undefined && body.purpose !== own.exam.purpose));
+  const data = {
+    ...body,
+    ...(body.instructionsText !== undefined ? { instructionsText: body.instructionsText?.trim() || null } : {}),
+    ...(needsReapproval ? { status: "pending_approval" as const, approvedBy: null } : {}),
+  };
   const row = await prisma.exam.update({
     where: { id: own.exam.id },
-    // Title/purpose edits are free, but flipping purpose on an approved exam
-    // re-queues it (a quiz silently becoming a midterm must not skip approval).
-    data: { ...body, ...(own.exam.status === "approved" && (a.role === "doctor" || (body.purpose && body.purpose !== own.exam.purpose)) ? { status: "pending_approval" as const, approvedBy: null } : {}) },
+    // Approved midterms (or quizzes promoted to midterm) re-enter approval on edit.
+    data,
   });
   await audit(a.userId, "exam.update", "exam", row.id, body);
-  res.json(row);
+  res.json(toSafeExam(row));
+});
+
+// POST /exams/:id/access-code — doctors & TAs may optionally set an entry code
+// on their own quizzes (midterm entry codes stay admin-managed).
+exams.post("/:id/access-code", async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  if (a.role === "student") return res.status(403).json({ error: "forbidden" });
+  const { code } = z.object({ code: z.string().trim().min(4).max(64) }).parse(req.body);
+  const own = await ownExamOrAdmin(a.userId, a.role, String(req.params.id));
+  if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
+  const permErr = await creatorPermissionError(a.userId, a.role);
+  if (permErr) return res.status(403).json(permErr);
+  if (a.role !== "admin" && own.exam.purpose !== "quiz") {
+    return res.status(403).json({ error: "midterm entry codes are managed by administrators" });
+  }
+  await prisma.exam.update({ where: { id: own.exam.id }, data: { accessCodeHash: hashEntryCode(code) } });
+  await audit(a.userId, "exam.access-code.set", "exam", own.exam.id);
+  res.json({ ok: true, hasAccessCode: true });
+});
+
+exams.delete("/:id/access-code", async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  if (a.role === "student") return res.status(403).json({ error: "forbidden" });
+  const own = await ownExamOrAdmin(a.userId, a.role, String(req.params.id));
+  if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
+  const permErr = await creatorPermissionError(a.userId, a.role);
+  if (permErr) return res.status(403).json(permErr);
+  if (a.role !== "admin" && own.exam.purpose !== "quiz") {
+    return res.status(403).json({ error: "midterm entry codes are managed by administrators" });
+  }
+  await prisma.exam.update({ where: { id: own.exam.id }, data: { accessCodeHash: null } });
+  await audit(a.userId, "exam.access-code.clear", "exam", own.exam.id);
+  res.json({ ok: true, hasAccessCode: false });
+});
+
+// POST /exams/:id/instructions-media (multipart media=, optional mediaType=audio|video)
+// Attaches a voice or video pre-exam briefing (max 25 MB, magic-byte verified).
+exams.post("/:id/instructions-media", instructionMediaUpload.single("media"), async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  if (a.role === "student") return res.status(403).json({ error: "forbidden" });
+  const own = await ownExamOrAdmin(a.userId, a.role, String(req.params.id));
+  if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
+  const permErr = await creatorPermissionError(a.userId, a.role);
+  if (permErr) return res.status(403).json(permErr);
+  if (a.role !== "admin" && own.exam.endTime.getTime() <= Date.now()) {
+    return res.status(409).json({ error: "locked", reason: "exam window has ended" });
+  }
+  if (!req.file) return res.status(400).json({ error: "media file required" });
+  if (!mediaExtOk(req.file.originalname)) {
+    return res.status(422).json({ error: "media must be mp3, wav, ogg, m4a, webm, mp4, or mov" });
+  }
+  const rawHint = String((req.body as Record<string, unknown> | undefined)?.mediaType ?? "").toLowerCase();
+  const hint: "audio" | "video" | undefined =
+    rawHint === "audio" || rawHint === "video"
+      ? rawHint
+      : req.file.mimetype.startsWith("audio/")
+        ? "audio"
+        : req.file.mimetype.startsWith("video/")
+          ? "video"
+          : undefined;
+  const sniffed = sniffMedia(req.file.buffer, hint);
+  if (!sniffed) {
+    return res.status(422).json({ error: "file is not a valid audio or video recording" });
+  }
+  const oldKey = own.exam.instructionsMediaUrl ? storage.keyFromUrl(own.exam.instructionsMediaUrl) : null;
+  const stored = await storage.put(`instructions/${own.exam.id}`, `briefing${sniffed.ext}`, req.file.buffer);
+  const row = await prisma.exam.update({
+    where: { id: own.exam.id },
+    data: {
+      instructionsMediaUrl: stored.url,
+      instructionsMediaType: sniffed.kind,
+    },
+  });
+  if (oldKey && oldKey !== stored.key) {
+    await storage.delete(oldKey).catch(() => undefined);
+  }
+  await audit(a.userId, "exam.instructions-media", "exam", row.id, {
+    mediaType: sniffed.kind,
+    bytes: req.file.size,
+  });
+  res.json(toSafeExam(row));
+});
+
+exams.delete("/:id/instructions-media", async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  if (a.role === "student") return res.status(403).json({ error: "forbidden" });
+  const own = await ownExamOrAdmin(a.userId, a.role, String(req.params.id));
+  if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
+  const permErr = await creatorPermissionError(a.userId, a.role);
+  if (permErr) return res.status(403).json(permErr);
+  if (a.role !== "admin" && own.exam.endTime.getTime() <= Date.now()) {
+    return res.status(409).json({ error: "locked", reason: "exam window has ended" });
+  }
+  const oldKey = own.exam.instructionsMediaUrl ? storage.keyFromUrl(own.exam.instructionsMediaUrl) : null;
+  const row = await prisma.exam.update({
+    where: { id: own.exam.id },
+    data: {
+      instructionsMediaUrl: null,
+      instructionsMediaType: null,
+      instructionsRequireCompletion: false,
+    },
+  });
+  if (oldKey) await storage.delete(oldKey).catch(() => undefined);
+  await audit(a.userId, "exam.instructions-media-delete", "exam", row.id);
+  res.json(toSafeExam(row));
 });
 
 exams.delete("/:id", async (req, res) => {
@@ -555,15 +744,17 @@ exams.delete("/:id", async (req, res) => {
   const permErr = await creatorPermissionError(a.userId, a.role);
   if (permErr) return res.status(403).json(permErr);
   if (own.exam.startTime.getTime() <= Date.now()) return res.status(409).json({ error: "locked", reason: "exam window has started" });
-  // Staff exams are never born "draft" (pending_approval / approved TA quiz),
-  // so draft|rejected-only would deadlock every creator. Pre-start + unapproved wins.
+  // Staff exams are never born "draft" (pending_approval / approved quiz),
+  // so draft|rejected-only would deadlock creators. Pre-start + unapproved or quiz wins.
   const deletable =
     own.exam.status === "draft" ||
     own.exam.status === "rejected" ||
     own.exam.status === "pending_approval" ||
-    (own.exam.status === "approved" && own.exam.type === "ta_quiz");
-  if (!deletable) return res.status(409).json({ error: "cannot delete approved doctor exam" });
+    (own.exam.status === "approved" && (own.exam.type === "ta_quiz" || own.exam.purpose === "quiz"));
+  if (!deletable) return res.status(409).json({ error: "cannot delete approved midterm exam" });
+  const oldKey = own.exam.instructionsMediaUrl ? storage.keyFromUrl(own.exam.instructionsMediaUrl) : null;
   await prisma.exam.delete({ where: { id: own.exam.id } });
+  if (oldKey) await storage.delete(oldKey).catch(() => undefined);
   await audit(a.userId, "exam.delete", "exam", own.exam.id);
   res.json({ ok: true });
 });
@@ -573,9 +764,12 @@ exams.delete("/:id", async (req, res) => {
 // switch, not an edit. Creator (or admin) only; staff see nothing extra.
 exams.post("/:id/release", async (req, res) => {
   const a = req as unknown as AuthedRequest;
+  if (a.role === "student") return res.status(403).json({ error: "forbidden" });
   const { released } = z.object({ released: z.boolean() }).parse(req.body);
   const own = await ownExamOrAdmin(a.userId, a.role, String(req.params.id));
   if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
+  const permErr = await creatorPermissionError(a.userId, a.role);
+  if (permErr) return res.status(403).json(permErr);
   const row = await prisma.exam.update({ where: { id: own.exam.id }, data: { resultsReleased: released } });
   await audit(a.userId, released ? "exam.release" : "exam.unrelease", "exam", row.id);
   res.json({ ok: true, resultsReleased: row.resultsReleased });
@@ -642,11 +836,16 @@ exams.get("/:id/analytics", async (req, res) => {
   const sectionOf = new Map<string, string>();
   for (const m of memberships) if (!sectionOf.has(m.studentId)) sectionOf.set(m.studentId, m.sectionId);
   const sectionName = new Map(sections.map((s) => [s.id, s.name]));
-  const pctOf = (s: (typeof graded)[number]): number | null => {
+
+  // Precompute per-sitting total marks and pct once (O(S * Q) instead of repeated inner reductions).
+  const sittingTotal = new Map<string, number>();
+  const sittingPct = new Map<string, number | null>();
+  for (const s of graded) {
     const total = s.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0);
-    if (!total) return null;
-    return (Number(s.totalGrade ?? 0) / total) * 100;
-  };
+    sittingTotal.set(s.id, total);
+    sittingPct.set(s.id, total ? (Number(s.totalGrade ?? 0) / total) * 100 : null);
+  }
+  const pctOf = (s: (typeof graded)[number]): number | null => sittingPct.get(s.id) ?? null;
 
   // Assigned vs started vs absent.
   let assigned: number | null = null;
@@ -719,77 +918,68 @@ exams.get("/:id/analytics", async (req, res) => {
     passRate: (ps.filter((p) => p >= PASS).length / ps.length) * 100,
   })).sort((x, y) => y.avg - x.avg);
 
-  // Per-question deep stats + option heatmap + void impact.
+  // Per-question deep stats + option heatmap + void impact in a single O(S * Q) pass.
   type QAgg = {
     text: string; type: string; difficulty: string; grade: number;
     attempts: number; answered: number; correct: number; awardSum: number; flagged: number;
+    voidPassDelta: number;
+    labels: Set<string>;
     picks: Map<string, number>;
   };
   const byQ = new Map<string, QAgg>();
   for (const s of graded) {
+    const total = sittingTotal.get(s.id) ?? 0;
+    const baseGrade = Number(s.totalGrade ?? 0);
+    const alreadyPassed = (sittingPct.get(s.id) ?? 0) >= PASS;
     for (const r of s.questions) {
       let g = byQ.get(r.questionId);
       if (!g) {
         g = {
           text: r.question.text, type: r.question.questionType, difficulty: r.question.difficulty,
           grade: Number(r.question.grade ?? 0), attempts: 0, answered: 0, correct: 0, awardSum: 0, flagged: 0,
+          voidPassDelta: 0,
+          labels: new Set(),
           picks: new Map(),
         };
+        if (Array.isArray(r.question.options)) {
+          for (const o of r.question.options) g.labels.add(String(o));
+        }
         byQ.set(r.questionId, g);
       }
       g.attempts++;
       if (r.selectedAnswer !== null && r.selectedAnswer !== "") {
         g.answered++;
         g.picks.set(r.selectedAnswer, (g.picks.get(r.selectedAnswer) ?? 0) + 1);
+        g.labels.add(r.selectedAnswer);
         if (r.selectedAnswer === r.question.correctAnswer) g.correct++;
       }
-      g.awardSum += Number(r.gradeAwarded ?? 0);
+      const awarded = Number(r.gradeAwarded ?? 0);
+      g.awardSum += awarded;
       if (r.isFlagged) g.flagged++;
+      // Void impact: count ONLY students who were actually sampled this question.
+      if (!alreadyPassed && total > 0 && g.grade > 0) {
+        const lifted = ((baseGrade - awarded + g.grade) / total) * 100;
+        if (lifted >= PASS) g.voidPassDelta++;
+      }
     }
   }
-  // Void impact: passers if everyone got full marks on this question.
-  const passNow = new Set(
-    graded.filter((s) => (pctOf(s) ?? 0) >= PASS).map((s) => s.id),
-  );
-  const voidDelta = new Map<string, number>();
-  for (const [qid, g] of byQ) {
-    if (!g.grade) { voidDelta.set(qid, 0); continue; }
-    let now = 0;
-    for (const s of graded) {
-      const row = s.questions.find((q) => q.questionId === qid);
-      const total = s.questions.reduce((sum, q) => sum + Number(q.question.grade ?? 0), 0);
-      if (!total) continue;
-      const lifted = (Number(s.totalGrade ?? 0) - Number(row?.gradeAwarded ?? 0) + g.grade) / total * 100;
-      if (lifted >= PASS && !passNow.has(s.id)) now++;
-    }
-    voidDelta.set(qid, now);
-  }
-  const questions = [...byQ].map(([questionId, g]) => {
-    const labels = new Set<string>();
-    for (const s of graded) {
-      const row = s.questions.find((q) => q.questionId === questionId);
-      const opts = row?.question.options;
-      if (Array.isArray(opts)) for (const o of opts) labels.add(String(o));
-    }
-    for (const k of g.picks.keys()) labels.add(k);
-    return {
-      questionId,
-      text: g.text,
-      type: g.type,
-      difficulty: g.difficulty,
-      grade: g.grade,
-      attempts: g.attempts,
-      answered: g.answered,
-      skipped: g.attempts - g.answered,
-      correct: g.correct,
-      pctCorrect: g.attempts ? Math.round((g.correct / g.attempts) * 100) : 0,
-      answerRate: g.attempts ? Math.round((g.answered / g.attempts) * 100) : 0,
-      avgAward: g.attempts ? Number((g.awardSum / g.attempts).toFixed(2)) : 0,
-      flagged: g.flagged,
-      voidPassDelta: voidDelta.get(questionId) ?? 0,
-      options: [...labels].map((label) => ({ label, picks: g.picks.get(label) ?? 0 })),
-    };
-  }).sort((x, y) => x.pctCorrect - y.pctCorrect);
+  const questions = [...byQ].map(([questionId, g]) => ({
+    questionId,
+    text: g.text,
+    type: g.type,
+    difficulty: g.difficulty,
+    grade: g.grade,
+    attempts: g.attempts,
+    answered: g.answered,
+    skipped: g.attempts - g.answered,
+    correct: g.correct,
+    pctCorrect: g.attempts ? Math.round((g.correct / g.attempts) * 100) : 0,
+    answerRate: g.attempts ? Math.round((g.answered / g.attempts) * 100) : 0,
+    avgAward: g.attempts ? Number((g.awardSum / g.attempts).toFixed(2)) : 0,
+    flagged: g.flagged,
+    voidPassDelta: g.voidPassDelta,
+    options: [...g.labels].map((label) => ({ label, picks: g.picks.get(label) ?? 0 })),
+  })).sort((x, y) => x.pctCorrect - y.pctCorrect);
 
   // Previous-term memory: same subject, latest other term with submissions.
   let prevTerm: { termName: string; avg: number; passRate: number; submitted: number } | null = null;

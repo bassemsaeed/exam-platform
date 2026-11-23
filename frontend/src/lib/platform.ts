@@ -36,6 +36,11 @@ export interface Exam extends Entity {
   durationMinutes: number;
   requiresCode?: boolean;
   hasAccessCode?: boolean;
+  hasInstructions?: boolean;
+  instructionsText?: string | null;
+  instructionsMediaUrl?: string | null;
+  instructionsMediaType?: "audio" | "video" | null;
+  instructionsRequireCompletion?: boolean;
   difficultyMix?: Record<string, number>;
   rejectionReason?: string;
 }
@@ -56,11 +61,15 @@ export interface SittingQuestion extends Question {
 }
 export interface Sitting {
   entryToken?: string;
+  title?: string;
   entriesUsed?: number;
   resultsReleased?: boolean;
   notesEnabled?: boolean;
   notesForDoctorEnabled?: boolean;
   examToolsEnabled?: boolean;
+  instructionsText?: string | null;
+  instructionsMediaUrl?: string | null;
+  instructionsMediaType?: "audio" | "video" | null;
   notes?: string;
   notesForDoctor?: string;
   maxReentries?: number;

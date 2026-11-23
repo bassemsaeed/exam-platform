@@ -234,6 +234,9 @@ adminImports.post("/commit", rateLimit(30, 60_000, "admin-import:commit"), async
           where: { username: r.username },
           select: { id: true, role: true, email: true, isActive: true },
         });
+        if (existing && existing.role === "admin") {
+          throw new Error("admin accounts cannot be modified via import");
+        }
         const targetEmail = r.email ? r.email.toLowerCase() : (existing?.email ?? email.toLowerCase());
         const user = existing
           ? await tx.user.update({
@@ -253,23 +256,28 @@ adminImports.post("/commit", rateLimit(30, 60_000, "admin-import:commit"), async
           update: { password: r.passwordHash },
           create: { id: `acc-${user.id}`, providerId: "credential", accountId: user.id, userId: user.id, password: r.passwordHash },
         });
+        // Re-importing resets the user's password (and possibly role): revoke
+        // existing sessions so old credentials/roles cannot linger.
+        if (existing) {
+          await tx.session.deleteMany({ where: { userId: existing.id } });
+        }
         if (r.role === "student") {
           await tx.enrollment.deleteMany({ where: { studentId: user.id, termId: term.id } });
           if (r.subjects.length) {
-            const subs = await tx.subject.findMany({ where: { code: { in: r.subjects } }, select: { id: true } });
-            await tx.enrollment.createMany({ data: subs.map((s) => ({ studentId: user.id, subjectId: s.id, termId: term.id })) });
+            const subs = await tx.subject.findMany({ where: { code: { in: [...new Set(r.subjects)] } }, select: { id: true } });
+            await tx.enrollment.createMany({ data: subs.map((s) => ({ studentId: user.id, subjectId: s.id, termId: term.id })), skipDuplicates: true });
           }
         } else if (r.role === "doctor") {
           await tx.doctorAssignment.deleteMany({ where: { doctorId: user.id, termId: term.id } });
           if (r.taught.length) {
-            const subs = await tx.subject.findMany({ where: { code: { in: r.taught } }, select: { id: true } });
-            await tx.doctorAssignment.createMany({ data: subs.map((s) => ({ doctorId: user.id, subjectId: s.id, termId: term.id })) });
+            const subs = await tx.subject.findMany({ where: { code: { in: [...new Set(r.taught)] } }, select: { id: true } });
+            await tx.doctorAssignment.createMany({ data: subs.map((s) => ({ doctorId: user.id, subjectId: s.id, termId: term.id })), skipDuplicates: true });
           }
         } else if (r.role === "ta") {
           for (const s of r.sections) {
             const sub = await tx.subject.findUnique({ where: { code: s.code }, select: { id: true } });
             if (!sub) continue;
-            for (const name of s.names) {
+            for (const name of [...new Set(s.names)]) {
               const sec = await tx.section.findUnique({
                 where: { subjectId_termId_name: { subjectId: sub.id, termId: term.id, name } },
                 select: { id: true, taId: true },

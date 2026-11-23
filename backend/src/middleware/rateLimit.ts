@@ -5,6 +5,7 @@ import { redis } from "../lib/redis.js";
 // Token bucket: Redis cluster-wide when REDIS_URL is set, in-process Map
 // otherwise (single-server dev). Keyed by authenticated user when known: an
 // entire computer lab behind one NAT IP must not share a single bucket.
+const MAX_BUCKETS = 50_000;
 const buckets = new Map<string, { count: number; reset: number }>();
 
 // Evict expired buckets so the map can't grow with unique ip:path keys.
@@ -44,6 +45,10 @@ export function rateLimit(max: number, windowMs: number, scope?: string) {
     const now = Date.now();
     const b = buckets.get(key);
     if (!b || now > b.reset) {
+      if (!b && buckets.size >= MAX_BUCKETS) {
+        const oldest = buckets.keys().next().value;
+        if (oldest !== undefined) buckets.delete(oldest);
+      }
       buckets.set(key, { count: 1, reset: now + windowMs });
       return next();
     }

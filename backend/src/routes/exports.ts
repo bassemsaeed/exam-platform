@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { Router, type Router as RouterType } from "express";
 import { z } from "zod";
 import { audit } from "../lib/audit.js";
@@ -69,7 +69,9 @@ exportsJobs.post("/", async (req, res) => {
       }
     } else if (a.role === "ta") {
       // Default a TA export to their own sections of this exam's subject+term.
+      // Never allow an empty sectionIds list to fall through as unfiltered!
       sectionIds = (await prisma.section.findMany({ where: { taId: a.userId, subjectId, termId }, select: { id: true } })).map((s) => s.id);
+      if (!sectionIds.length) return res.status(403).json({ error: "no sections here" });
     }
   } else {
     if (!termId) return res.status(422).json({ error: "termId required for all scope" });
@@ -156,9 +158,11 @@ exportsJobs.get("/:id/download", async (req, res) => {
       return res.redirect(row.fileUrl);
     }
     const key = ((row.params ?? {}) as { fileKey?: string }).fileKey;
-    if (!key || !/^[A-Za-z0-9/_.-]+$/.test(key)) return res.status(404).json({ error: "file missing" });
-    const abs = resolve(join(localUploadsDir(), key));
-    if (!abs.startsWith(resolve(localUploadsDir()))) return res.status(400).json({ error: "bad file key" });
+    if (!key || !/^[A-Za-z0-9/_.-]+$/.test(key) || key.includes("..")) return res.status(404).json({ error: "file missing" });
+    const root = resolve(localUploadsDir());
+    const abs = resolve(join(root, key));
+    const rel = relative(root, abs);
+    if (rel.startsWith("..") || isAbsolute(rel)) return res.status(400).json({ error: "bad file key" });
     res.setHeader("Content-Type", mime);
     res.setHeader("Content-Disposition", `attachment; filename="export-${row.id}.${ext}"`);
     // Audit only after the local stream actually finishes: a missing file or

@@ -153,10 +153,8 @@ app.get(
     if (!me) return res.status(401).json({ error: "unauthenticated" });
     // Current session expiry so the client can warn before a mid-exam
     // logout. updateAge (auth.ts) slides it on getSession calls while active.
-    const session = await auth.api
-      .getSession({ headers: fromNodeHeaders(req.headers) })
-      .catch(() => null);
-    res.json({ ...me, sessionExpiresAt: session?.session?.expiresAt ?? null });
+    // Reuses the session already loaded by requireAuth (no duplicate DB query).
+    res.json({ ...me, sessionExpiresAt: a.sessionExpiresAt ?? null });
   },
 );
 app.use("/api/v1/admin/users", adminUsers);
@@ -178,25 +176,32 @@ app.use("/api/v1/exports", exportsJobs);
 app.use("/api/v1/student", student);
 
 // Local-disk image serving (single-server dev only). S3 mode needs no route.
-// Auth-gated (V-04): question diagrams must never be anonymously fetchable by
-// guessing /uploads/questions/<code>/<hash>-*.png. Any logged-in user may
-// load them (students need them mid-exam); outsiders get 401 before static.
-// Gradebook exports under /uploads/exports/* are strictly blocked here and
-// served only through the ownership-checked GET /api/v1/exports/:id/download.
+// Auth-gated (V-04): question diagrams must never be anonymously fetchable.
+// Mounted strictly on /uploads/questions -> <uploads>/questions so gradebook
+// exports under <uploads>/exports are structurally unreachable via static
+// middleware (closes URL-encoding / slash-normalization bypasses on req.path).
 if (isLocalStorage()) {
   app.use(
-    "/uploads",
+    "/uploads/questions",
     requireAuth,
-    (req, res, next) => {
-      if (/^\/exports(?:\/|$)/i.test(req.path)) {
-        return res.status(403).json({ error: "forbidden" });
-      }
-      next();
-    },
-    express.static(localUploadsDir(), {
+    express.static(path.join(localUploadsDir(), "questions"), {
       maxAge: "1h",
       setHeaders: (res) => res.setHeader("X-Content-Type-Options", "nosniff"),
     }),
+    (_req, res) => res.status(404).json({ error: "not found" }),
+  );
+  app.use(
+    "/uploads/instructions",
+    requireAuth,
+    express.static(path.join(localUploadsDir(), "instructions"), {
+      maxAge: "1h",
+      acceptRanges: true,
+      setHeaders: (res) => res.setHeader("X-Content-Type-Options", "nosniff"),
+    }),
+    (_req, res) => res.status(404).json({ error: "not found" }),
+  );
+  app.use("/uploads", requireAuth, (_req, res) =>
+    res.status(403).json({ error: "forbidden" }),
   );
 }
 

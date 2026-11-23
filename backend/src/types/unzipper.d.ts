@@ -3,6 +3,7 @@ declare module "unzipper" {
     path: string;
     type: string;
     buffer(): Promise<Buffer>;
+    stream(): NodeJS.ReadableStream;
   }
   export interface ZipDirectory {
     files: ZipEntry[];

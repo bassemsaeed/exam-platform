@@ -7,6 +7,7 @@ import { prisma } from "../lib/prisma.js";
 export interface AuthedRequest extends Request {
   userId: string;
   role: Role;
+  sessionExpiresAt?: Date | string | null;
 }
 
 // Session via Better Auth (cookie). Rejects inactive users and revokes any
@@ -39,6 +40,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   const authed = req as unknown as AuthedRequest;
   authed.userId = me.id;
   authed.role = me.role;
+  authed.sessionExpiresAt = session.session?.expiresAt ?? null;
   next();
 }
 

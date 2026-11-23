@@ -30,7 +30,10 @@ if (!/^[0-9a-fA-F]{64}$/.test(encHex)) throw new Error("ENCRYPTION_KEY must be 3
 
 export const config = {
   port: num("PORT", 4000),
-  frontendOrigins: str("FRONTEND_URL", "http://localhost:5173").split(","),
+  frontendOrigins: str("FRONTEND_URL", "http://localhost:5173")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean),
   databaseUrl: process.env.DATABASE_URL ?? "", // validated in prisma.ts with its own message
   authSecret: secret,
   authUrl: str("BETTER_AUTH_URL", "http://localhost:4000"),
@@ -82,9 +85,9 @@ export const config = {
   // like "loopback" plus IPs/CIDRs). Direct-client XFF is ignored, so rotating
   // the header cannot rotate rate-limit buckets. Production behind an LB must
   // list the LB here instead of trusting hop counts.
-  proxyTrust: ((): string[] | number => {
+  proxyTrust: ((): string[] => {
     const ips = str("TRUSTED_PROXY_IPS", "");
-    return ips ? ips.split(",").map((s) => s.trim()).filter(Boolean) : num("TRUST_PROXY", 1);
+    return ips ? ips.split(",").map((s) => s.trim()).filter(Boolean) : ["loopback"];
   })(),
   // Same discipline for Better Auth's own limiter (CIDR syntax there).
   authProxyCidrs: str("AUTH_TRUSTED_PROXY_CIDRS", "127.0.0.1/32,::1/128")

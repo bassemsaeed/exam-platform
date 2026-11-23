@@ -10,6 +10,7 @@ import {
   ChevronLeft,
   ChevronRight,
   ShieldCheck,
+  FileText,
 } from "lucide-react";
 import type { SessionUser } from "../lib/api";
 import { authClient } from "../lib/auth-client";
@@ -23,20 +24,24 @@ import {
 import { apiUrl, sebHeaders } from "../lib/seb";
 import { ApiError } from "../lib/api";
 import { ExamTools } from "../components/ExamTools";
-import { Feedback, Confirm, PageTitle } from "../components/ui";
+import { BriefingPlayer } from "../components/Instructions";
+import { Feedback, Confirm, Dialog, PageTitle } from "../components/ui";
 export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity: (path: string | null) => void }) {
   const t = useT();
   const { id } = useParams();
   // Server-issued entry token: persisted per exam so refreshes/resumes present
   // the latest token the server issued (rotation consumes re-entry budget).
   const tokenKey = `entry-token-${id}`;
-  const [entryToken, setEntryToken] = useState(() => {
-    try { return sessionStorage.getItem(tokenKey) ?? crypto.randomUUID(); }
+  const loadToken = (k: string) => {
+    try { return sessionStorage.getItem(k) ?? crypto.randomUUID(); }
     catch { return crypto.randomUUID(); }
-  });
+  };
+  const [entryToken, setEntryToken] = useState(() => loadToken(tokenKey));
   const [sitting, setSitting] = useState<Sitting | null>(null);
   const [code, setCode] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
+  const [briefingDone, setBriefingDone] = useState(false);
+  const [showBriefingModal, setShowBriefingModal] = useState(false);
 
   const [index, setIndex] = useState(0);
   const [remaining, setRemaining] = useState(0);
@@ -84,10 +89,12 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
   const latest = useRef(sitting);
   latest.current = sitting;
   const cursor = useRef("");
-  const submitKeyRef = useRef<string | null>(null);
-  if (submitKeyRef.current === null) {
+  // Mutations are serialized so a slow older answer cannot overwrite a newer choice.
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
+  const flushToolsRef = useRef<(() => Promise<void>) | null>(null);
+  const loadSubmitKey = (examId: string | undefined): string => {
     try {
-      const storageKey = `submit-key-${id}`;
+      const storageKey = `submit-key-${examId}`;
       let existing: string | null = null;
       try {
         existing = sessionStorage.getItem(storageKey);
@@ -102,12 +109,21 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
           /* session-only fallback */
         }
       }
-      submitKeyRef.current = existing;
+      return existing;
     } catch {
-      submitKeyRef.current = crypto.randomUUID();
+      return crypto.randomUUID();
     }
+  };
+  const submitKeyRef = useRef<{ examId: string | undefined; key: string }>({
+    examId: id,
+    key: loadSubmitKey(id),
+  });
+  if (submitKeyRef.current.examId !== id) {
+    submitKeyRef.current = { examId: id, key: loadSubmitKey(id) };
   }
-  const submitKey = submitKeyRef as { current: string };
+  useEffect(() => {
+    setEntryToken(loadToken(`entry-token-${id}`));
+  }, [id]);
   const start = useMutation({
     mutationFn: () =>
       request<Sitting>(`/api/v1/student/exams/${id}/start`, "POST", {
@@ -133,8 +149,11 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
     },
   });
   const finish = useMutation({
-    mutationFn: () =>
-      request<{
+    mutationFn: async () => {
+      // Drain in-flight answer saves and any unsaved notes before finalizing.
+      await queue.current.catch(() => {});
+      await flushToolsRef.current?.().catch(() => {});
+      return request<{
         totalGrade: number | null;
         totalMarks?: number | null;
         status: string;
@@ -143,8 +162,9 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
         `/api/v1/student/exams/${id}/submit`,
         "POST",
         {},
-        { "Idempotency-Key": submitKey.current },
-      ),
+        { "Idempotency-Key": submitKeyRef.current.key },
+      );
+    },
     onSuccess: (r) => {
       setResult(r);
       onActivity(null);
@@ -215,17 +235,14 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
       ),
     onError: setError,
   });
-  // Mutations are serialized so a slow older answer cannot overwrite a newer choice.
-  const queue = useRef<Promise<unknown>>(Promise.resolve());
   const choose = useCallback(
     (questionId: string, selectedAnswer: string | null) => {
-      // Refresh-proof drafts: every optimistic answer lands in sessionStorage
-      // first, so a reload replays whatever the server never confirmed.
+      // Refresh-proof drafts: every optimistic answer (including explicit clears)
+      // lands in sessionStorage first, so a reload replays whatever the server never confirmed.
       try {
         const raw = sessionStorage.getItem(`pending-answers-${user.id}-${id}`);
         const draft = raw ? (JSON.parse(raw) as Record<string, string | null>) : {};
-        if (selectedAnswer === null) delete draft[questionId];
-        else draft[questionId] = selectedAnswer;
+        draft[questionId] = selectedAnswer;
         sessionStorage.setItem(`pending-answers-${user.id}-${id}`, JSON.stringify(draft));
       } catch {
         /* memory only */
@@ -287,6 +304,12 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
           setHbError(null);
         })
         .catch((err) => {
+          if (err instanceof ApiError && err.status === 409) {
+            onActivity(null);
+            setNotice(err.message);
+            if (!finish.isPending) finish.mutate();
+            return;
+          }
           setHbError(err);
           setNotice(
             err instanceof Error ? err.message : "Connection check failed.",
@@ -305,11 +328,11 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
     };
   }, [!!sitting, !!result, id]);
   useEffect(() => {
-    // Timeout auto-submit: submit even with unanswered questions â€” the server
+    // Timeout auto-submit: submit even with unanswered questions — the server
     // finalizes partial attempts. Manual button still requires all answered.
-    if (sitting && remaining === 0 && !result && !finish.isPending)
+    if (sitting && remaining === 0 && !result && !finish.isPending && !finish.isError)
       finish.mutate();
-  }, [remaining, !!sitting, !!result, finish.isPending]);
+  }, [remaining, !!sitting, !!result, finish.isPending, finish.isError]);
   useEffect(() => {
     // Auto-submit retry: reset the error state after 5s so the effect above retries.
     if (!finish.isError) return;
@@ -368,11 +391,22 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
               } catch {
                 continue;
               }
-              setNotice(String(payload.message ?? payload.reason ?? type));
-              if (type === "closed" || type === "voided")
+              if (type === "closed") {
+                onActivity(null);
                 setNotice(
                   "This exam has been closed. The server will finalize your attempt.",
                 );
+              } else if (type === "voided") {
+                setNotice(
+                  String(
+                    payload.message ??
+                      payload.reason ??
+                      "A question was compensated by your instructor. Your exam is still active.",
+                  ),
+                );
+              } else {
+                setNotice(String(payload.message ?? payload.reason ?? type));
+              }
             }
           }
         }
@@ -404,13 +438,13 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
     !!readiness.query.data.sebRequired &&
     !readiness.query.data.sebVerified;
   const unsaved = Object.keys(retryAnswers).length;
-  // Keyboard-first runner: 1-4/A-D answer, arrows move, ? nothing stolen
-  // while typing. Disabled once time is up or a dialog is open.
+  // Keyboard-first runner: 1-4/A-D answer, arrows move, nothing stolen
+  // while typing or using the calculator. Disabled once time is up or a dialog is open.
   useEffect(() => {
     if (!sitting || result || confirm) return;
     const onKey = (e: KeyboardEvent) => {
-      const el = e.target as HTMLElement;
-      if (/INPUT|TEXTAREA|SELECT/.test(el.tagName)) return;
+      const el = e.target as HTMLElement | null;
+      if (el && (/INPUT|TEXTAREA|SELECT/.test(el.tagName) || el.closest(".exam-calculator"))) return;
       const cur = latest.current?.questions[index];
       if (e.key === "ArrowRight") {
         if (sitting && index < sitting.questions.length - 1)
@@ -461,122 +495,182 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
         </section>
       </>
     );
-  if (!sitting)
+  if (!sitting) {
+    const rd = readiness.query.data;
+    const hasBriefing = Boolean(rd?.instructionsText?.trim() || rd?.instructionsMediaUrl);
+    const needsMediaGate = Boolean(
+      !rd?.resumable &&
+        rd?.instructionsRequireCompletion &&
+        rd?.instructionsMediaUrl &&
+        !briefingDone,
+    );
+    const canStart = Boolean(
+      readiness.online &&
+        rd?.ready &&
+        (rd.resumable || acknowledged) &&
+        !needsMediaGate &&
+        (rd.resumable || !rd.requiresCode || code.trim()),
+    );
     return (
       <>
         <PageTitle
-          title={t("Before you begin")}
-          description={t(
-            "Start a new attempt or resume your existing session.",
-          )}
+          title={rd?.title?.trim() || t("Before you begin")}
+          description={
+            rd
+              ? `${rd.subject.code} · ${rd.subject.name} · ${rd.durationMinutes} ${t("minutes")}`
+              : t("Start a new attempt or resume your existing session.")
+          }
         />
-        <section className="panel start-panel">
-          <Clock size={34} />
-          <h2>{t("Ready for your assessment?")}</h2>
-          <p>
-            {t(
-              " The timer starts when the server opens your attempt. Answers save as you go. Returning here resumes the same attempt. ",
-            )}
-          </p>
-          <p className="subtle">
-            {previewMode
-              ? t(
-                  "This is a demo assessment. No university results are affected.",
-                )
-              : readiness.query.data?.sebRequired
-                ? t(
-                    "This assessment requires Safe Exam Browser. Open it from inside SEB to begin.",
-                  )
-                : t(
-                    "You can open and take this exam in your normal browser. Follow your exam rules and instructions.",
-                  )}
-          </p>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (
-                readiness.online &&
-                readiness.query.data?.ready &&
-                (readiness.query.data.resumable || acknowledged)
-              )
-                start.mutate();
-            }}
-          >
-            {sebLocked ? (
-              <div className="seb-locked" role="alert">
-                <ShieldCheck size={34} />
-                <h3>{t("Safe Exam Browser required")}</h3>
+        <div className={`lobby-shell ${hasBriefing && !sebLocked ? "has-briefing" : ""}`}>
+          {hasBriefing && !sebLocked && rd && (
+            <div className="lobby-briefing-col">
+              <BriefingPlayer
+                text={rd.instructionsText}
+                mediaUrl={rd.instructionsMediaUrl}
+                mediaType={rd.instructionsMediaType}
+                requireCompletion={Boolean(!rd.resumable && rd.instructionsRequireCompletion)}
+                completed={briefingDone}
+                onComplete={() => setBriefingDone(true)}
+              />
+              <section className="panel exam-rules">
+                <h3>{t("Exam rules")}</h3>
+                {rd.maxReentries !== undefined && (
+                  <p>
+                    {rd.entriesUsed
+                      ? t("You have used {0} of {1} entries. Refreshing or reopening the exam counts as a re-entry.", {
+                          "0": Math.min(rd.entriesUsed, rd.maxReentries + 1),
+                          "1": rd.maxReentries + 1,
+                        })
+                      : t("Maximum re-entries: {0}. Refreshing or reopening the exam counts as a re-entry.", {
+                          "0": rd.maxReentries,
+                        })}
+                  </p>
+                )}
                 <p>
                   {t(
-                    "This assessment opens only in Safe Exam Browser. Install it with your university configuration, then reopen this page from inside it — your attempt, timer and saved answers pick up where they belong.",
+                    "The timer continues if you leave or lose connection. Answer every question before submitting. Your final submission cannot be changed.",
                   )}
                 </p>
-                <button
-                  type="button"
-                  className="secondary"
-                  onClick={() => void readiness.query.refetch()}
-                >
-                  {t("I opened it in SEB — recheck")}
-                </button>
-              </div>
-            ) : (
-            <>
-            <ReadinessChecklist {...readiness} user={user} />
-            <div className="exam-rules">
-              {readiness.query.data?.maxReentries !== undefined && <p>{readiness.query.data.entriesUsed ? t("You have used {0} of {1} entries. Refreshing or reopening the exam counts as a re-entry.", { "0": Math.min(readiness.query.data.entriesUsed, readiness.query.data.maxReentries + 1), "1": readiness.query.data.maxReentries + 1 }) : t("Maximum re-entries: {0}. Refreshing or reopening the exam counts as a re-entry.", { "0": readiness.query.data.maxReentries })}</p>}
-              <p className="subtle">{t("Question and answer order is shuffled uniquely for every student.")}</p>
-              <h3>{t("Exam rules")}</h3>
-              <p>
-                {t(
-                  "The timer continues if you leave or lose connection. Answer every question before submitting. Your final submission cannot be changed.",
-                )}
-              </p>
+                <p className="subtle">
+                  {t("Question and answer order is shuffled uniquely for every student.")}
+                </p>
+              </section>
             </div>
-            {!readiness.query.data?.resumable && (
-              <label className="inline-check">
-                <input
-                  type="checkbox"
-                  checked={acknowledged}
-                  onChange={(e) => setAcknowledged(e.target.checked)}
-                />
-                {t("I understand the exam rules")}
-              </label>
-            )}
-            <div className="field">
-              <label htmlFor="entry-code">
-                {t("Entry code (if required)")}
-              </label>
-              <input
-                id="entry-code"
-                value={code}
-                onChange={(e) => setCode(e.target.value)}
-                autoComplete="off"
-              />
-            </div>
-            <Feedback error={start.error} />
-            <button
-              className="primary"
-              disabled={
-                start.isPending ||
-                !readiness.online ||
-                !readiness.query.data?.ready ||
-                (!readiness.query.data.resumable && !acknowledged) ||
-                (!readiness.query.data.resumable &&
-                  readiness.query.data.requiresCode &&
-                  !code.trim())
-              }
+          )}
+
+          <section className="panel start-panel">
+            <Clock size={30} />
+            <h2>{t("Ready for your assessment?")}</h2>
+            <p>
+              {t(
+                "The timer starts when the server opens your attempt. Answers save as you go. Returning here resumes the same attempt.",
+              )}
+            </p>
+            <p className="subtle">
+              {previewMode
+                ? t("This is a demo assessment. No university results are affected.")
+                : rd?.sebRequired
+                  ? t("This assessment requires Safe Exam Browser. Open it from inside SEB to begin.")
+                  : t("You can open and take this exam in your normal browser. Follow your exam rules and instructions.")}
+            </p>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (canStart) start.mutate();
+              }}
             >
-              {start.isPending ? t("Opening exam…") : t("Start or resume exam")}
-            </button>
-            </>
-            )}
-          </form>
-          <Link className="back-link" to="/exams">
-            {t(" \u2190 Back to exams ")}
-          </Link>
-        </section>
+              {sebLocked ? (
+                <div className="seb-locked" role="alert">
+                  <ShieldCheck size={34} />
+                  <h3>{t("Safe Exam Browser required")}</h3>
+                  <p>
+                    {t(
+                      "This assessment opens only in Safe Exam Browser. Install it with your university configuration, then reopen this page from inside it — your attempt, timer and saved answers pick up where they belong.",
+                    )}
+                  </p>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => void readiness.query.refetch()}
+                  >
+                    {t("I opened it in SEB — recheck")}
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <ReadinessChecklist {...readiness} user={user} />
+                  {!hasBriefing && (
+                    <div className="exam-rules">
+                      {rd?.maxReentries !== undefined && (
+                        <p>
+                          {rd.entriesUsed
+                            ? t("You have used {0} of {1} entries. Refreshing or reopening the exam counts as a re-entry.", {
+                                "0": Math.min(rd.entriesUsed, rd.maxReentries + 1),
+                                "1": rd.maxReentries + 1,
+                              })
+                            : t("Maximum re-entries: {0}. Refreshing or reopening the exam counts as a re-entry.", {
+                                "0": rd.maxReentries,
+                              })}
+                        </p>
+                      )}
+                      <p className="subtle">
+                        {t("Question and answer order is shuffled uniquely for every student.")}
+                      </p>
+                      <h3>{t("Exam rules")}</h3>
+                      <p>
+                        {t(
+                          "The timer continues if you leave or lose connection. Answer every question before submitting. Your final submission cannot be changed.",
+                        )}
+                      </p>
+                    </div>
+                  )}
+                  {!rd?.resumable && (
+                    <label className="inline-check">
+                      <input
+                        type="checkbox"
+                        checked={acknowledged}
+                        onChange={(e) => setAcknowledged(e.target.checked)}
+                      />
+                      {t("I understand the exam rules")}
+                    </label>
+                  )}
+                  {rd?.requiresCode && !rd.resumable && (
+                    <div className="field">
+                      <label htmlFor="entry-code">{t("Entry code")}</label>
+                      <input
+                        id="entry-code"
+                        value={code}
+                        onChange={(e) => setCode(e.target.value)}
+                        placeholder={t("Enter the assessment entry code")}
+                        autoComplete="off"
+                      />
+                    </div>
+                  )}
+                  {needsMediaGate && (
+                    <p className="subtle briefing-gate-note" role="status">
+                      {rd?.instructionsMediaType === "video"
+                        ? t("Finish watching the instructor's video briefing to enable Start.")
+                        : t("Finish listening to the instructor's voice briefing to enable Start.")}
+                    </p>
+                  )}
+                  <Feedback error={start.error} />
+                  <button className="primary" disabled={start.isPending || !canStart}>
+                    {start.isPending ? t("Opening exam…") : t("Start or resume exam")}
+                  </button>
+                </>
+              )}
+            </form>
+            <Link className="back-link" to="/exams">
+              {t(" \u2190 Back to exams ")}
+            </Link>
+          </section>
+        </div>
       </>
     );
+  }
+  const hasSittingBriefing = Boolean(
+    sitting.instructionsText?.trim() || sitting.instructionsMediaUrl,
+  );
   return (
     <>
       {sessionMs !== null && sessionMs < 20 * 60 * 1000 && (
@@ -595,30 +689,29 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
           </button>
         </div>
       )}
-      <div className="runner-heading">
-        <div>
-          <span className="page-kicker">{t("ASSESSMENT IN PROGRESS")}</span>
-          <h1>
-            {t(" Question ")}
-            {index + 1}
-            {t(" of ")}
-            {sitting.questions.length}
-          </h1>
-          <p>
-            {answered}
-            {t(" answered \u00B7")}{" "}
-            {sitting.questions.filter((q) => q.isFlagged).length}
-            {t(" flagged ")}
-          </p>
-          {sitting.maxReentries !== undefined &&
-            sitting.entriesUsed !== undefined && (
-              <p className="subtle" role="status">
-                {t("Entry {0} of {1}", {
+      <div className="runner-heading sticky">
+        <div className="runner-heading-main">
+          <span className="page-kicker">
+            {sitting.title?.trim() || t("ASSESSMENT IN PROGRESS")}
+          </span>
+          <div className="runner-heading-row">
+            <h1>
+              {t(" Question ")}
+              {index + 1}
+              {t(" of ")}
+              {sitting.questions.length}
+            </h1>
+            <span className="subtle">
+              {answered}/{sitting.questions.length} {t("answered")} ·{" "}
+              {sitting.questions.filter((q) => q.isFlagged).length} {t("flagged")}
+              {sitting.maxReentries !== undefined &&
+                sitting.entriesUsed !== undefined &&
+                ` · ${t("Entry {0} of {1}", {
                   "0": Math.min(sitting.entriesUsed, sitting.maxReentries + 1),
                   "1": sitting.maxReentries + 1,
-                })}
-              </p>
-            )}
+                })}`}
+            </span>
+          </div>
           <div
             className="run-progress"
             role="progressbar"
@@ -633,18 +726,39 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
               }}
             />
           </div>
-          <p className="subtle kbd-hint">
-            {t("Tip: press 1\u20134 to answer, \u2190 \u2192 to move.")}
-          </p>
         </div>
-        <div className={`timer ${remaining < 300 ? "urgent" : ""}`}>
-          <Clock size={19} />
-          {Math.floor(remaining / 60)
-            .toString()
-            .padStart(2, "0")}
-          :{(remaining % 60).toString().padStart(2, "0")}
+        <div className="runner-heading-right">
+          {hasSittingBriefing && (
+            <button
+              type="button"
+              className="secondary runner-briefing-btn"
+              onClick={() => setShowBriefingModal(true)}
+            >
+              <FileText size={15} /> {t("Instructions")}
+            </button>
+          )}
+          <div className={`timer ${remaining < 300 ? "urgent" : ""}`}>
+            <Clock size={18} />
+            {Math.floor(remaining / 60)
+              .toString()
+              .padStart(2, "0")}
+            :{(remaining % 60).toString().padStart(2, "0")}
+          </div>
         </div>
       </div>
+      {showBriefingModal && (
+        <Dialog
+          title={t("Instructor instructions")}
+          onClose={() => setShowBriefingModal(false)}
+        >
+          <BriefingPlayer
+            text={sitting.instructionsText}
+            mediaUrl={sitting.instructionsMediaUrl}
+            mediaType={sitting.instructionsMediaType}
+            compact
+          />
+        </Dialog>
+      )}
       {notice && (
         <div className="info-banner" role="status">
           {t(notice)}
@@ -710,7 +824,7 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
                 {q.options.map((o, i) => (
                   <label
                     className={q.selectedAnswer === o ? "selected" : ""}
-                    key={o}
+                    key={`${q.questionId}-${i}`}
                   >
                     <input
                       type="radio"
@@ -781,7 +895,7 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
               "Answer every question before submitting. You cannot change your answers afterward.",
             )}
           </p>
-          {(sitting.examToolsEnabled !== false || sitting.notesEnabled || sitting.notesForDoctorEnabled) && <ExamTools userId={user.id} examId={id!} sitting={sitting} disabled={remaining === 0 || finish.isPending} />}
+          {(sitting.examToolsEnabled !== false || sitting.notesEnabled || sitting.notesForDoctorEnabled) && <ExamTools userId={user.id} examId={id!} sitting={sitting} disabled={remaining === 0 || finish.isPending} flushRef={flushToolsRef} />}
         </aside>
       </div>
       {confirm && (

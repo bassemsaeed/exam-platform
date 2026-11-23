@@ -6,6 +6,8 @@ import {
   ArrowRight,
   Check,
   Clock,
+  FileText,
+  KeyRound,
   Layers,
   ListChecks,
   Minus,
@@ -13,7 +15,7 @@ import {
   Settings2,
   Users,
 } from "lucide-react";
-import type { SessionUser } from "../lib/api";
+import { api, type SessionUser } from "../lib/api";
 import {
   label,
   rowsOf,
@@ -28,6 +30,7 @@ import {
 import { apiUrl } from "../lib/seb";
 import { Badge, Dialog, Empty, Feedback, Loading, PageTitle } from "../components/ui";
 import { Combo, DateTimeField, MultiPicker, Sheet } from "../components/builder";
+import { InstructionsEditor } from "../components/Instructions";
 
 const STEPS = ["Settings", "Audience", "Blueprint", "Review"];
 
@@ -141,9 +144,16 @@ export function ExamWizard({ user }: { user: SessionUser }) {
   const [purpose, setPurpose] = useState<"midterm" | "quiz">(canMidterm ? "midterm" : "quiz");
   const [title, setTitle] = useState("");
   const [sebRequired, setSebRequired] = useState(false);
+  const [accessCode, setAccessCode] = useState("");
+  const [instructionsText, setInstructionsText] = useState("");
+  const [instructionsRequireCompletion, setInstructionsRequireCompletion] = useState(false);
+  const [pendingMediaFile, setPendingMediaFile] = useState<File | null>(null);
+  const [pendingMediaType, setPendingMediaType] = useState<"audio" | "video" | null>(null);
+  const [uploadingMedia, setUploadingMedia] = useState(false);
   const [createdWarn, setCreatedWarn] = useState<{ id: string; warnings: string[] } | null>(null);
   const [notesEnabled, setNotesEnabled] = useState(false);
-  const [resultsReleased, setResultsReleased] = useState(false);  const [examToolsEnabled, setExamToolsEnabled] = useState(true);
+  const [resultsReleased, setResultsReleased] = useState(false);
+  const [examToolsEnabled, setExamToolsEnabled] = useState(true);
   const [notesForDoctorEnabled, setNotesForDoctorEnabled] = useState(false);
   const [maxReentries, setMaxReentries] = useState(3);
   const [startLocal, setStartLocal] = useState("");
@@ -163,7 +173,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
     const d = loadDraft(user.id);
     if (!d) return;
     if (
-      !d.subject && !d.startLocal && !d.endLocal && !d.title &&
+      !d.subject && !d.startLocal && !d.endLocal && !d.title && !d.instructionsText &&
       !(Array.isArray(d.picked) && d.picked.length) &&
       !(Array.isArray(d.sectionSel) && d.sectionSel.length) &&
       !(Array.isArray(d.pickedStudents) && d.pickedStudents.length)
@@ -179,6 +189,8 @@ export function ExamWizard({ user }: { user: SessionUser }) {
     if (d.purpose === "midterm" || d.purpose === "quiz") setPurpose(canMidterm ? d.purpose : "quiz");
     if (typeof d.title === "string") setTitle(d.title);
     if (typeof d.sebRequired === "boolean") setSebRequired(d.sebRequired);
+    if (typeof d.instructionsText === "string") setInstructionsText(d.instructionsText);
+    if (typeof d.instructionsRequireCompletion === "boolean") setInstructionsRequireCompletion(d.instructionsRequireCompletion);
     if (typeof d.startLocal === "string") setStartLocal(d.startLocal);
     if (typeof d.endLocal === "string") setEndLocal(d.endLocal);
     if (typeof d.scope === "string") setScope(d.scope);
@@ -194,7 +206,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const draftDirty =
-    !!subject || !!startLocal || !!endLocal || !!title || sectionSel.length > 0 ||
+    !!subject || !!startLocal || !!endLocal || !!title || !!instructionsText || sectionSel.length > 0 ||
     pickedStudents.length > 0 || picked.length > 0;
   useEffect(() => {
     try {
@@ -205,14 +217,15 @@ export function ExamWizard({ user }: { user: SessionUser }) {
       sessionStorage.setItem(
         DRAFT_KEY(user.id),
         JSON.stringify({
-          subject, duration, purpose, title, sebRequired, notesEnabled, resultsReleased, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel,
+          subject, duration, purpose, title, sebRequired, instructionsText, instructionsRequireCompletion,
+          notesEnabled, resultsReleased, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel,
           pickedStudents, source, manual, mix, picked, step,
         }),
       );
     } catch {
       // storage full/blocked: builder still works, just not resumable
     }
-  }, [user.id, draftDirty, subject, duration, purpose, title, sebRequired, notesEnabled, resultsReleased, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel, pickedStudents, source, manual, mix, picked, step]);
+  }, [user.id, draftDirty, subject, duration, purpose, title, sebRequired, instructionsText, instructionsRequireCompletion, notesEnabled, resultsReleased, notesForDoctorEnabled, examToolsEnabled, maxReentries, startLocal, endLocal, scope, sectionSel, pickedStudents, source, manual, mix, picked, step]);
 
   const sections = useResource<Envelope<Entity>>(
     user,
@@ -234,7 +247,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
   );
   const bank = useResource<Envelope<Question>>(
     user,
-    `/api/v1/question-bank?subject_id=${subject}&limit=100`,
+    `/api/v1/question-bank?subject_id=${subject}&limit=100${user.role === "ta" && source === "mine" ? "&mine=true" : ""}`,
     !!subject && (manual || step === 3) && step >= 2,
   );
   const action = useAction<Exam>(user, ["/api/v1/exams", "/api/v1/admin/exams"]);
@@ -310,6 +323,11 @@ export function ExamWizard({ user }: { user: SessionUser }) {
       const b = new Date(endLocal).getTime();
       if (Number.isNaN(a) || Number.isNaN(b)) return "Pick valid opening and closing times.";
       if (b <= a) return "Closing time must be after opening time.";
+      if (duration * 60_000 > b - a) return "Duration cannot exceed the exam window.";
+      const effPurpose = canMidterm ? purpose : "quiz";
+      if (effPurpose === "quiz" && accessCode.trim() && accessCode.trim().length < 4) {
+        return "Quiz entry code must be at least 4 characters (or leave blank for open entry).";
+      }
     }
     if (s === 1) {
       if (scope === "sections" && !sectionSel.length)
@@ -334,6 +352,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
     setError("");
     const startTime = new Date(startLocal).toISOString();
     const endTime = new Date(endLocal).toISOString();
+    const effectivePurpose = canMidterm ? purpose : "quiz";
     action.mutate(
       {
         path: "/api/v1/exams",
@@ -341,8 +360,13 @@ export function ExamWizard({ user }: { user: SessionUser }) {
           subjectId: subject,
           type: user.role === "ta" ? "ta_quiz" : "doctor_exam",
           title: title.trim(),
-          purpose: canMidterm ? purpose : "quiz",
+          purpose: effectivePurpose,
           sebRequired,
+          ...(effectivePurpose === "quiz" && accessCode.trim()
+            ? { accessCode: accessCode.trim() }
+            : {}),
+          instructionsText: instructionsText.trim() || null,
+          instructionsRequireCompletion: Boolean(pendingMediaFile && instructionsRequireCompletion),
           startTime,
           endTime,
           durationMinutes: duration,
@@ -356,16 +380,35 @@ export function ExamWizard({ user }: { user: SessionUser }) {
           ...(manual ? { manualQuestionIds: picked } : { difficultyMix: mix }),
         },
       },
-      { onSuccess: (e) => {
-        try {
-          sessionStorage.removeItem(DRAFT_KEY(user.id));
-        } catch {
-          // ignore
-        }
-        const warnings = (e as unknown as { warnings?: string[] })?.warnings;
-        if (warnings?.length) setCreatedWarn({ id: e.id, warnings });
-        else navigate("/exams/" + e.id);
-      } },
+      {
+        onSuccess: async (e) => {
+          try {
+            sessionStorage.removeItem(DRAFT_KEY(user.id));
+          } catch {
+            // ignore
+          }
+          if (pendingMediaFile && pendingMediaType) {
+            setUploadingMedia(true);
+            try {
+              const fd = new FormData();
+              fd.append("media", pendingMediaFile);
+              fd.append("mediaType", pendingMediaType);
+              await api.upload(`/api/v1/exams/${e.id}/instructions-media`, fd);
+            } catch (uploadErr) {
+              setError(
+                uploadErr instanceof Error
+                  ? `Assessment created, but media upload failed: ${uploadErr.message}. You can re-upload from the assessment page.`
+                  : "Assessment created, but media upload failed.",
+              );
+            } finally {
+              setUploadingMedia(false);
+            }
+          }
+          const warnings = (e as unknown as { warnings?: string[] })?.warnings;
+          if (warnings?.length) setCreatedWarn({ id: e.id, warnings });
+          else navigate("/exams/" + e.id);
+        },
+      },
     );
   }
   const mixNudge = (k: keyof typeof mix, d: number) =>
@@ -512,16 +555,125 @@ export function ExamWizard({ user }: { user: SessionUser }) {
                 ariaLabel={t("Subject")}
               />
             </div>
-            <div className="field">
-              <label><input type="checkbox" checked={notesEnabled} onChange={(e) => setNotesEnabled(e.target.checked)} /> {t("Allow student notes")}</label>
-              <label><input type="checkbox" checked={sebRequired} onChange={(e) => setSebRequired(e.target.checked)} /> {t("Require Safe Exam Browser")}</label>
-              <label><input type="checkbox" checked={resultsReleased} onChange={(e) => setResultsReleased(e.target.checked)} /> {t("Show grades to students immediately")}</label>
-              <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
-              <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>
-              <label>{t("Maximum re-entries (excluding the first entry)")}
-                <input type="number" min={0} max={20} value={maxReentries} onChange={(e) => setMaxReentries(Math.min(20, Math.max(0, Number.isFinite(Number(e.target.value)) ? Number(e.target.value) : 0)))} required />
-              </label>
+            <div className="settings-section">
+              <span className="field-label">{t("Assessment policies & tools")}</span>
+              <div className="toggle-card-grid">
+                <div className={`toggle-card ${sebRequired ? "on" : ""}`}>
+                  <input
+                    id="wiz-seb"
+                    type="checkbox"
+                    checked={sebRequired}
+                    onChange={(e) => setSebRequired(e.target.checked)}
+                  />
+                  <div>
+                    <label htmlFor="wiz-seb">{t("Require Safe Exam Browser")}</label>
+                    <small>{t("Locks students into SEB with registered lab keys.")}</small>
+                  </div>
+                </div>
+                <div className={`toggle-card ${resultsReleased ? "on" : ""}`}>
+                  <input
+                    id="wiz-release"
+                    type="checkbox"
+                    checked={resultsReleased}
+                    onChange={(e) => setResultsReleased(e.target.checked)}
+                  />
+                  <div>
+                    <label htmlFor="wiz-release">{t("Show grades to students immediately")}</label>
+                    <small>{t("Otherwise scores stay hidden until you publish them.")}</small>
+                  </div>
+                </div>
+                <div className={`toggle-card ${examToolsEnabled ? "on" : ""}`}>
+                  <input
+                    id="wiz-tools"
+                    type="checkbox"
+                    checked={examToolsEnabled}
+                    onChange={(e) => setExamToolsEnabled(e.target.checked)}
+                  />
+                  <div>
+                    <label htmlFor="wiz-tools">{t("Allow exam tools")}</label>
+                    <small>{t("Enables the scientific/base calculator inside the runner.")}</small>
+                  </div>
+                </div>
+                <div className={`toggle-card ${notesEnabled ? "on" : ""}`}>
+                  <input
+                    id="wiz-notes"
+                    type="checkbox"
+                    checked={notesEnabled}
+                    onChange={(e) => setNotesEnabled(e.target.checked)}
+                  />
+                  <div>
+                    <label htmlFor="wiz-notes">{t("Allow student notes")}</label>
+                    <small>{t("Private scratchpad saved during the attempt (not graded).")}</small>
+                  </div>
+                </div>
+                <div className={`toggle-card ${notesForDoctorEnabled ? "on" : ""}`}>
+                  <input
+                    id="wiz-doc-notes"
+                    type="checkbox"
+                    checked={notesForDoctorEnabled}
+                    onChange={(e) => setNotesForDoctorEnabled(e.target.checked)}
+                  />
+                  <div>
+                    <label htmlFor="wiz-doc-notes">{t("Allow student notes for the doctor")}</label>
+                    <small>{t("Students can leave a short note visible in Results.")}</small>
+                  </div>
+                </div>
+              </div>
             </div>
+
+            <div className="form-grid">
+              <div className="field">
+                <label htmlFor="wiz-reentries">
+                  {t("Maximum re-entries (excluding the first entry)")}
+                </label>
+                <input
+                  id="wiz-reentries"
+                  type="number"
+                  min={0}
+                  max={20}
+                  value={maxReentries}
+                  onChange={(e) =>
+                    setMaxReentries(
+                      Math.min(
+                        20,
+                        Math.max(
+                          0,
+                          Number.isFinite(Number(e.target.value))
+                            ? Number(e.target.value)
+                            : 0,
+                        ),
+                      ),
+                    )
+                  }
+                  required
+                />
+              </div>
+              {(!canMidterm || purpose === "quiz") ? (
+                <div className="field">
+                  <label htmlFor="wiz-quiz-code">
+                    <KeyRound size={13} /> {t("Quiz entry code (optional)")}
+                  </label>
+                  <input
+                    id="wiz-quiz-code"
+                    value={accessCode}
+                    maxLength={64}
+                    onChange={(e) => setAccessCode(e.target.value)}
+                    placeholder={t("Leave blank for open entry (or 4+ characters)")}
+                    autoComplete="off"
+                  />
+                </div>
+              ) : (
+                <div className="field">
+                  <span className="field-label">
+                    <KeyRound size={13} /> {t("Midterm entry code")}
+                  </span>
+                  <p className="subtle field-static-note">
+                    {t("Administrators set or rotate midterm entry codes during approval.")}
+                  </p>
+                </div>
+              )}
+            </div>
+
             <div className="field">
               <span className="field-label">{t("Duration")}</span>
               <div className="stepper">
@@ -577,6 +729,27 @@ export function ExamWizard({ user }: { user: SessionUser }) {
               </div>
             )}
             <p className="subtle">{t("Times use your browser's timezone.")}</p>
+
+            <div className="wizard-divider" />
+            <h3 className="wizard-subhead">
+              <FileText size={15} /> {t("Pre-exam instructions")}
+            </h3>
+            <p className="subtle">
+              {t("Optional briefing shown to students before they click Start. Add written guidance, a voice note, or a short video.")}
+            </p>
+            <InstructionsEditor
+              text={instructionsText}
+              onTextChange={setInstructionsText}
+              requireCompletion={instructionsRequireCompletion}
+              onRequireCompletionChange={setInstructionsRequireCompletion}
+              pendingFile={pendingMediaFile}
+              pendingMediaType={pendingMediaType}
+              onPendingMediaChange={(file, mediaType) => {
+                setPendingMediaFile(file);
+                setPendingMediaType(mediaType);
+              }}
+              busy={action.isPending || uploadingMedia}
+            />
           </section>
         )}
 
@@ -661,7 +834,10 @@ export function ExamWizard({ user }: { user: SessionUser }) {
                       key={o}
                       type="button"
                       className={source === o ? "on" : ""}
-                      onClick={() => setSource(o)}
+                      onClick={() => {
+                        setSource(o);
+                        setPicked([]);
+                      }}
                     >
                       <b>{t(o === "shared" ? "Shared TA bank" : "My contributions")}</b>
                     </button>
@@ -906,6 +1082,8 @@ export function QuestionSheet({
   function save() {
     if (!text.trim()) return setLocalErr("Write the question text first.");
     if (clean.length < 2) return setLocalErr("Add at least two answer options.");
+    if (new Set(clean).size !== clean.length)
+      return setLocalErr("Answer options must be unique.");
     if (!correct.trim() || !clean.includes(correct.trim()))
       return setLocalErr("Pick the correct answer from the options.");
     if (!Number.isFinite(grade) || grade <= 0)
@@ -1051,7 +1229,17 @@ export function QuestionSheet({
 // Modern replacement for the generic edit-window dialog: smart date popovers
 // + duration stepper instead of native datetime-local inputs.
 export function EditExamWindow({
-  notesEnabled: initialNotes = false, notesForDoctorEnabled: initialDoctorNotes = false, examToolsEnabled: initialExamTools = true, maxReentries: initialReentries = 3, resultsReleased: initialReleased = false, title: initialTitle = "", purpose: initialPurpose = "quiz", sebRequired: initialSeb = false, canMidterm = false,
+  notesEnabled: initialNotes = false,
+  notesForDoctorEnabled: initialDoctorNotes = false,
+  examToolsEnabled: initialExamTools = true,
+  maxReentries: initialReentries = 3,
+  resultsReleased: initialReleased = false,
+  title: initialTitle = "",
+  purpose: initialPurpose = "quiz",
+  sebRequired: initialSeb = false,
+  instructionsText: initialInstructionsText = "",
+  instructionsRequireCompletion: initialRequireCompletion = false,
+  canMidterm = false,
   startTime,
   endTime,
   durationMinutes,
@@ -1070,6 +1258,8 @@ export function EditExamWindow({
   title?: string;
   purpose?: string;
   sebRequired?: boolean;
+  instructionsText?: string | null;
+  instructionsRequireCompletion?: boolean;
   canMidterm?: boolean;
   busy?: boolean;
   error?: unknown;
@@ -1093,6 +1283,8 @@ export function EditExamWindow({
   const [title, setTitle] = useState(initialTitle);
   const [purpose, setPurpose] = useState(initialPurpose);
   const [sebRequired, setSebRequired] = useState(initialSeb);
+  const [instructionsText, setInstructionsText] = useState(initialInstructionsText ?? "");
+  const [instructionsRequireCompletion] = useState(initialRequireCompletion);
   const [err, setErr] = useState("");
   function save() {
     const a = new Date(start).getTime();
@@ -1103,6 +1295,8 @@ export function EditExamWindow({
     if (b <= a) return setErr("Closing time must be after opening time.");
     if (!Number.isFinite(dur) || dur < 1)
       return setErr("Duration must be at least 1 minute.");
+    if (dur * 60_000 > b - a)
+      return setErr("Duration cannot exceed the exam window.");
     setErr("");
     onSubmit({
       startTime: new Date(start).toISOString(),
@@ -1111,6 +1305,8 @@ export function EditExamWindow({
       title: title.trim(),
       ...(canMidterm ? { purpose } : {}),
       sebRequired,
+      instructionsText: instructionsText.trim() || null,
+      instructionsRequireCompletion,
       notesEnabled, notesForDoctorEnabled, examToolsEnabled, maxReentries, resultsReleased,
     });
   }
@@ -1184,15 +1380,54 @@ export function EditExamWindow({
           </span>
         </div>
       </div>
+      <div className="toggle-card-grid">
+        <div className={`toggle-card compact ${sebRequired ? "on" : ""}`}>
+          <input id="edit-seb" type="checkbox" checked={sebRequired} onChange={(e) => setSebRequired(e.target.checked)} />
+          <div><label htmlFor="edit-seb">{t("Require Safe Exam Browser")}</label></div>
+        </div>
+        <div className={`toggle-card compact ${resultsReleased ? "on" : ""}`}>
+          <input id="edit-rel" type="checkbox" checked={resultsReleased} onChange={(e) => setResultsReleased(e.target.checked)} />
+          <div><label htmlFor="edit-rel">{t("Show grades to students immediately")}</label></div>
+        </div>
+        <div className={`toggle-card compact ${examToolsEnabled ? "on" : ""}`}>
+          <input id="edit-tools" type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} />
+          <div><label htmlFor="edit-tools">{t("Allow exam tools")}</label></div>
+        </div>
+        <div className={`toggle-card compact ${notesEnabled ? "on" : ""}`}>
+          <input id="edit-notes" type="checkbox" checked={notesEnabled} onChange={(e) => setNotesEnabled(e.target.checked)} />
+          <div><label htmlFor="edit-notes">{t("Allow student notes")}</label></div>
+        </div>
+        <div className={`toggle-card compact ${notesForDoctorEnabled ? "on" : ""}`}>
+          <input id="edit-dnotes" type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} />
+          <div><label htmlFor="edit-dnotes">{t("Allow student notes for the doctor")}</label></div>
+        </div>
+      </div>
       <div className="field">
-        <label><input type="checkbox" checked={notesEnabled} onChange={(e) => setNotesEnabled(e.target.checked)} /> {t("Allow student notes")}</label>
-        <label><input type="checkbox" checked={sebRequired} onChange={(e) => setSebRequired(e.target.checked)} /> {t("Require Safe Exam Browser")}</label>
-        <label><input type="checkbox" checked={resultsReleased} onChange={(e) => setResultsReleased(e.target.checked)} /> {t("Show grades to students immediately")}</label>
-        <label><input type="checkbox" checked={notesForDoctorEnabled} onChange={(e) => setNotesForDoctorEnabled(e.target.checked)} /> {t("Allow student notes for the doctor")}</label>
-        <label><input type="checkbox" checked={examToolsEnabled} onChange={(e) => setExamToolsEnabled(e.target.checked)} /> {t("Allow exam tools")}</label>
-        <label>{t("Maximum re-entries (excluding the first entry)")}
-          <input type="number" min={0} max={20} value={maxReentries} onChange={(e) => setMaxReentries(Math.min(20, Math.max(0, Number.isFinite(Number(e.target.value)) ? Number(e.target.value) : 0)))} required />
-        </label>
+        <label htmlFor="edit-reentries">{t("Maximum re-entries (excluding the first entry)")}</label>
+        <input
+          id="edit-reentries"
+          type="number"
+          min={0}
+          max={20}
+          value={maxReentries}
+          onChange={(e) =>
+            setMaxReentries(
+              Math.min(20, Math.max(0, Number.isFinite(Number(e.target.value)) ? Number(e.target.value) : 0)),
+            )
+          }
+          required
+        />
+      </div>
+      <div className="field">
+        <label htmlFor="edit-instructions-text">{t("Written pre-exam instructions (optional)")}</label>
+        <textarea
+          id="edit-instructions-text"
+          rows={3}
+          maxLength={10000}
+          value={instructionsText}
+          onChange={(e) => setInstructionsText(e.target.value)}
+          placeholder={t("Add written briefing instructions (attach voice/video from the Briefing panel on this page)…")}
+        />
       </div>
       <Feedback error={err || error} />
       <div className="dialog-actions">

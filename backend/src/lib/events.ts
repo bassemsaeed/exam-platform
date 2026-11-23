@@ -21,7 +21,11 @@ examEventBus.setMaxListeners(10_000);
 const instanceId = randomUUID();
 
 const subscribedChannels = new Set<string>();
-let subClient: { subscribe(c: string): Promise<unknown>; on(e: string, l: (...a: never[]) => void): unknown } | null = null;
+let subClient: {
+  subscribe(c: string): Promise<unknown>;
+  unsubscribe(c: string): Promise<unknown>;
+  on(e: string, l: (...a: never[]) => void): unknown;
+} | null = null;
 
 async function ensureRedisSub(channel: string): Promise<void> {
   const r = await redis();
@@ -31,14 +35,15 @@ async function ensureRedisSub(channel: string): Promise<void> {
   try {
     if (!subClient) {
       const dup = (r as unknown as { duplicate(): NonNullable<typeof subClient> }).duplicate();
+      dup.on("error", (() => {}) as never);
       subClient = dup;
       (subClient as unknown as { on(e: string, l: (ch: string, msg: string) => void): void }).on("message", (ch: string, msg: string) => {
         if (!ch.startsWith("exam:")) return;
         try {
-          const parsed = JSON.parse(msg) as ExamEventData & { _origin?: string };
+          const parsed = JSON.parse(msg) as Omit<ExamEventData, "createdAt"> & { createdAt: string | Date; _origin?: string };
           if (parsed._origin === instanceId) return;
-          const { _origin: _ignored, ...ev } = parsed;
-          examEventBus.emit(ch, ev);
+          const { _origin: _ignored, createdAt, ...rest } = parsed;
+          examEventBus.emit(ch, { ...rest, createdAt: new Date(createdAt) });
         } catch {
           // corrupt publish ignored
         }
@@ -107,5 +112,10 @@ export function unsubscribeExamEvents(
   examId: string,
   listener: (ev: ExamEventData) => void,
 ): void {
-  examEventBus.off(`exam:${examId}`, listener);
+  const channel = `exam:${examId}`;
+  examEventBus.off(channel, listener);
+  if (examEventBus.listenerCount(channel) === 0 && subscribedChannels.has(channel)) {
+    subscribedChannels.delete(channel);
+    void subClient?.unsubscribe(channel).catch(() => {});
+  }
 }

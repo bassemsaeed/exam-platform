@@ -65,11 +65,14 @@ student.get("/results", requireRole("student"), async (req, res) => {
       exam: {
         select: {
           id: true,
+          title: true,
+          purpose: true,
           type: true,
           startTime: true,
           endTime: true,
           durationMinutes: true,
           resultsReleased: true,
+          sebRequired: true,
           subject: { select: { code: true, name: true } },
         },
       },
@@ -141,14 +144,36 @@ student.get("/exams", async (req, res) => {
       // Submitted stays locked and disappears (resume lives in start â†’ existing instance).
       instances: { none: { studentId: a.userId, status: { in: ["submitted", "auto_submitted"] } } },
     },
-    select: { id: true, subjectId: true, type: true, startTime: true, endTime: true, durationMinutes: true, accessCodeHash: true, subject: { select: { id: true, name: true, code: true } } },
+    select: {
+      id: true,
+      subjectId: true,
+      title: true,
+      purpose: true,
+      sebRequired: true,
+      type: true,
+      startTime: true,
+      endTime: true,
+      durationMinutes: true,
+      accessCodeHash: true,
+      instructionsText: true,
+      instructionsMediaUrl: true,
+      instructionsMediaType: true,
+      subject: { select: { id: true, name: true, code: true } },
+    },
     orderBy: { startTime: "asc" },
   });
   // Presence only: the hash itself must never reach the browser (offline brute force).
-  res.json(exams.map(({ accessCodeHash, ...rest }) => ({ ...rest, requiresCode: accessCodeHash !== null })));
+  res.json(
+    exams.map(({ accessCodeHash, instructionsText, instructionsMediaUrl, instructionsMediaType, ...rest }) => ({
+      ...rest,
+      requiresCode: accessCodeHash !== null,
+      hasInstructions: Boolean(instructionsText?.trim() || instructionsMediaUrl),
+      instructionsMediaType,
+    })),
+  );
 });
 
-// GET /student/exams/upcoming â€” approved, eligible, but the window hasn't
+// GET /student/exams/upcoming — approved, eligible, but the window hasn't
 // opened yet. Same gates as the live list (minus the open-window filter) so
 // the bell's "Upcoming exam" always has a matching card somewhere.
 student.get("/exams/upcoming", async (req, res) => {
@@ -177,10 +202,32 @@ student.get("/exams/upcoming", async (req, res) => {
       ],
       instances: { none: { studentId: a.userId, status: { in: ["submitted", "auto_submitted"] } } },
     },
-    select: { id: true, subjectId: true, type: true, startTime: true, endTime: true, durationMinutes: true, accessCodeHash: true, subject: { select: { id: true, name: true, code: true } } },
+    select: {
+      id: true,
+      subjectId: true,
+      title: true,
+      purpose: true,
+      sebRequired: true,
+      type: true,
+      startTime: true,
+      endTime: true,
+      durationMinutes: true,
+      accessCodeHash: true,
+      instructionsText: true,
+      instructionsMediaUrl: true,
+      instructionsMediaType: true,
+      subject: { select: { id: true, name: true, code: true } },
+    },
     orderBy: { startTime: "asc" },
   });
-  res.json(exams.map(({ accessCodeHash, ...rest }) => ({ ...rest, requiresCode: accessCodeHash !== null })));
+  res.json(
+    exams.map(({ accessCodeHash, instructionsText, instructionsMediaUrl, instructionsMediaType, ...rest }) => ({
+      ...rest,
+      requiresCode: accessCodeHash !== null,
+      hasInstructions: Boolean(instructionsText?.trim() || instructionsMediaUrl),
+      instructionsMediaType,
+    })),
+  );
 });
 
 // Grading with live compensations: correctness first, then the exam's
@@ -370,6 +417,8 @@ student.get(
       exam.endTime >= now;
     res.json({
       subject: exam.subject,
+      title: exam.title,
+      purpose: exam.purpose,
       durationMinutes: exam.durationMinutes,
       maxReentries: exam.maxReentries,
       entriesUsed: existing ? existing.entryTokens.length : 0,
@@ -377,6 +426,10 @@ student.get(
       // SEB posture, computed live: whether this exam demands the locked
       // browser, and whether THIS request carries a valid header for it.
       sebRequired: Boolean(exam.sebRequired),
+      instructionsText: exam.instructionsText,
+      instructionsMediaUrl: exam.instructionsMediaUrl,
+      instructionsMediaType: exam.instructionsMediaType,
+      instructionsRequireCompletion: Boolean(exam.instructionsRequireCompletion),
       startTime: exam.startTime,
       endTime: exam.endTime,
       requiresCode: !!exam.accessCodeHash,
@@ -393,6 +446,41 @@ student.get(
     });
   },
 );
+
+async function admitEntryToken(
+  sittingId: string,
+  token: string,
+  maxReentries: number,
+): Promise<
+  | { outcome: "ok"; issued: string; entriesUsed: number }
+  | { outcome: "gone" }
+  | { outcome: "replay" }
+  | { outcome: "limit" }
+> {
+  return prisma.$transaction(async (tx) => {
+    const rows = await tx.$queryRaw<{ tokens: string[]; status: string }[]>`
+      SELECT entry_tokens AS tokens, status FROM student_exam WHERE id = ${sittingId}::uuid FOR UPDATE`;
+    const held: string[] = rows[0]?.tokens ?? [];
+    if (rows[0]?.status !== "in_progress") return { outcome: "gone" as const };
+    const current = held.length ? held[held.length - 1] : null;
+    const previous = held.length >= 2 ? held[held.length - 2] : null;
+    // Exact current token = idempotent retry on same session (free).
+    if (token && token === current) {
+      return { outcome: "ok" as const, issued: current, entriesUsed: held.length };
+    }
+    // Any token older than previous is always a replay.
+    if (token && token !== previous && held.includes(token)) {
+      return { outcome: "replay" as const };
+    }
+    // Both previous-token rotation AND fresh/unknown entries consume re-entry
+    // budget — enforce maxReentries BEFORE appending so alternating current &
+    // previous tokens can never bypass the cap.
+    if (held.length >= maxReentries + 1) return { outcome: "limit" as const };
+    const issued = crypto.randomUUID();
+    await tx.$executeRaw`UPDATE student_exam SET entry_tokens = array_append(entry_tokens, ${issued}) WHERE id = ${sittingId}::uuid`;
+    return { outcome: "ok" as const, issued, entriesUsed: held.length + 1 };
+  });
+}
 
 // POST /api/v1/student/exams/:id/start
 // Atomic find-or-create student_exam. Samples questions without ORDER BY random().
@@ -464,33 +552,7 @@ student.post(
         return res.status(409).json({ error: "exam duration expired, auto-submitted" });
       }
 
-      // Server-issued rotating entry tokens: the client presents the latest
-      // token it was issued; the server decides admission and rotates.
-      // - presented === current (last): idempotent retry, admit free.
-      // - presented === previous: admit once and rotate (retry-after-success
-      //   or second tab); the rotation consumes budget, so replays can't loop.
-      // - presented older than previous: 403 replay, never admitted.
-      // - unknown/absent (fresh device): admit iff budget remains, then issue.
-      // The row lock makes concurrent resumes serialize on this decision.
-      const admission = await prisma.$transaction(async (tx) => {
-        const rows = await tx.$queryRaw<{ tokens: string[]; status: string }[]>`
-          SELECT entry_tokens AS tokens, status FROM student_exam WHERE id = ${existing.id}::uuid FOR UPDATE`;
-        const held: string[] = rows[0]?.tokens ?? [];
-        if (rows[0]?.status !== "in_progress") return { outcome: "gone" as const };
-        const current = held.length ? held[held.length - 1] : null;
-        const previous = held.length >= 2 ? held[held.length - 2] : null;
-        if (token && token === current) return { outcome: "ok" as const, issued: current };
-        if (token && token === previous) {
-          const issued = crypto.randomUUID();
-          await tx.$executeRaw`UPDATE student_exam SET entry_tokens = array_append(entry_tokens, ${issued}) WHERE id = ${existing.id}::uuid`;
-          return { outcome: "ok" as const, issued };
-        }
-        if (token && held.includes(token)) return { outcome: "replay" as const };
-        if (held.length >= exam.maxReentries + 1) return { outcome: "limit" as const };
-        const issued = crypto.randomUUID();
-        await tx.$executeRaw`UPDATE student_exam SET entry_tokens = array_append(entry_tokens, ${issued}) WHERE id = ${existing.id}::uuid`;
-        return { outcome: "ok" as const, issued };
-      });
+      const admission = await admitEntryToken(existing.id, token, exam.maxReentries);
       if (admission.outcome === "gone") return res.status(409).json({ error: "exam is no longer in progress" });
       if (admission.outcome === "replay") return res.status(403).json({ error: "Re-entry token already used. Reopen the exam for a fresh entry." });
       if (admission.outcome === "limit") return res.status(403).json({ error: "Exam re-entry limit reached. Contact your doctor." });
@@ -498,15 +560,17 @@ student.post(
       const remainingSeconds = Math.max(0, Math.floor((maxEndTime - now) / 1000));
       return res.json({
         entryToken: admission.issued,
+        title: exam.title,
+        instructionsText: exam.instructionsText,
+        instructionsMediaUrl: exam.instructionsMediaUrl,
+        instructionsMediaType: exam.instructionsMediaType,
         notesEnabled: exam.notesEnabled,
         notesForDoctorEnabled: exam.notesForDoctorEnabled,
         examToolsEnabled: exam.examToolsEnabled,
         notesForDoctor: existing.notesForDoctor,
         notes: existing.notes,
         maxReentries: exam.maxReentries,
-        entriesUsed: existing.entryTokens.includes(admission.issued)
-          ? existing.entryTokens.length
-          : existing.entryTokens.length + 1,
+        entriesUsed: admission.entriesUsed,
         resultsReleased: exam.resultsReleased,
         id: existing.id,
         examId: existing.examId,
@@ -607,11 +671,16 @@ student.post(
       }
       await emitExamEvent(exam.id, "started", { studentId: a.userId, examId: exam.id });
 
-      const maxEndTime = Math.min(exam.endTime.getTime(), created.startedAt!.getTime() + exam.durationMinutes * 60_000);
-      const remainingSeconds = Math.max(0, Math.floor((maxEndTime - Date.now()) / 1000));
+      const startedMs = created.startedAt!.getTime();
+      const maxEndTime = Math.min(exam.endTime.getTime(), startedMs + exam.durationMinutes * 60_000);
+      const remainingSeconds = Math.max(0, Math.floor((maxEndTime - startedMs) / 1000));
 
       return res.status(201).json({
         entryToken: issued,
+        title: exam.title,
+        instructionsText: exam.instructionsText,
+        instructionsMediaUrl: exam.instructionsMediaUrl,
+        instructionsMediaType: exam.instructionsMediaType,
         notesEnabled: exam.notesEnabled,
         notesForDoctorEnabled: exam.notesForDoctorEnabled,
         examToolsEnabled: exam.examToolsEnabled,
@@ -663,48 +732,32 @@ student.post(
             },
           },
         });
-        // Same rotating-token admission as the resume path (see above).
-        const raceAdmission = await prisma.$transaction(async (tx) => {
-          const rows = await tx.$queryRaw<{ tokens: string[]; status: string }[]>`
-            SELECT entry_tokens AS tokens, status FROM student_exam WHERE id = ${raceInstance.id}::uuid FOR UPDATE`;
-          const held: string[] = rows[0]?.tokens ?? [];
-          if (rows[0]?.status !== "in_progress") return { outcome: "gone" as const };
-          const current = held.length ? held[held.length - 1] : null;
-          const previous = held.length >= 2 ? held[held.length - 2] : null;
-          if (token && token === current) return { outcome: "ok" as const, issued: current };
-          if (token && token === previous) {
-            const issued = crypto.randomUUID();
-            await tx.$executeRaw`UPDATE student_exam SET entry_tokens = array_append(entry_tokens, ${issued}) WHERE id = ${raceInstance.id}::uuid`;
-            return { outcome: "ok" as const, issued };
-          }
-          if (token && held.includes(token)) return { outcome: "replay" as const };
-          if (held.length >= exam.maxReentries + 1) return { outcome: "limit" as const };
-          const issued = crypto.randomUUID();
-          await tx.$executeRaw`UPDATE student_exam SET entry_tokens = array_append(entry_tokens, ${issued}) WHERE id = ${raceInstance.id}::uuid`;
-          return { outcome: "ok" as const, issued };
-        });
+        const raceAdmission = await admitEntryToken(raceInstance.id, token, exam.maxReentries);
         if (raceAdmission.outcome === "gone") return res.status(409).json({ error: "exam is no longer in progress" });
         if (raceAdmission.outcome === "replay") return res.status(403).json({ error: "Re-entry token already used. Reopen the exam for a fresh entry." });
         if (raceAdmission.outcome === "limit") return res.status(403).json({ error: "Exam re-entry limit reached. Contact your doctor." });
+        const raceNow = (await dbNow()).getTime();
         const maxEndTime = Math.min(exam.endTime.getTime(), raceInstance.startedAt!.getTime() + exam.durationMinutes * 60_000);
         return res.json({
           entryToken: raceAdmission.issued,
+          title: exam.title,
+          instructionsText: exam.instructionsText,
+          instructionsMediaUrl: exam.instructionsMediaUrl,
+          instructionsMediaType: exam.instructionsMediaType,
           notesEnabled: exam.notesEnabled,
           notesForDoctorEnabled: exam.notesForDoctorEnabled,
           examToolsEnabled: exam.examToolsEnabled,
           notesForDoctor: raceInstance.notesForDoctor,
           notes: raceInstance.notes,
           maxReentries: exam.maxReentries,
-          entriesUsed: raceInstance.entryTokens.includes(raceAdmission.issued)
-            ? raceInstance.entryTokens.length
-            : raceInstance.entryTokens.length + 1,
+          entriesUsed: raceAdmission.entriesUsed,
           resultsReleased: exam.resultsReleased,
           id: raceInstance.id,
           examId: raceInstance.examId,
           status: raceInstance.status,
           startedAt: raceInstance.startedAt,
           durationMinutes: exam.durationMinutes,
-          remainingSeconds: Math.max(0, Math.floor((maxEndTime - Date.now()) / 1000)),
+          remainingSeconds: Math.max(0, Math.floor((maxEndTime - raceNow) / 1000)),
           questions: shuffleSittingQuestions(raceInstance.id, raceInstance.questions.map((q) => ({
             id: q.id,
             questionId: q.questionId,
@@ -729,6 +782,7 @@ student.post(
 type RequireActiveOk = {
   se: { id: string; exam: { endTime: Date; durationMinutes: number } };
   maxEndTime: number;
+  nowMs: number;
 };
 type RequireActiveErr = { error: string; status: number };
 async function requireActiveExam(examId: string, studentId: string): Promise<RequireActiveOk | RequireActiveErr> {
@@ -748,7 +802,7 @@ async function requireActiveExam(examId: string, studentId: string): Promise<Req
     return { error: "exam duration expired, auto-submitted" as const, status: 409 };
   }
 
-  return { se, maxEndTime };
+  return { se, maxEndTime, nowMs: now };
 }
 
 // PATCH /api/v1/student/exams/:id/answer (single answer)
@@ -780,12 +834,15 @@ student.patch("/exams/:id/answer", requireRole("student"), requirePermission("ta
     }
   }
 
-  const updated = await prisma.studentExamQuestion.update({
-    where: { id: seq.id },
+  // Atomic in_progress gate: a concurrent submit/auto-submit cannot have its
+  // graded answers overwritten by a late in-flight PATCH.
+  const updated = await prisma.studentExamQuestion.updateMany({
+    where: { id: seq.id, studentExam: { status: "in_progress" } },
     data: { selectedAnswer: selected },
   });
+  if (updated.count === 0) return res.status(409).json({ error: "exam already submitted" });
 
-  res.json({ ok: true, questionId: updated.questionId, selectedAnswer: updated.selectedAnswer });
+  res.json({ ok: true, questionId: seq.questionId, selectedAnswer: selected });
 });
 
 // PATCH /api/v1/student/exams/:id/answers (batch answers)
@@ -806,36 +863,46 @@ student.patch("/exams/:id/answers", requireRole("student"), requirePermission("t
   const active = await requireActiveExam(examId, a.userId);
   if ("error" in active) return res.status(active.status).json({ error: active.error });
 
-  const questionIds = body.answers.map((ans) => ans.questionId);
+  // Last-write-wins dedup for repeated questionIds in a single batch.
+  const deduped = new Map<string, string | null>();
+  for (const ans of body.answers) {
+    deduped.set(ans.questionId, ans.selectedAnswer === "" ? null : ans.selectedAnswer);
+  }
+  const questionIds = [...deduped.keys()];
   const questions = await prisma.studentExamQuestion.findMany({
     where: { studentExamId: active.se.id, questionId: { in: questionIds } },
     include: { question: { select: { options: true } } },
   });
   const qMap = new Map(questions.map((q) => [q.questionId, q]));
 
-  for (const ans of body.answers) {
-    const q = qMap.get(ans.questionId);
-    if (!q) return res.status(404).json({ error: `question not in exam: ${ans.questionId}` });
-    const selected = ans.selectedAnswer === "" ? null : ans.selectedAnswer;
+  for (const [questionId, selected] of deduped) {
+    const q = qMap.get(questionId);
+    if (!q) return res.status(404).json({ error: `question not in exam: ${questionId}` });
     if (selected !== null) {
       const validOptions = q.question.options as string[];
       if (!validOptions.includes(selected)) {
-        return res.status(422).json({ error: `invalid answer for question ${ans.questionId}` });
+        return res.status(422).json({ error: `invalid answer for question ${questionId}` });
       }
     }
   }
 
-  await prisma.$transaction(
-    body.answers.map((ans) => {
-      const q = qMap.get(ans.questionId)!;
-      return prisma.studentExamQuestion.update({
-        where: { id: q.id },
-        data: { selectedAnswer: ans.selectedAnswer === "" ? null : ans.selectedAnswer },
-      });
-    }),
-  );
+  const closed = await prisma.$transaction(async (tx) => {
+    const locked = await tx.$queryRaw<{ status: string }[]>`
+      SELECT status FROM student_exam WHERE id = ${active.se.id}::uuid FOR SHARE`;
+    if (locked[0]?.status !== "in_progress") return true;
+    await Promise.all(
+      [...deduped.entries()].map(([questionId, selected]) =>
+        tx.studentExamQuestion.update({
+          where: { id: qMap.get(questionId)!.id },
+          data: { selectedAnswer: selected },
+        }),
+      ),
+    );
+    return false;
+  });
+  if (closed) return res.status(409).json({ error: "exam already submitted" });
 
-  res.json({ ok: true, updated: body.answers.length });
+  res.json({ ok: true, updated: deduped.size });
 });
 
 // PATCH /api/v1/student/exams/:id/flag
@@ -857,12 +924,13 @@ student.patch("/exams/:id/flag", requireRole("student"), requirePermission("take
   });
   if (!seq) return res.status(404).json({ error: "question not in exam" });
 
-  const updated = await prisma.studentExamQuestion.update({
-    where: { id: seq.id },
+  const updated = await prisma.studentExamQuestion.updateMany({
+    where: { id: seq.id, studentExam: { status: "in_progress" } },
     data: { isFlagged: body.isFlagged },
   });
+  if (updated.count === 0) return res.status(409).json({ error: "exam already submitted" });
 
-  res.json({ ok: true, questionId: updated.questionId, isFlagged: updated.isFlagged });
+  res.json({ ok: true, questionId: seq.questionId, isFlagged: body.isFlagged });
 });
 
 // POST /api/v1/student/exams/:id/heartbeat
@@ -874,12 +942,13 @@ student.post("/exams/:id/heartbeat", requireRole("student"), requirePermission("
   const active = await requireActiveExam(examId, a.userId);
   if ("error" in active) return res.status(active.status).json({ error: active.error });
 
-  await prisma.studentExam.update({
-    where: { id: active.se.id },
-    data: { lastHeartbeatAt: await dbNow() },
+  const now = await dbNow();
+  await prisma.studentExam.updateMany({
+    where: { id: active.se.id, status: "in_progress" },
+    data: { lastHeartbeatAt: now },
   });
 
-  const remainingSeconds = Math.max(0, Math.floor((active.maxEndTime - Date.now()) / 1000));
+  const remainingSeconds = Math.max(0, Math.floor((active.maxEndTime - now.getTime()) / 1000));
   res.json({ ok: true, remainingSeconds });
 });
 
@@ -891,8 +960,8 @@ student.post(
   requireRole("student"),
   requirePermission("take_exam"),
   requireSebForExam,
-  idempotency,
   rateLimit(config.studentRateLimit.submitMax, config.studentRateLimit.submitWindowMs, "student:submit"),
+  idempotency,
   async (req, res) => {
     const a = req as unknown as AuthedRequest;
     const examId = String(req.params.id);
@@ -1055,21 +1124,36 @@ student.get("/exams/:id/events", requireRole("student"), requirePermission("take
   const parsedSeq = rawCursor !== undefined ? z.coerce.number().int().nonnegative().safeParse(rawCursor) : null;
   const afterSeq = parsedSeq?.success ? parsedSeq.data : undefined;
 
+  // Filter broadcast types IN SQL before LIMIT so high-volume started/submitted
+  // telemetry rows cannot evict admin announcements/warnings on reconnect.
   const pastEvents = await prisma.examEvent
     .findMany({
-      where: { examId, ...(afterSeq !== undefined ? { seq: { gt: afterSeq } } : {}) },
+      where: {
+        examId,
+        type: { in: [...EXAM_BROADCAST_TYPES] },
+        ...(afterSeq !== undefined ? { seq: { gt: afterSeq } } : {}),
+      },
       orderBy: { seq: "desc" },
       take: config.sseReplayMax,
     })
-    .then((rows) => rows.reverse().filter((ev) => (EXAM_BROADCAST_TYPES as readonly string[]).includes(ev.type)));
+    .then((rows) => rows.reverse());
 
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders?.();
 
+  const safeWrite = (chunk: string) => {
+    if (res.writableEnded || res.destroyed) return;
+    try {
+      res.write(chunk);
+    } catch {
+      cleanup();
+    }
+  };
+
   for (const ev of pastEvents) {
-    res.write(`id: ${ev.seq}\nevent: ${ev.type}\ndata: ${JSON.stringify(ev.payload)}\n\n`);
+    safeWrite(`id: ${ev.seq}\nevent: ${ev.type}\ndata: ${JSON.stringify(ev.payload)}\n\n`);
   }
 
   // Live in-process subscription: students get operational broadcasts only.
@@ -1077,19 +1161,24 @@ student.get("/exams/:id/events", requireRole("student"), requirePermission("take
   // retained in DB) and must not fan out to every connected exam taker.
   const onEvent = (ev: ExamEventData) => {
     if (!(EXAM_BROADCAST_TYPES as readonly string[]).includes(ev.type)) return;
-    res.write(`id: ${ev.seq}\nevent: ${ev.type}\ndata: ${JSON.stringify(ev.payload)}\n\n`);
+    safeWrite(`id: ${ev.seq}\nevent: ${ev.type}\ndata: ${JSON.stringify(ev.payload)}\n\n`);
   };
   subscribeExamEvents(examId, onEvent);
 
   // Periodic SSE comment to keep TCP connection alive through proxies
   const pingInterval = setInterval(() => {
-    res.write(": ping\n\n");
+    safeWrite(": ping\n\n");
   }, config.sseKeepAliveMs);
 
-  req.on("close", () => {
+  let cleaned = false;
+  function cleanup() {
+    if (cleaned) return;
+    cleaned = true;
     clearInterval(pingInterval);
     unsubscribeExamEvents(examId, onEvent);
-  });
+  }
+  req.on("close", cleanup);
+  res.on("close", cleanup);
 });
 
 student.patch("/exams/:id/notes", requireRole("student"), requirePermission("take_exam"), requireSebForExam, rateLimit(config.studentRateLimit.answerMax, config.studentRateLimit.answerWindowMs, "student:notes"), async (req, res) => {

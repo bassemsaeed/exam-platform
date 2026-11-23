@@ -99,8 +99,9 @@ adminSections.post("/:id/members", async (req, res) => {
   if (!sec) return res.status(404).json({ error: "not found" });
   // Remove wins over add for overlapping IDs: otherwise the add-upsert +
   // remove-delete net-deletes the seat but still mints a stray enrollment.
-  const removeSet = new Set(body.remove);
-  const add = body.add.filter((id) => !removeSet.has(id));
+  const remove = [...new Set(body.remove)];
+  const removeSet = new Set(remove);
+  const add = [...new Set(body.add.filter((id) => !removeSet.has(id)))];
   // Membership is for students only — staff ids would fabricate enrollments.
   // Unknown IDs 422 with the culprits listed instead of aborting the whole
   // transaction on a raw FK error.
@@ -110,47 +111,57 @@ adminSections.post("/:id/members", async (req, res) => {
     const invalid = add.filter((id) => !foundIds.has(id));
     if (invalid.length) return res.status(422).json({ error: "unknown user ids", invalid });
     if (found.some((u) => u.role !== "student")) return res.status(422).json({ error: "members must be students" });
-    const size = await prisma.sectionMembership.count({ where: { sectionId: sec.id } });
-    if (size + add.length > config.lists.membersMax) {
-      return res.status(422).json({ error: "section is full", capacity: config.lists.membersMax });
-    }
   }
-  await prisma.$transaction([
-    ...add.map((studentId) =>
-      prisma.sectionMembership.upsert({
+  const full = await prisma.$transaction(async (tx) => {
+    if (add.length) {
+      const existing = await tx.sectionMembership.findMany({
+        where: { sectionId: sec.id },
+        select: { studentId: true },
+      });
+      const existingSet = new Set(existing.map((m) => m.studentId));
+      const newAdds = add.filter((id) => !existingSet.has(id)).length;
+      const actualRemoves = remove.filter((id) => existingSet.has(id)).length;
+      if (existing.length - actualRemoves + newAdds > config.lists.membersMax) {
+        return true;
+      }
+    }
+    for (const studentId of add) {
+      await tx.sectionMembership.upsert({
         where: { studentId_sectionId: { studentId, sectionId: sec.id } },
         update: {},
         create: { studentId, sectionId: sec.id },
-      }),
-    ),
-    ...add.map((studentId) =>
-      prisma.enrollment.upsert({
+      });
+      await tx.enrollment.upsert({
         where: { studentId_subjectId_termId: { studentId, subjectId: sec.subjectId, termId: sec.termId } },
         update: {},
         create: { studentId, subjectId: sec.subjectId, termId: sec.termId },
-      }),
-    ),
-    prisma.sectionMembership.deleteMany({ where: { sectionId: sec.id, studentId: { in: body.remove } } }),
-  ]);
-  // Coherence: a removed student with no other seat in this subject+term
-  // loses the auto-created enrollment too — otherwise section and enrollment
-  // checks disagree on eligibility.
-  if (body.remove.length) {
-    const stillSeated = await prisma.sectionMembership.findMany({
-      where: {
-        studentId: { in: body.remove },
-        section: { subjectId: sec.subjectId, termId: sec.termId },
-      },
-      select: { studentId: true },
-    });
-    const seated = new Set(stillSeated.map((m) => m.studentId));
-    const orphaned = body.remove.filter((id) => !seated.has(id));
-    if (orphaned.length) {
-      await prisma.enrollment.deleteMany({
-        where: { studentId: { in: orphaned }, subjectId: sec.subjectId, termId: sec.termId },
       });
     }
+    if (remove.length) {
+      await tx.sectionMembership.deleteMany({ where: { sectionId: sec.id, studentId: { in: remove } } });
+      // Coherence: a removed student with no other seat in this subject+term
+      // loses the auto-created enrollment too — otherwise section and enrollment
+      // checks disagree on eligibility.
+      const stillSeated = await tx.sectionMembership.findMany({
+        where: {
+          studentId: { in: remove },
+          section: { subjectId: sec.subjectId, termId: sec.termId },
+        },
+        select: { studentId: true },
+      });
+      const seated = new Set(stillSeated.map((m) => m.studentId));
+      const orphaned = remove.filter((id) => !seated.has(id));
+      if (orphaned.length) {
+        await tx.enrollment.deleteMany({
+          where: { studentId: { in: orphaned }, subjectId: sec.subjectId, termId: sec.termId },
+        });
+      }
+    }
+    return false;
+  });
+  if (full) {
+    return res.status(422).json({ error: "section is full", capacity: config.lists.membersMax });
   }
   await audit((req as unknown as AuthedRequest).userId, "section.members", "section", sec.id, body);
-  res.json({ ok: true, added: add.length, removed: body.remove.length });
+  res.json({ ok: true, added: add.length, removed: remove.length });
 });

@@ -17,11 +17,17 @@ import { Feedback } from "./ui";
 
 export interface ReadinessData {
   subject: { name: string; code: string };
+  title?: string;
+  purpose?: string;
   durationMinutes: number;
   maxReentries?: number;
   entriesUsed?: number;
   resultsReleased?: boolean;
   sebRequired?: boolean;
+  instructionsText?: string | null;
+  instructionsMediaUrl?: string | null;
+  instructionsMediaType?: "audio" | "video" | null;
+  instructionsRequireCompletion?: boolean;
   startTime: string;
   endTime: string;
   requiresCode: boolean;

@@ -44,10 +44,18 @@ adminColleges.get("/", async (req, res) => {
     }),
   ]);
   const ids = rows.map((r) => r.id);
-  const [students, doctors, deptRows] = await Promise.all([
+  const [students, deptRows, doctorRows] = await Promise.all([
     prisma.user.groupBy({ by: ["collegeId"], where: { collegeId: { in: ids }, role: "student" }, _count: true }),
-    prisma.user.groupBy({ by: ["collegeId"], where: { collegeId: { in: ids }, role: "doctor" }, _count: true }),
     prisma.department.findMany({ where: { collegeId: { in: ids } }, select: { id: true, collegeId: true } }),
+    ids.length
+      ? prisma.user.findMany({
+          where: {
+            role: "doctor",
+            OR: [{ collegeId: { in: ids } }, { department: { collegeId: { in: ids } } }],
+          },
+          select: { id: true, collegeId: true, department: { select: { collegeId: true } } },
+        })
+      : Promise.resolve([]),
   ]);
   const subjByCollege = new Map<string, number>();
   if (deptRows.length) {
@@ -60,8 +68,22 @@ adminColleges.get("/", async (req, res) => {
     }
   }
   const sBy = new Map(students.map((g) => [g.collegeId, g._count]));
-  const dBy = new Map(doctors.map((g) => [g.collegeId, g._count]));
-  res.json(envelope(total, q, rows.map((r) => ({ id: r.id, code: r.code, name: r.name, createdAt: r.createdAt, departments: r._count.departments, subjects: subjByCollege.get(r.id) ?? 0, students: sBy.get(r.id) ?? 0, doctors: dBy.get(r.id) ?? 0 }))));
+  const dSets = new Map<string, Set<string>>();
+  const idSet = new Set(ids);
+  for (const doc of doctorRows) {
+    const cids = [doc.collegeId, doc.department?.collegeId].filter(
+      (cid): cid is string => Boolean(cid && idSet.has(cid)),
+    );
+    for (const cid of cids) {
+      let set = dSets.get(cid);
+      if (!set) {
+        set = new Set();
+        dSets.set(cid, set);
+      }
+      set.add(doc.id);
+    }
+  }
+  res.json(envelope(total, q, rows.map((r) => ({ id: r.id, code: r.code, name: r.name, createdAt: r.createdAt, departments: r._count.departments, subjects: subjByCollege.get(r.id) ?? 0, students: sBy.get(r.id) ?? 0, doctors: dSets.get(r.id)?.size ?? 0 }))));
 });
 
 adminColleges.post("/", async (req, res) => {

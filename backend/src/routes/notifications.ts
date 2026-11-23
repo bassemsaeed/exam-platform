@@ -81,11 +81,12 @@ notifications.get("/", async (req, res) => {
       where: {
         studentId: userId,
         status: { in: ["submitted", "auto_submitted"] },
+        exam: { resultsReleased: true },
       },
       select: {
         id: true,
         submittedAt: true,
-        exam: { select: { subject: { select: { name: true } } } },
+        exam: { select: { title: true, subject: { select: { name: true } } } },
       },
       orderBy: { submittedAt: "desc" },
       take: 50,
@@ -95,7 +96,7 @@ notifications.get("/", async (req, res) => {
         key: `result:${r.id}`,
         kind: "result",
         title: "Result available",
-        detail: r.exam.subject.name,
+        detail: r.exam.title || r.exam.subject.name,
         href: "/results",
         createdAt: r.submittedAt ?? now,
       });
@@ -107,6 +108,7 @@ notifications.get("/", async (req, res) => {
           : { createdBy: userId, status: { in: ["approved", "rejected"] } },
       select: {
         id: true,
+        title: true,
         status: true,
         updatedAt: true,
         subject: { select: { name: true } },
@@ -124,7 +126,7 @@ notifications.get("/", async (req, res) => {
             : e.status === "approved"
               ? "Assessment approved"
               : "Assessment rejected",
-        detail: e.subject.name,
+        detail: e.title || e.subject.name,
         href: `/exams/${e.id}`,
         createdAt: e.updatedAt,
       });
@@ -148,10 +150,12 @@ notifications.get("/", async (req, res) => {
         });
     }
   }
-  const reads = await prisma.notificationRead.findMany({
-    where: { userId, key: { in: notices.map((n) => n.key) } },
-    select: { key: true },
-  });
+  const reads = notices.length
+    ? await prisma.notificationRead.findMany({
+        where: { userId, key: { in: notices.map((n) => n.key) } },
+        select: { key: true },
+      })
+    : [];
   const seen = new Set(reads.map((r) => r.key));
   res.json(
     notices

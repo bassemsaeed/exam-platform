@@ -366,6 +366,11 @@ model Exam {
   manualQuestionIds Json?     @map("manual_question_ids") // hand-picked blueprint (author order); null = auto-sample by mix
   questionSource  String?    @map("question_source") // TA quiz: shared|mine. Doctor: own (implicit).
   accessCodeHash  String?    @map("access_code_hash") // sha256(entry code); null = open entry
+  // Pre-exam briefing shown before the student starts (text + optional voice/video media).
+  instructionsText              String?  @map("instructions_text")
+  instructionsMediaUrl          String?  @map("instructions_media_url")
+  instructionsMediaType         String?  @map("instructions_media_type") // "audio" | "video"
+  instructionsRequireCompletion Boolean  @default(false) @map("instructions_require_completion")
   targetScope     TargetScope @map("target_scope")
   createdAt       DateTime   @default(now()) @map("created_at")
   updatedAt       DateTime   @updatedAt @map("updated_at")

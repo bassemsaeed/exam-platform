@@ -312,19 +312,66 @@ async function sweepExpiredExams(): Promise<number> {
   return done;
 }
 
+async function recoverStuckExportJobs(): Promise<void> {
+  // Single-server recovery: any job left in `running` across a process restart
+  // was interrupted mid-flight and would otherwise stay stuck forever.
+  await prisma.exportJob.updateMany({ where: { status: "running" }, data: { status: "queued" } });
+}
+
+async function expireImportBatches(): Promise<number> {
+  const res = await prisma.importBatch.updateMany({
+    where: { status: "dry_run", expiresAt: { lte: new Date() } },
+    data: { status: "expired", payload: {} },
+  });
+  return res.count;
+}
+
 export function startBackgroundWorker(): void {
-  setInterval(() => void (async () => {
-    try {
-      while (await processNextExportJob());
-    } catch (e) {
-      console.error("export worker tick failed", e);
-    }
-  })(), config.exportJob.pollMs).unref();
-  setInterval(() => void (async () => {
-    try {
-      await sweepExpiredExams();
-    } catch (e) {
-      console.error("expiry sweeper tick failed", e);
-    }
-  })(), config.sweep.pollMs).unref();
+  let exportRunning = false;
+  let sweepRunning = false;
+  let batchRunning = false;
+
+  void recoverStuckExportJobs().catch((e) => console.error("export recovery failed", e));
+
+  setInterval(() => {
+    if (exportRunning) return;
+    exportRunning = true;
+    void (async () => {
+      try {
+        while (await processNextExportJob());
+      } catch (e) {
+        console.error("export worker tick failed", e);
+      } finally {
+        exportRunning = false;
+      }
+    })();
+  }, config.exportJob.pollMs).unref();
+
+  setInterval(() => {
+    if (sweepRunning) return;
+    sweepRunning = true;
+    void (async () => {
+      try {
+        await sweepExpiredExams();
+      } catch (e) {
+        console.error("expiry sweeper tick failed", e);
+      } finally {
+        sweepRunning = false;
+      }
+    })();
+  }, config.sweep.pollMs).unref();
+
+  setInterval(() => {
+    if (batchRunning) return;
+    batchRunning = true;
+    void (async () => {
+      try {
+        await expireImportBatches();
+      } catch (e) {
+        console.error("import batch expiry tick failed", e);
+      } finally {
+        batchRunning = false;
+      }
+    })();
+  }, 5 * 60_000).unref();
 }

@@ -1,5 +1,5 @@
 import { useT } from "../lib/i18n";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useLocation } from "react-router-dom";
 import {
   Plus,
@@ -20,6 +20,10 @@ import {
   CheckCircle2,
   Mail,
   Building2,
+  FileText,
+  KeyRound,
+  Video,
+  Volume2,
 } from "lucide-react";
 import { useMutation } from "@tanstack/react-query";
 import { api, type SessionUser } from "../lib/api";
@@ -56,6 +60,7 @@ import {
 import { EditExamWindow, QuestionSheet } from "./Builder";
 import { AccountGuide } from "./Enhancements";
 import { Combo, MultiPicker } from "../components/builder";
+import { BriefingPlayer, InstructionsEditor } from "../components/Instructions";
 const opts = (values: string[]) =>
   values.map((value) => ({ value, label: label(value) }));
 export function Exams({ user }: { user: SessionUser }) {
@@ -103,41 +108,80 @@ export function Exams({ user }: { user: SessionUser }) {
   function examCards(list: Exam[]) {
     return (
       <div className="exam-grid">
-        {list.map((e) => (
-          <article className="exam-card" key={e.id}>
-            <div className="exam-card-top">
-              <span className="assessment-icon">
-                <ShieldCheck size={20} />
-              </span>
-              <Badge value={student ? "available" : e.status} />
-            </div>
-            <small className="course-code">
-              {e.subject?.code ?? t("ASSESSMENT")}
-            </small>
-            <h2>{nameOf(e, rowsOf(subjects.data))}</h2>
-            <p>
-              {t(label(e.purpose ?? (e.type === "ta_quiz" ? "quiz" : "midterm")))} ·{" "}
-              {t(label(e.type))} · {e.durationMinutes}
-              {t(" minutes ")}
-            </p>
-            <div className="exam-card-date">
-              <Clock size={15} />
-              <span>
-                {date(e.startTime)} · {time(e.startTime)}
-              </span>
-            </div>
-            {e.rejectionReason && (
-              <p className="rejection-note">{e.rejectionReason}</p>
-            )}
-            <Link
-              className="exam-card-action"
-              to={student ? `/exams/${e.id}/take` : `/exams/${e.id}`}
-            >
-              {student ? t("Begin or resume") : t("View assessment")}{" "}
-              <ArrowUpRight size={16} />
-            </Link>
-          </article>
-        ))}
+        {list.map((e) => {
+          const kindLabel = e.purpose ?? (e.type === "ta_quiz" ? "quiz" : "midterm");
+          const hasBriefing = Boolean(
+            e.hasInstructions || e.instructionsText?.trim() || e.instructionsMediaUrl,
+          );
+          const hasCode = Boolean(e.requiresCode || e.hasAccessCode);
+          return (
+            <article className="exam-card" key={e.id}>
+              <div className="exam-card-top">
+                <span className="assessment-icon">
+                  <ShieldCheck size={18} />
+                </span>
+                <div className="card-badge-group">
+                  <span className="code-pill">{t(label(kindLabel))}</span>
+                  <Badge value={student ? "available" : e.status} />
+                </div>
+              </div>
+              <small className="course-code">
+                {e.subject?.code ?? t("ASSESSMENT")}
+              </small>
+              <h2>{nameOf(e, rowsOf(subjects.data))}</h2>
+              <p>
+                {e.durationMinutes} {t("minutes")}
+                {e.type === "ta_quiz" ? ` · ${t("Section quiz")}` : ""}
+              </p>
+              <div className="exam-card-date">
+                <Clock size={14} />
+                <span>
+                  {date(e.startTime)} · {time(e.startTime)} – {time(e.endTime)}
+                </span>
+              </div>
+              {(e.sebRequired || hasCode || hasBriefing) && (
+                <div className="exam-card-pills">
+                  {e.sebRequired && (
+                    <span className="meta-pill">
+                      <ShieldCheck size={12} /> {t("SEB")}
+                    </span>
+                  )}
+                  {hasCode && (
+                    <span className="meta-pill">
+                      <KeyRound size={12} /> {t("Entry code")}
+                    </span>
+                  )}
+                  {hasBriefing && (
+                    <span className="meta-pill">
+                      {e.instructionsMediaType === "video" ? (
+                        <Video size={12} />
+                      ) : e.instructionsMediaType === "audio" ? (
+                        <Volume2 size={12} />
+                      ) : (
+                        <FileText size={12} />
+                      )}
+                      {e.instructionsMediaType === "video"
+                        ? t("Video briefing")
+                        : e.instructionsMediaType === "audio"
+                          ? t("Voice briefing")
+                          : t("Briefing")}
+                    </span>
+                  )}
+                </div>
+              )}
+              {e.rejectionReason && (
+                <p className="rejection-note">{e.rejectionReason}</p>
+              )}
+              <Link
+                className="exam-card-action"
+                to={student ? `/exams/${e.id}/take` : `/exams/${e.id}`}
+              >
+                {student ? t("Begin or resume") : t("View assessment")}{" "}
+                <ArrowUpRight size={15} />
+              </Link>
+            </article>
+          );
+        })}
       </div>
     );
   }
@@ -492,6 +536,16 @@ export function ExamDetail({ user }: { user: SessionUser }) {
   const [openQ, setOpenQ] = useState<string | null>(null);
   const e = query.data?.exam;
   const canSeeAnalytics = admin || (!!e && e.createdBy === user.id);
+  const canEditExam = admin || (!!e && e.createdBy === user.id);
+  const canManageCode = admin || (!!e && e.createdBy === user.id && e.purpose === "quiz");
+  const [briefingText, setBriefingText] = useState("");
+  const [briefingReq, setBriefingReq] = useState(false);
+  const [briefingSaved, setBriefingSaved] = useState(false);
+  useEffect(() => {
+    if (!e) return;
+    setBriefingText(e.instructionsText ?? "");
+    setBriefingReq(Boolean(e.instructionsRequireCompletion));
+  }, [e?.id, e?.instructionsText, e?.instructionsRequireCompletion]);
   function send(body: Record<string, unknown>) {
     if (operation === "edit") {
       action.mutate(
@@ -500,7 +554,17 @@ export function ExamDetail({ user }: { user: SessionUser }) {
           method: "PATCH",
           body,
         },
-        { onSuccess: () => setOperation("") },
+        { onSuccess: () => { setOperation(""); void query.refetch(); } },
+      );
+      return;
+    }
+    if (operation === "access-code") {
+      action.mutate(
+        {
+          path: `/api/v1/${admin ? "admin/" : ""}exams/${id}/access-code`,
+          body,
+        },
+        { onSuccess: () => { setOperation(""); void query.refetch(); } },
       );
       return;
     }
@@ -512,14 +576,14 @@ export function ExamDetail({ user }: { user: SessionUser }) {
             ? { type: body.type, payload: { message: body.message } }
             : body,
       },
-      { onSuccess: () => setOperation("") },
+      { onSuccess: () => { setOperation(""); void query.refetch(); } },
     );
   }
   return (
     <>
       <PageTitle
         title={e ? nameOf(e) : t("Assessment details")}
-        description={t("Blueprint, status, and assessment activity.")}
+        description={t("Blueprint, briefing instructions, status, and assessment activity.")}
       />
       <Link className="back-link" to="/exams">
         {t(" \u2190 Back to exams ")}
@@ -532,12 +596,35 @@ export function ExamDetail({ user }: { user: SessionUser }) {
           <>
             <section className="panel exam-summary">
               <div>
-                <Badge value={e.status} />
-                <h2>{t(label(e.type))}</h2>
+                <div className="card-badge-group">
+                  <Badge value={e.status} />
+                  {e.sebRequired && (
+                    <span className="meta-pill">
+                      <ShieldCheck size={12} /> {t("SEB required")}
+                    </span>
+                  )}
+                  {e.hasAccessCode && (
+                    <span className="meta-pill">
+                      <KeyRound size={12} /> {t("Entry code active")}
+                    </span>
+                  )}
+                  {(e.instructionsText?.trim() || e.instructionsMediaUrl) && (
+                    <span className="meta-pill">
+                      {e.instructionsMediaType === "video" ? (
+                        <Video size={12} />
+                      ) : e.instructionsMediaType === "audio" ? (
+                        <Volume2 size={12} />
+                      ) : (
+                        <FileText size={12} />
+                      )}
+                      {t("Briefing attached")}
+                    </span>
+                  )}
+                </div>
+                <h2>{t(label(e.purpose ?? e.type))}</h2>
                 <p>
                   {date(e.startTime)} · {time(e.startTime)} – {time(e.endTime)}{" "}
-                  · {e.durationMinutes}
-                  {t(" minutes ")}
+                  · {e.durationMinutes} {t("minutes")}
                 </p>
               </div>
               <div className="action-row">
@@ -577,12 +664,13 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                     </button>
                   </>
                 )}
-                {admin && (
+                {canManageCode && (
                   <button
                     className="secondary"
                     onClick={() => setOperation("access-code")}
                   >
-                    {t(" Manage entry code ")}
+                    <KeyRound size={14} />
+                    {e.hasAccessCode ? t("Entry code (set)") : t("Set entry code")}
                   </button>
                 )}
                 {(admin || e.createdBy === user.id) && (
@@ -621,7 +709,7 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                       e.status,
                     ) ||
                       (e.status === "approved" &&
-                        e.type === "ta_quiz")))) && (
+                        (e.type === "ta_quiz" || e.purpose === "quiz"))))) && (
                   <button
                     className="secondary"
                     onClick={() => setOperation("delete")}
@@ -636,7 +724,7 @@ export function ExamDetail({ user }: { user: SessionUser }) {
             </section>
             <Feedback error={action.error} />
             <div className="tabs">
-              {["blueprint", ...(admin ? ["live", "adjustments"] : []), ...(canSeeAnalytics ? ["analytics"] : [])].map(
+              {["blueprint", "briefing", ...(admin ? ["live", "adjustments"] : []), ...(canSeeAnalytics ? ["analytics"] : [])].map(
                 (tabKey) => (
                   <button
                     key={tabKey}
@@ -647,11 +735,100 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                       ? t("Live monitor")
                       : tabKey === "analytics"
                         ? t("Analytics")
-                        : t(label(tabKey))}
+                        : tabKey === "briefing"
+                          ? t("Pre-exam instructions")
+                          : t(label(tabKey))}
                   </button>
                 ),
               )}
             </div>
+            {tab === "briefing" && (
+              <section className="panel">
+                <div className="panel-heading">
+                  <div>
+                    <h2>{t("Pre-exam instructions & briefing")}</h2>
+                    <p>
+                      {t("Displayed to students in the pre-exam lobby before they start their attempt.")}
+                    </p>
+                  </div>
+                </div>
+                {canEditExam && (
+                  <>
+                    <InstructionsEditor
+                      text={briefingText}
+                      onTextChange={(v) => {
+                        setBriefingText(v);
+                        setBriefingSaved(false);
+                      }}
+                      requireCompletion={briefingReq}
+                      onRequireCompletionChange={(v) => {
+                        setBriefingReq(v);
+                        setBriefingSaved(false);
+                      }}
+                      existingMediaUrl={e.instructionsMediaUrl}
+                      existingMediaType={e.instructionsMediaType}
+                      busy={action.isPending}
+                      onUploadLive={async (file, mediaType) => {
+                        const fd = new FormData();
+                        fd.append("media", file);
+                        fd.append("mediaType", mediaType);
+                        await api.upload(`/api/v1/exams/${id}/instructions-media`, fd);
+                        await query.refetch();
+                      }}
+                      onDeleteLive={async () => {
+                        await api.delete(`/api/v1/exams/${id}/instructions-media`);
+                        await query.refetch();
+                      }}
+                    />
+                    <div className="dialog-actions">
+                      {briefingSaved && (
+                        <span className="subtle" role="status">
+                          {t("Instructions saved.")}
+                        </span>
+                      )}
+                      <button
+                        type="button"
+                        className="primary"
+                        disabled={action.isPending}
+                        onClick={() =>
+                          action.mutate(
+                            {
+                              path: `/api/v1/${admin ? "admin/" : ""}exams/${id}`,
+                              method: "PATCH",
+                              body: {
+                                instructionsText: briefingText.trim() || null,
+                                instructionsRequireCompletion: Boolean(
+                                  e.instructionsMediaUrl && briefingReq,
+                                ),
+                              },
+                            },
+                            {
+                              onSuccess: () => {
+                                setBriefingSaved(true);
+                                void query.refetch();
+                              },
+                            },
+                          )
+                        }
+                      >
+                        {action.isPending ? t("Saving…") : t("Save instructions")}
+                      </button>
+                    </div>
+                  </>
+                )}
+                {(e.instructionsText?.trim() || e.instructionsMediaUrl) && (
+                  <div className="briefing-preview-wrap">
+                    <span className="field-label">{t("Student lobby preview")}</span>
+                    <BriefingPlayer
+                      text={e.instructionsText}
+                      mediaUrl={e.instructionsMediaUrl}
+                      mediaType={e.instructionsMediaType}
+                      requireCompletion={e.instructionsRequireCompletion}
+                    />
+                  </div>
+                )}
+              </section>
+            )}
             {tab === "blueprint" && (
               <section className="panel">
                 <div className="panel-heading">
@@ -1141,6 +1318,8 @@ export function ExamDetail({ user }: { user: SessionUser }) {
               title={e.title}
               purpose={e.purpose}
               sebRequired={e.sebRequired}
+              instructionsText={e.instructionsText}
+              instructionsRequireCompletion={e.instructionsRequireCompletion}
               canMidterm={admin || user.role === "doctor"}
               notesEnabled={e.notesEnabled}
               notesForDoctorEnabled={e.notesForDoctorEnabled}
@@ -1152,6 +1331,28 @@ export function ExamDetail({ user }: { user: SessionUser }) {
               onSubmit={send}
             />
           ) : (
+          <>
+          {operation === "access-code" && e?.hasAccessCode && (
+            <div className="info-banner" style={{ marginBottom: 14 }}>
+              <span>{t("An entry code is currently active for this assessment.")}</span>
+              <button
+                type="button"
+                className="text-button danger"
+                disabled={action.isPending}
+                onClick={() =>
+                  action.mutate(
+                    {
+                      path: `/api/v1/${admin ? "admin/" : ""}exams/${id}/access-code`,
+                      method: "DELETE",
+                    },
+                    { onSuccess: () => { setOperation(""); void query.refetch(); } },
+                  )
+                }
+              >
+                {t("Remove entry code")}
+              </button>
+            </div>
+          )}
           <FieldsForm
             fields={
               operation === "reject"
@@ -1169,7 +1370,9 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                           key: "code",
                           label: "Entry code",
                           required: true,
-                          hint: "Students must enter this code to start the exam.",
+                          hint: admin
+                            ? "At least 6 characters. Students must enter this code to start."
+                            : "At least 4 characters. Leave unset or remove above for open quiz entry.",
                         },
                       ]
                     : operation === "events"
@@ -1232,23 +1435,7 @@ export function ExamDetail({ user }: { user: SessionUser }) {
             busy={action.isPending}
             error={action.error}
           />
-          )}
-
-          {operation === "access-code" && (
-            <button
-              className="text-button"
-              onClick={() =>
-                action.mutate(
-                  {
-                    path: `/api/v1/admin/exams/${id}/access-code`,
-                    method: "DELETE",
-                  },
-                  { onSuccess: () => setOperation("") },
-                )
-              }
-            >
-              {t(" Remove entry code ")}
-            </button>
+          </>
           )}
         </Dialog>
       )}
@@ -1554,7 +1741,8 @@ function downloadCsvFile(
   rows: (string | number | null | undefined)[][],
 ) {
   const esc = (v: string | number | null | undefined) => {
-    const s = v == null ? "" : String(v);
+    const raw = v == null ? "" : String(v);
+    const s = /^[=+\-@\t\r]/.test(raw) ? `'${raw}` : raw;
     return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
   const csv = [headers.map(esc).join(","), ...rows.map((r) => r.map(esc).join(","))].join(
@@ -1579,12 +1767,16 @@ export function Results({ user }: { user: SessionUser }) {
     user,
     user.role === "admin"
       ? "/api/v1/admin/exams?limit=100"
-      : "/api/v1/exams/mine?limit=100",
+      : user.role === "doctor"
+        ? "/api/v1/exams/mine?limit=100&include_subject=true"
+        : "/api/v1/exams/mine?limit=100",
     !student,
   );
-  const [selected, setSelected] = useState(
-    new URLSearchParams(location.search).get("exam") ?? "",
-  );
+  const examParam = new URLSearchParams(location.search).get("exam") ?? "";
+  const [selected, setSelected] = useState(examParam);
+  useEffect(() => {
+    if (examParam) setSelected(examParam);
+  }, [examParam]);
   const [search, setSearch] = useState("");
   const [sectionFilter, setSectionFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
@@ -1614,18 +1806,20 @@ export function Results({ user }: { user: SessionUser }) {
   );
 
   const rawGroups = grouped.data?.groups ?? [];
-  const allRows = rawGroups.flatMap((g) =>
+  const allRows: Entity[] = rawGroups.flatMap((g) =>
     g.rows.map((r) => ({ ...r, _sectionName: g.sectionName, _taName: g.taName })),
   );
-  const totalStudents = allRows.length;
-  const submittedRows = allRows.filter((r) => {
+  // Deduplicate students seated in multiple sections so KPI stats count each student once.
+  const uniqueRows = [...new Map(allRows.map((r) => [String(r.id), r])).values()];
+  const totalStudents = uniqueRows.length;
+  const submittedRows = uniqueRows.filter((r) => {
     const st = String((r.exam as Entity)?.status ?? "not_started");
     return st === "submitted" || st === "auto_submitted";
   });
-  const inProgressRows = allRows.filter(
+  const inProgressRows = uniqueRows.filter(
     (r) => String((r.exam as Entity)?.status ?? "not_started") === "in_progress",
   );
-  const notStartedRows = allRows.filter(
+  const notStartedRows = uniqueRows.filter(
     (r) => String((r.exam as Entity)?.status ?? "not_started") === "not_started",
   );
 
@@ -2032,7 +2226,7 @@ export function Results({ user }: { user: SessionUser }) {
                                   <b>{r.name}</b>
                                   <small className="student-meta-line">
                                     <span>@{r.username}</span>
-                                    {r.email && <span>· {String(r.email)}</span>}
+                                    {Boolean(r.email) && <span>· {String(r.email)}</span>}
                                     {r.academicYear != null && (
                                       <span className="year-chip">
                                         {t("Year")} {String(r.academicYear)}
@@ -2151,6 +2345,13 @@ export function Exports({ user }: { user: SessionUser }) {
     "/api/v1/exams/subjects?limit=100",
     staff,
   );
+  const terms = useResource<Entity[]>(
+    user,
+    "/api/v1/admin/terms",
+    !staff,
+  );
+  const termRows = rowsOf(terms.data);
+  const defaultTermId = String(termRows.find((tr) => tr.isCurrent)?.id ?? termRows[0]?.id ?? "");
   const subjectById = new Map(
     rowsOf(subjects.data).map((s) => [s.id, s as Subject]),
   );
@@ -2454,11 +2655,22 @@ export function Exports({ user }: { user: SessionUser }) {
               {
                 key: "examId",
                 label: "Assessment",
+                hint: "Required for Exam or Quiz scope.",
                 options: rowsOf(exams.data).map((e) => ({
                   value: e.id,
                   label: nameOf(e) + " · " + date(e.startTime),
                 })),
                 value: new URLSearchParams(location.search).get("exam") ?? "",
+              },
+              {
+                key: "termId",
+                label: "Term",
+                hint: "Required for All scope.",
+                options: termRows.map((tr) => ({
+                  value: String(tr.id),
+                  label: `${String(tr.name ?? tr.id)}${tr.isCurrent ? " (Current)" : ""}`,
+                })),
+                value: defaultTermId,
               },
               {
                 key: "format",
@@ -2468,12 +2680,15 @@ export function Exports({ user }: { user: SessionUser }) {
                 value: "csv",
               },
             ]}
-            onSubmit={(body) =>
+            onSubmit={(rawBody) => {
+              const body = { ...rawBody };
+              if (body.scope === "all") delete body.examId;
+              else delete body.termId;
               action.mutate(
                 { path: "/api/v1/exports", body },
                 { onSuccess: () => setModal(false) },
-              )
-            }
+              );
+            }}
             busy={action.isPending}
             error={action.error}
             submitLabel={t("Create export")}
@@ -3053,7 +3268,7 @@ export function Roster({ user }: { user: SessionUser }) {
           {selectedSubj && (
             <div className="card-badge-group">
               <span className="code-pill">{selectedSubj.code}</span>
-              {(selectedSubj as Entity).department && (
+              {Boolean((selectedSubj as Entity).department) && (
                 <span className="dept-pill">
                   {String(((selectedSubj as Entity).department as Entity)?.name ?? "")}
                 </span>
@@ -3094,7 +3309,11 @@ export function Roster({ user }: { user: SessionUser }) {
                 <span>{t("Total students")}</span>
                 <Users size={18} />
               </div>
-              <strong>{roster.data?.totalEnrolled || allStudents.length}</strong>
+              <strong>
+                {user.role === "ta"
+                  ? allStudents.length
+                  : (roster.data?.totalEnrolled ?? allStudents.length)}
+              </strong>
               <small>
                 {user.role === "ta"
                   ? t("Students across your sections")

@@ -252,6 +252,8 @@ export interface Field {
   label: string;
   type?: string;
   required?: boolean;
+  /** When true, clearing an initially-populated optional field submits `null` instead of omitting it. */
+  nullable?: boolean;
   /** Render options as pill buttons instead of a dropdown. */
   segmented?: boolean;
   options?: {
@@ -294,7 +296,12 @@ export function FieldsForm({
     const result: Record<string, unknown> = {};
     for (const f of fields) {
       let v = values[f.key];
-      if (v === "" && !f.required) continue;
+      if (v === "" && !f.required) {
+        if (f.nullable && initial[f.key] !== undefined && initial[f.key] !== null && initial[f.key] !== "") {
+          result[f.key] = null;
+        }
+        continue;
+      }
       if (f.type === "number") {
         const n = Number(v);
         if (Number.isNaN(n)) {

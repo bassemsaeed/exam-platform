@@ -60,7 +60,7 @@ const baseFields: Record<string, Field[]> = {
       segmented: true,
       options: options(["student", "doctor", "ta"]),
     },
-    { key: "academicYear", label: "Academic year", type: "number", min: 1 },
+    { key: "academicYear", label: "Academic year", type: "number", min: 1, nullable: true },
   ],
   subjects: [
     { key: "code", label: "Subject code", required: true },
@@ -168,12 +168,11 @@ function RosterEditor({
   const t = useT();
   const [addSel, setAddSel] = useState<string[]>([]);
   const [removeSel, setRemoveSel] = useState<string[]>([]);
+  const [poolSearch, setPoolSearch] = useState("");
   const path = `/api/v1/admin/sections/${sectionId}/members`;
   const membersQ = useResource<{ rows: Entity[]; total: number; truncated: boolean }>(user, path);
-  const poolQ = useResource<Envelope<Entity>>(
-    user,
-    `/api/v1/admin/users?role=student&active=true&limit=100`,
-  );
+  const poolUrl = `/api/v1/admin/users?role=student&active=true&limit=100${poolSearch.trim() ? `&search=${encodeURIComponent(poolSearch.trim())}` : ""}`;
+  const poolQ = useResource<Envelope<Entity>>(user, poolUrl);
   const action = useAction(user, [path]);
   const current: Entity[] = membersQ.data?.rows ?? [];
   const memberIds = new Set(current.map((m) => m.id));
@@ -187,6 +186,11 @@ function RosterEditor({
         {membersQ.data?.truncated ? t(" · list truncated") : ""}
       </p>
       <h3 className="subtle">{t("Add students")}</h3>
+      <SearchBox
+        value={poolSearch}
+        onChange={setPoolSearch}
+        placeholder={t("Search full student directory by name or username…")}
+      />
       {poolQ.isPending ? (
         <Loading />
       ) : (
@@ -280,10 +284,15 @@ export function AdminResource({ user }: { user: SessionUser }) {
         : "/api/v1/admin/assignments/" + assignment
       : "/api/v1/admin/" + resource;
 
+  const isCardAssignView =
+    resource === "assignments" &&
+    assignment === "doctors" &&
+    assignViewMode !== "table";
+
   const queryParams = useMemo(() => {
     const p = new URLSearchParams();
-    p.set("page", String(page));
-    p.set("limit", resource === "subjects" || (resource === "assignments" && assignment === "doctors") ? "60" : "20");
+    p.set("page", isCardAssignView ? "1" : String(page));
+    p.set("limit", isCardAssignView ? "100" : resource === "subjects" ? "60" : "20");
     if (resource === "users") {
       if (roleFilter) p.set("role", roleFilter);
       if (activeFilter) p.set("active", activeFilter);
@@ -304,7 +313,7 @@ export function AdminResource({ user }: { user: SessionUser }) {
       p.set("search", search.trim());
     }
     return p.toString();
-  }, [resource, assignment, page, roleFilter, activeFilter, departmentFilter, collegeFilter, termFilter, search]);
+  }, [resource, assignment, isCardAssignView, page, roleFilter, activeFilter, departmentFilter, collegeFilter, termFilter, search]);
 
   const query = useResource<Envelope<Entity> | Entity[]>(
     user,
@@ -419,6 +428,7 @@ export function AdminResource({ user }: { user: SessionUser }) {
       {
         key: "collegeId",
         label: "College",
+        nullable: true,
         options: pick(rowsOf(colleges.data)),
       },
       edit === "new"
@@ -440,12 +450,14 @@ export function AdminResource({ user }: { user: SessionUser }) {
     fields.push({
       key: "departmentId",
       label: "Department",
+      nullable: true,
       options: pick(rowsOf(departments.data)),
     });
   if (resource === "departments")
     fields.push({
       key: "collegeId",
       label: "College",
+      nullable: true,
       options: pick(rowsOf(colleges.data)),
     });
   if (resource === "sections")
@@ -1397,7 +1409,7 @@ export function AdminResource({ user }: { user: SessionUser }) {
       ) : (
         <Empty title={t("No records found")} />
       )}
-      {!Array.isArray(query.data) && (
+      {!Array.isArray(query.data) && !isCardAssignView && (
         <Pagination data={query.data} page={page} setPage={setPage} />
       )}{" "}
       {assignToSubject && (
@@ -2201,26 +2213,33 @@ export function UserDetail({ user }: { user: SessionUser }) {
               { key: "name", label: "Full name", required: true },
               { key: "username", label: "Username", required: true },
               { key: "email", label: "Email", type: "email" },
-              {
-                key: "role",
-                label: "Role",
-                required: true,
-                options: options(["student", "doctor", "ta", "admin"]),
-              },
+              ...(query.data?.role !== "admin"
+                ? [
+                    {
+                      key: "role",
+                      label: "Role",
+                      required: true,
+                      options: options(["student", "doctor", "ta"]),
+                    },
+                  ]
+                : []),
               {
                 key: "academicYear",
                 label: "Academic year",
                 type: "number",
                 min: 1,
+                nullable: true,
               },
               {
                 key: "collegeId",
                 label: "College",
+                nullable: true,
                 options: pick(rowsOf(colleges.data)),
               },
               {
                 key: "departmentId",
                 label: "Department",
+                nullable: true,
                 options: pick(rowsOf(departments.data)),
               },
               { key: "isActive", label: "Active account", type: "checkbox" },

@@ -93,10 +93,11 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     throw new ApiError(r.status, msg, code, reason, data);
   }
   if (r.status === 204) return undefined as T;
+  const text = await r.text();
+  if (!text) return undefined as T;
   try {
-    return (await r.json()) as T;
+    return JSON.parse(text) as T;
   } catch {
-    const text = await r.text().catch(() => "");
     return text as unknown as T;
   }
 }
