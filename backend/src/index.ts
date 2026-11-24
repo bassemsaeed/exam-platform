@@ -186,6 +186,7 @@ if (isLocalStorage()) {
     requireAuth,
     express.static(path.join(localUploadsDir(), "questions"), {
       maxAge: "1h",
+      acceptRanges: true,
       setHeaders: (res) => res.setHeader("X-Content-Type-Options", "nosniff"),
     }),
     (_req, res) => res.status(404).json({ error: "not found" }),

@@ -61,6 +61,18 @@ import { EditExamWindow, QuestionSheet } from "./Builder";
 import { AccountGuide } from "./Enhancements";
 import { Combo, MultiPicker } from "../components/builder";
 import { BriefingPlayer, InstructionsEditor } from "../components/Instructions";
+import { ExamAnalytics, type ExamAnalyticsData } from "../components/ExamAnalytics";
+import {
+  QuestionMediaEditor,
+  QuestionMediaPlayer,
+  questionDisplayText,
+} from "../components/QuestionMedia";
+import {
+  ALL_QUESTION_TYPES,
+  EssayGradingPanel,
+  QuestionOptionsSummary,
+  questionTypeLabel,
+} from "../components/QuestionTypesUI";
 const opts = (values: string[]) =>
   values.map((value) => ({ value, label: label(value) }));
 export function Exams({ user }: { user: SessionUser }) {
@@ -483,6 +495,11 @@ export function ExamDetail({ user }: { user: SessionUser }) {
     exam: Exam;
     questions: Question[];
     mode: string;
+    targets?: {
+      sections: { id: string; name: string }[];
+      studentCount: number;
+      students?: { id: string; name: string; username?: string | null; email?: string }[];
+    };
     sittings: Record<string, number>;
   }>(user, `/api/v1/exams/${id}/blueprint`);
   const live = useResource<{
@@ -494,46 +511,11 @@ export function ExamDetail({ user }: { user: SessionUser }) {
     `/api/v1/admin/exams/${id}/compensations`,
     admin && tab === "adjustments",
   );
-  const analytics = useResource<{
-    examId: string;
-    assigned: number | null;
-    started: number;
-    absent: number | null;
-    submitted: number;
-    inProgress: number;
-    avg: number;
-    median: number;
-    high: number;
-    low: number;
-    passRate: number;
-    passCount: number;
-    autoSubmitted: number;
-    rushSubmits: number;
-    avgMinutesUsed: number;
-    distribution: number[];
-    submitCurve: { t: string; n: number }[];
-    reentry: { single: { n: number; avg: number }; multi: { n: number; avg: number } };
-    sections: { sectionId: string; name: string; n: number; avg: number; passRate: number }[];
-    questions: {
-      questionId: string;
-      text: string;
-      type: string;
-      difficulty: string;
-      grade: number;
-      attempts: number;
-      answered: number;
-      skipped: number;
-      correct: number;
-      pctCorrect: number;
-      answerRate: number;
-      avgAward: number;
-      flagged: number;
-      voidPassDelta: number;
-      options: { label: string; picks: number }[];
-    }[];
-    prevTerm: { termName: string; avg: number; passRate: number; submitted: number } | null;
-  }>(user, `/api/v1/exams/${id}/analytics`, tab === "analytics");
-  const [openQ, setOpenQ] = useState<string | null>(null);
+  const analytics = useResource<ExamAnalyticsData>(
+    user,
+    `/api/v1/exams/${id}/analytics`,
+    tab === "analytics",
+  );
   const e = query.data?.exam;
   const canSeeAnalytics = admin || (!!e && e.createdBy === user.id);
   const canEditExam = admin || (!!e && e.createdBy === user.id);
@@ -724,7 +706,7 @@ export function ExamDetail({ user }: { user: SessionUser }) {
             </section>
             <Feedback error={action.error} />
             <div className="tabs">
-              {["blueprint", "briefing", ...(admin ? ["live", "adjustments"] : []), ...(canSeeAnalytics ? ["analytics"] : [])].map(
+              {["blueprint", "briefing", ...(admin ? ["live", "adjustments"] : []), ...(canEditExam ? ["grading"] : []), ...(canSeeAnalytics ? ["analytics"] : [])].map(
                 (tabKey) => (
                   <button
                     key={tabKey}
@@ -735,9 +717,11 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                       ? t("Live monitor")
                       : tabKey === "analytics"
                         ? t("Analytics")
-                        : tabKey === "briefing"
-                          ? t("Pre-exam instructions")
-                          : t(label(tabKey))}
+                        : tabKey === "grading"
+                          ? t("Grade essays")
+                          : tabKey === "briefing"
+                            ? t("Pre-exam instructions")
+                            : t(label(tabKey))}
                   </button>
                 ),
               )}
@@ -853,18 +837,55 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                       {t(label(key))} <b>{value}</b>
                     </span>
                   ))}
+                  {query.data?.targets && query.data.targets.studentCount > 0 && (
+                    <span>
+                      {t("Targeted students")} <b>{query.data.targets.studentCount}</b>
+                    </span>
+                  )}
                 </div>
+                {query.data?.targets?.students && query.data.targets.students.length > 0 && (
+                  <div className="target-students-preview">
+                    <span className="field-label">
+                      <Users size={13} /> {t("Eligible students")} ({query.data.targets.students.length})
+                    </span>
+                    <div className="target-student-chips">
+                      {query.data.targets.students.slice(0, 30).map((st) => (
+                        <span className="meta-pill" key={st.id}>
+                          {st.name}
+                          {st.username ? ` (${st.username})` : ""}
+                        </span>
+                      ))}
+                      {query.data.targets.students.length > 30 && (
+                        <span className="subtle">
+                          +{query.data.targets.students.length - 30} {t("more")}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                )}
                 {query.data?.questions.map((q, i) => (
                   <div className="question-preview" key={q.id}>
                     <span>{i + 1}</span>
-                    <div>
-                      <b>{q.text}</b>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <b>{questionDisplayText(q, t)}</b>
                       <small>
                         {q.grade}
                         {t(" marks \u00B7 ")}
-                        {t(label(q.questionType))}
+                        {questionTypeLabel(q.questionType, t)}
+                        {q.mediaType === "video" ? ` · ${t("Video")}` : q.mediaType === "audio" ? ` · ${t("Voice recording")}` : ""}
                       </small>
-                      <p>{q.options.join(" · ")}</p>
+                      {q.mediaUrl && q.mediaType && (
+                        <QuestionMediaPlayer
+                          mediaUrl={q.mediaUrl}
+                          mediaType={q.mediaType}
+                          compact
+                        />
+                      )}
+                      <QuestionOptionsSummary
+                        questionType={q.questionType}
+                        options={q.options}
+                        correctAnswer={q.correctAnswer}
+                      />
                     </div>
                     <Badge value={q.difficulty} />
                   </div>
@@ -966,241 +987,46 @@ export function ExamDetail({ user }: { user: SessionUser }) {
                 )}
               </section>
             )}
-            {tab === "analytics" && canSeeAnalytics && (
+            {tab === "grading" && canEditExam && id && (
               <section className="panel">
                 <div className="panel-heading">
                   <div>
-                    <h2>{t("Analytics")}</h2>
+                    <h2>{t("Grade essays")}</h2>
+                    <p>
+                      {t("Review written essay answers, award marks, and add short grading feedback.")}
+                    </p>
+                  </div>
+                </div>
+                <EssayGradingPanel
+                  user={user}
+                  examId={id}
+                  onGraded={() => void analytics.refetch()}
+                />
+              </section>
+            )}
+            {tab === "analytics" && canSeeAnalytics && (
+              <section className="panel an-panel">
+                <div className="panel-heading">
+                  <div>
+                    <h2>{t("Assessment analytics")}</h2>
                     <p>
                       {t(
-                        "Participation, scores, stuck areas, timing and trends — read-only.",
+                        "Participation, grade distribution, item diagnostics, and automatically flagged high-miss questions.",
                       )}
                     </p>
                   </div>
-                  {typeof analytics.data?.submitted === "number" && (
-                    <span className="subtle">
-                      {t("{0} graded attempts", {
-                        "0": analytics.data.submitted,
-                      })}
-                    </span>
-                  )}
                 </div>
                 <Feedback error={analytics.error} />
                 {analytics.isPending ? (
                   <Loading />
-                ) : analytics.data && analytics.data.submitted ? (
-                  <>
-                    <div className="stat-grid">
-                      <div className="stat-card">
-                        <div>
-                          {t("Participation")}
-                        </div>
-                        <strong>
-                          {analytics.data.submitted}
-                          {analytics.data.assigned !== null &&
-                            ` / ${analytics.data.assigned}`}
-                        </strong>
-                        <small>
-                          {analytics.data.started} {t("started")}
-                          {analytics.data.absent !== null &&
-                            ` · ${analytics.data.absent} ${t("absent")}`}
-                          {analytics.data.inProgress > 0 &&
-                            ` · ${analytics.data.inProgress} ${t("taking now")}`}
-                        </small>
-                      </div>
-                      <div className="stat-card">
-                        <div>{t("Average score")}</div>
-                        <strong>{Math.round(analytics.data.avg)}%</strong>
-                        <small>
-                          {t("median")} {Math.round(analytics.data.median)}% ·{" "}
-                          {t("range")} {Math.round(analytics.data.low)}–
-                          {Math.round(analytics.data.high)}%
-                        </small>
-                      </div>
-                      <div className="stat-card">
-                        <div>{t("Pass rate")}</div>
-                        <strong>{Math.round(analytics.data.passRate)}%</strong>
-                        <small>
-                          {analytics.data.passCount} {t("passed")} ·{" "}
-                          {analytics.data.autoSubmitted} {t("auto-submitted")}
-                        </small>
-                      </div>
-                    </div>
-                    <h3 className="analytics-sub">{t("Score distribution")}</h3>
-                    <div
-                      className="dist-bars"
-                      role="img"
-                      aria-label={t("Score distribution")}
-                    >
-                      {analytics.data.distribution.map((n, i) => {
-                        const max = Math.max(1, ...analytics.data!.distribution);
-                        return (
-                          <div className="dist-bar" key={i}>
-                            <span style={{ height: `${(n / max) * 100}%` }} />
-                            <small>
-                              {i * 10}–{i * 10 + 10}
-                            </small>
-                            <b>{n}</b>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    <h3 className="analytics-sub">
-                      {t("Where they are stuck")}
-                    </h3>
-                    <p className="subtle">
-                      {t(
-                        "Worst first. Open a question for answer splits, option heat and void impact.",
-                      )}
-                    </p>
-                    {analytics.data.questions.map((q) => {
-                      const open = openQ === q.questionId;
-                      const maxPick = Math.max(1, ...q.options.map((o) => o.picks));
-                      return (
-                        <div className="analytics-q" key={q.questionId}>
-                          <button
-                            type="button"
-                            className="analytics-qhead"
-                            aria-expanded={open}
-                            onClick={() =>
-                              setOpenQ(open ? null : q.questionId)
-                            }
-                          >
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <b>{q.text}</b>
-                              <small>
-                                {t(label(q.type))} · {t(label(q.difficulty))} ·{" "}
-                                {q.answered}/{q.attempts} {t("answered")}
-                                {q.skipped > 0 &&
-                                  ` · ${q.skipped} ${t("skipped")}`}
-                                {q.flagged > 0 &&
-                                  ` · ${q.flagged} ${t("flagged")}`}
-                              </small>
-                              <div
-                                className="run-progress"
-                                role="img"
-                                aria-label={t("{0}% correct", {
-                                  "0": q.pctCorrect,
-                                })}
-                              >
-                                <i style={{ width: `${q.pctCorrect}%` }} />
-                              </div>
-                            </div>
-                            <span className="badge">
-                              {q.pctCorrect}
-                              {t("% correct")}
-                            </span>
-                          </button>
-                          {open && (
-                            <div className="analytics-qbody">
-                              <div className="heat">
-                                {q.options.map((o) => (
-                                  <div className="heat-row" key={o.label}>
-                                    <span dir="auto">{o.label}</span>
-                                    <span
-                                      className="heat-bar"
-                                      style={{
-                                        width: `${(o.picks / maxPick) * 100}%`,
-                                      }}
-                                    />
-                                    <b>{o.picks}</b>
-                                  </div>
-                                ))}
-                              </div>
-                              <p className="subtle">
-                                {t("Average award")}: {q.avgAward} / {q.grade}
-                                {q.voidPassDelta > 0 &&
-                                  ` · ${t("Voiding moves {0} across the pass line", { "0": q.voidPassDelta })}`}
-                              </p>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                    {analytics.data.sections.length > 1 && (
-                      <>
-                        <h3 className="analytics-sub">
-                          {t("Sections compared")}
-                        </h3>
-                        {analytics.data.sections.map((s) => (
-                          <div className="question-preview" key={s.sectionId}>
-                            <span>
-                              {s.n} {t("tries")}
-                            </span>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <b>{s.name}</b>
-                              <small>
-                                {t("avg")} {Math.round(s.avg)}% ·{" "}
-                                {Math.round(s.passRate)}% {t("passed")}
-                              </small>
-                              <div
-                                className="run-progress"
-                                role="img"
-                                aria-label={s.name}
-                              >
-                                <i style={{ width: `${s.avg}%` }} />
-                              </div>
-                            </div>
-                          </div>
-                        ))}
-                      </>
-                    )}
-                    <h3 className="analytics-sub">{t("Timing & retries")}</h3>
-                    <div className="mix-summary">
-                      <span>
-                        {t("Avg time used")}
-                        <b>
-                          {Math.round(analytics.data.avgMinutesUsed)}{" "}
-                          {t("min")}
-                        </b>
-                      </span>
-                      <span>
-                        {t("Rush submits")}
-                        <b>{analytics.data.rushSubmits}</b>
-                      </span>
-                      <span>
-                        {t("One entry")}
-                        <b>
-                          {analytics.data.reentry.single.n} ·{" "}
-                          {Math.round(analytics.data.reentry.single.avg)}%
-                        </b>
-                      </span>
-                      <span>
-                        {t("Re-entered")}
-                        <b>
-                          {analytics.data.reentry.multi.n} ·{" "}
-                          {Math.round(analytics.data.reentry.multi.avg)}%
-                        </b>
-                      </span>
-                    </div>
-                    <div
-                      className="dist-bars curve"
-                      role="img"
-                      aria-label={t("Submissions over time")}
-                    >
-                      {analytics.data.submitCurve.map((b, i) => {
-                        const max = Math.max(
-                          1,
-                          ...analytics.data!.submitCurve.map((x) => x.n),
-                        );
-                        return (
-                          <div className="dist-bar" key={i} title={String(b.n)}>
-                            <span style={{ height: `${(b.n / max) * 100}%` }} />
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {analytics.data.prevTerm && (
-                      <p className="subtle">
-                        {t("Last term ({0}): avg {1}%, pass {2}% across {3} attempts.", {
-                          "0": analytics.data.prevTerm.termName,
-                          "1": Math.round(analytics.data.prevTerm.avg),
-                          "2": Math.round(analytics.data.prevTerm.passRate),
-                          "3": analytics.data.prevTerm.submitted,
-                        })}
-                      </p>
-                    )}
-                  </>
+                ) : analytics.data ? (
+                  <ExamAnalytics
+                    data={analytics.data}
+                    examTitle={nameOf(e)}
+                    canCompensate={admin}
+                    onJumpToAdjustments={() => setTab("adjustments")}
+                    onJumpToGrading={canEditExam ? () => setTab("grading") : undefined}
+                  />
                 ) : (
                   <Empty
                     title={t("No graded attempts yet")}
@@ -1453,16 +1279,43 @@ export function QuestionBank({ user }: { user: SessionUser }) {
   const [page, setPage] = useState(1);
   const [search, setSearch] = useState("");
   const [difficulty, setDifficulty] = useState("");
+  const [qTypeFilter, setQTypeFilter] = useState("");
   const [hasImage, setHasImage] = useState("");
+  const [mediaFilter, setMediaFilter] = useState("");
   const [edit, setEdit] = useState<Question | "new" | null>(null);
   const [remove, setRemove] = useState<Question | null>(null);
   const [uploadError, setUploadError] = useState("");
   const [imageFile, setImageFile] = useState<File | null>(null);
+  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
+  const [mediaFile, setMediaFile] = useState<File | null>(null);
+  const [mediaKind, setMediaKind] = useState<"audio" | "video" | null>(null);
+  const [mediaPreviewUrl, setMediaPreviewUrl] = useState<string | null>(null);
   const [imageBusy, setImageBusy] = useState(false);
   const [createdQuestion, setCreatedQuestion] = useState<Question | null>(null);
+
+  useEffect(() => {
+    if (!imageFile) {
+      setImagePreviewUrl(null);
+      return;
+    }
+    const u = URL.createObjectURL(imageFile);
+    setImagePreviewUrl(u);
+    return () => URL.revokeObjectURL(u);
+  }, [imageFile]);
+
+  useEffect(() => {
+    if (!mediaFile) {
+      setMediaPreviewUrl(null);
+      return;
+    }
+    const u = URL.createObjectURL(mediaFile);
+    setMediaPreviewUrl(u);
+    return () => URL.revokeObjectURL(u);
+  }, [mediaFile]);
+
   const query = useResource<Envelope<Question>>(
     user,
-    `/api/v1/question-bank?subject_id=${selectedSubject}&page=${page}&limit=10&search=${encodeURIComponent(search)}${difficulty ? "&difficulty=" + difficulty : ""}${hasImage ? "&has_image=" + hasImage : ""}`,
+    `/api/v1/question-bank?subject_id=${selectedSubject}&page=${page}&limit=10&search=${encodeURIComponent(search)}${difficulty ? "&difficulty=" + difficulty : ""}${qTypeFilter ? "&question_type=" + qTypeFilter : ""}${hasImage ? "&has_image=" + hasImage : ""}${mediaFilter ? "&media_type=" + mediaFilter : ""}`,
     !!selectedSubject,
   );
   const action = useAction<Question>(user, [
@@ -1473,7 +1326,7 @@ export function QuestionBank({ user }: { user: SessionUser }) {
     <>
       <PageTitle
         title={t("Question bank")}
-        description={t("Manage questions, answer keys, and difficulty levels.")}
+        description={t("Manage questions, answer keys, voice/video prompts, and difficulty levels.")}
         action={
           <div className="action-row">
             <Link to="/imports?type=questions" className="button secondary">
@@ -1486,6 +1339,8 @@ export function QuestionBank({ user }: { user: SessionUser }) {
                 action.reset();
                 setUploadError("");
                 setImageFile(null);
+                setMediaFile(null);
+                setMediaKind(null);
                 setCreatedQuestion(null);
                 setEdit("new");
               }}
@@ -1539,9 +1394,24 @@ export function QuestionBank({ user }: { user: SessionUser }) {
           ariaLabel={t("Difficulty")}
         />
         <Combo
+          value={qTypeFilter}
+          options={[
+            { value: "", label: t("All question types") },
+            ...ALL_QUESTION_TYPES.map((item) => ({
+              value: item.value,
+              label: t(item.label),
+            })),
+          ]}
+          onChange={(v) => {
+            setQTypeFilter(v);
+            setPage(1);
+          }}
+          ariaLabel={t("Question type")}
+        />
+        <Combo
           value={hasImage}
           options={[
-            { value: "", label: t("All questions") },
+            { value: "", label: t("All images") },
             { value: "true", label: t("With images") },
             { value: "false", label: t("Missing images") },
           ]}
@@ -1551,6 +1421,21 @@ export function QuestionBank({ user }: { user: SessionUser }) {
           }}
           ariaLabel={t("Filter by image")}
         />
+        <Combo
+          value={mediaFilter}
+          options={[
+            { value: "", label: t("All audio/video") },
+            { value: "audio", label: t("Voice recordings") },
+            { value: "video", label: t("Videos") },
+            { value: "any", label: t("With audio/video") },
+            { value: "none", label: t("No audio/video") },
+          ]}
+          onChange={(v) => {
+            setMediaFilter(v);
+            setPage(1);
+          }}
+          ariaLabel={t("Filter by audio or video")}
+        />
       </div>
       <Feedback error={query.error} />
       {(query.isPending || query.isPlaceholderData) && selectedSubject ? (
@@ -1559,7 +1444,7 @@ export function QuestionBank({ user }: { user: SessionUser }) {
         <section className="panel">
           {query.data.rows.map((q) => (
             <div className="bank-question" key={q.id}>
-              <div>
+              <div style={{ flex: 1, minWidth: 0 }}>
                 <div className="question-tags">
                   <Badge value={q.difficulty} />
                   <span
@@ -1574,12 +1459,25 @@ export function QuestionBank({ user }: { user: SessionUser }) {
                   >
                     <ImageIcon size={13} />
                   </span>
+                  {q.mediaUrl && q.mediaType && (
+                    <span className="media-type-chip">
+                      {q.mediaType === "video" ? <Video size={12} /> : <Volume2 size={12} />}
+                      {q.mediaType === "video" ? t("Video") : t("Voice")}
+                    </span>
+                  )}
                   <span>
-                    {t(label(q.questionType))} · {q.grade}
+                    {questionTypeLabel(q.questionType, t)} · {q.grade}
                     {t(" marks ")}
                   </span>
                 </div>
-                <h3>{q.text}</h3>
+                <h3>{questionDisplayText(q, t)}</h3>
+                {q.mediaUrl && q.mediaType && (
+                  <QuestionMediaPlayer
+                    mediaUrl={q.mediaUrl}
+                    mediaType={q.mediaType}
+                    compact
+                  />
+                )}
                 {q.imageUrl && (
                   <img
                     className="question-image"
@@ -1591,16 +1489,11 @@ export function QuestionBank({ user }: { user: SessionUser }) {
                     alt={t("Question diagram")}
                   />
                 )}
-                <div className="option-chips">
-                  {q.options.map((o) => (
-                    <span
-                      key={o}
-                      className={o === q.correctAnswer ? "correct" : ""}
-                    >
-                      {o}
-                    </span>
-                  ))}
-                </div>
+                <QuestionOptionsSummary
+                  questionType={q.questionType}
+                  options={q.options}
+                  correctAnswer={q.correctAnswer}
+                />
               </div>
               <div className="action-row">
                 <button
@@ -1610,6 +1503,8 @@ export function QuestionBank({ user }: { user: SessionUser }) {
                     action.reset();
                     setUploadError("");
                     setImageFile(null);
+                    setMediaFile(null);
+                    setMediaKind(null);
                     setCreatedQuestion(null);
                     setEdit(q);
                   }}
@@ -1643,7 +1538,19 @@ export function QuestionBank({ user }: { user: SessionUser }) {
           subjectLocked={edit === "new"}
           busy={action.isPending || imageBusy}
           error={uploadError || action.error}
-          onClose={() => setEdit(null)}
+          hasPendingAttachment={Boolean(mediaFile || imageFile)}
+          pendingMedia={
+            mediaPreviewUrl && mediaKind
+              ? { url: mediaPreviewUrl, type: mediaKind }
+              : null
+          }
+          pendingImageUrl={imagePreviewUrl}
+          onClose={() => {
+            setEdit(null);
+            setImageFile(null);
+            setMediaFile(null);
+            setMediaKind(null);
+          }}
           onSubmit={async (body) => {
             setImageBusy(true); setUploadError("");
             try {
@@ -1659,12 +1566,46 @@ export function QuestionBank({ user }: { user: SessionUser }) {
                 const data = new FormData(); data.set("image", imageFile);
                 await api.upload(`/api/v1/question-bank/${q.id}/image`, data);
               }
-              await query.refetch(); setEdit(null); setImageFile(null); setCreatedQuestion(null);
+              if (mediaFile && mediaKind) {
+                if (previewMode) throw new Error("Media uploads require the connected backend.");
+                const data = new FormData();
+                data.set("media", mediaFile);
+                data.set("mediaType", mediaKind);
+                await api.upload(`/api/v1/question-bank/${q.id}/media`, data);
+              }
+              await query.refetch();
+              setEdit(null);
+              setImageFile(null);
+              setMediaFile(null);
+              setMediaKind(null);
+              setCreatedQuestion(null);
             } catch (err) { setUploadError(err instanceof Error ? err.message : "Upload failed"); }
             finally { setImageBusy(false); }
           }}
+          mediaUpload={
+            <QuestionMediaEditor
+              existingMediaUrl={edit !== "new" ? (edit as Question).mediaUrl : null}
+              existingMediaType={edit !== "new" ? (edit as Question).mediaType : null}
+              pendingFile={mediaFile}
+              pendingMediaType={mediaKind}
+              busy={action.isPending || imageBusy}
+              onPendingChange={(file, kind) => {
+                setMediaFile(file);
+                setMediaKind(kind);
+              }}
+              onDeleteExisting={
+                edit !== "new" && (edit as Question).mediaUrl
+                  ? async () => {
+                      await api.delete(`/api/v1/question-bank/${(edit as Question).id}/media`);
+                      await query.refetch();
+                      setEdit({ ...(edit as Question), mediaUrl: null, mediaType: null });
+                    }
+                  : undefined
+              }
+            />
+          }
           imageUpload={<div className="field">
-            <label htmlFor="qs-image">{t("Attach question image")}</label>
+            <label htmlFor="qs-image">{t("Attach question image (optional)")}</label>
             {edit !== "new" && (edit as Question).imageUrl && !imageFile && (
               <div className="image-current">
                 <img

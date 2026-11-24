@@ -6,48 +6,46 @@ import { z } from "zod";
 import { audit } from "../lib/audit.js";
 import { config } from "../lib/config.js";
 import type { Role } from "../generated/prisma/browser.js";
-import { storage, sniffImage } from "../lib/storage.js";
+import { storage, sniffImage, sniffMedia } from "../lib/storage.js";
+import { QUESTION_TYPES, normalizeQuestionSpec, type QuestionTypeValue } from "../lib/questionTypes.js";
 import { envelope, page, pageQuery } from "../lib/pagination.js";
 import { prisma } from "../lib/prisma.js";
 import { requireAuth, requirePermission, type AuthedRequest } from "../middleware/auth.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: config.uploadMaxBytes } });
+const QUESTION_MEDIA_MAX_BYTES = 25 * 1024 * 1024;
+const mediaUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: QUESTION_MEDIA_MAX_BYTES } });
 // Raster-only image whitelist: SVG is XML + script (stored XSS served from
 // /uploads in-app origin). Extension checked server-side — the client MIME is
 // untrusted. Zip-imported images go through the same gate at commit time.
 const IMAGE_EXTS = [".png", ".jpg", ".jpeg", ".webp", ".gif"] as const;
+const MEDIA_EXTS = [".mp3", ".wav", ".ogg", ".m4a", ".webm", ".mp4", ".mov"] as const;
 
 function imageExtOk(filename: string): boolean {
   const dot = filename.lastIndexOf(".");
   return dot >= 0 && (IMAGE_EXTS as readonly string[]).includes(filename.slice(dot).toLowerCase());
 }
-const TYPES = ["mcq", "true_false"] as const;
+function mediaExtOk(filename: string): boolean {
+  const dot = filename.lastIndexOf(".");
+  return dot >= 0 && (MEDIA_EXTS as readonly string[]).includes(filename.slice(dot).toLowerCase());
+}
+const TYPES = QUESTION_TYPES;
 const DIFFS = ["easy", "medium", "hard"] as const;
 
 const questionBody = z.object({
   subjectId: z.string(),
   questionType: z.enum(TYPES),
-  text: z.string().trim().min(1),
-  options: z.array(z.string().trim().min(1)).min(2).max(6),
-  correctAnswer: z.string().trim().min(1),
+  // Text may be empty when an audio/video recording or image is attached (media-only question).
+  text: z.string().trim().max(5000).default(""),
+  mediaPending: z.boolean().optional(),
+  // Shape varies by questionType (string[] for mcq/true_false/multi_select/short_answer/ordering,
+  // { pairs: [{left, right}] } for matching, [] for essay) — validated by normalizeQuestionSpec.
+  options: z.unknown().default([]),
+  correctAnswer: z.string().max(5000).default(""),
   grade: z.number().positive(),
   difficulty: z.enum(DIFFS),
 });
-
-function checkOptions(t: (typeof TYPES)[number], options: string[], correct: string): string | null {
-  const trimmed = options.map((o) => o.trim());
-  if (trimmed.some((o) => !o)) return "options cannot be empty";
-  if (new Set(trimmed).size !== trimmed.length) return "options must be unique";
-  if (!trimmed.includes(correct.trim())) return "correctAnswer must be one of options";
-  if (t === "true_false") {
-    const low = trimmed.map((o) => o.toLowerCase());
-    if (low.length !== 2 || !low.includes("true") || !low.includes("false")) {
-      return "true_false requires options [True, False]";
-    }
-  }
-  return null;
-}
 
 async function doctorOwns(userId: string, subjectId: string): Promise<boolean> {
   return (await prisma.doctorAssignment.count({ where: { doctorId: userId, subjectId, term: { isCurrent: true } } })) > 0;
@@ -78,7 +76,16 @@ questionBank.get("/", async (req, res) => {
   const tri = (v: string | undefined): boolean | undefined =>
     v === undefined ? undefined : v === "true";
   const q = pageQuery
-    .extend({ subject_id: z.string(), owner_type: z.enum(["doctor", "ta_shared"]).optional(), mine: z.enum(["true", "false"]).optional().transform(tri), difficulty: z.enum(DIFFS).optional(), search: z.string().max(120).optional(), has_image: z.enum(["true", "false"]).optional().transform(tri) })
+    .extend({
+      subject_id: z.string(),
+      owner_type: z.enum(["doctor", "ta_shared"]).optional(),
+      mine: z.enum(["true", "false"]).optional().transform(tri),
+      difficulty: z.enum(DIFFS).optional(),
+      question_type: z.enum(TYPES).optional(),
+      search: z.string().max(120).optional(),
+      has_image: z.enum(["true", "false"]).optional().transform(tri),
+      media_type: z.enum(["audio", "video", "any", "none"]).optional(),
+    })
     .parse(req.query);
   if (!(await mayBank(a.userId, a.role, q.subject_id))) return res.status(403).json({ error: "not your subject" });
   // Banks are separate: doctors see private, TAs see shared (never each other's).
@@ -88,15 +95,21 @@ questionBank.get("/", async (req, res) => {
   if (a.role === "student") return res.status(403).json({ error: "forbidden" });
   // Banks are separate AND private: doctors always see only their own rows,
   // TAs see the shared bank (optionally only their own via mine).
+  const andFilters: object[] = [];
+  if (q.has_image === true) andFilters.push({ NOT: [{ imageUrl: null }, { imageUrl: "" }] });
+  if (q.has_image === false) andFilters.push({ OR: [{ imageUrl: null }, { imageUrl: "" }] });
+  if (q.media_type === "audio") andFilters.push({ mediaType: "audio", NOT: [{ mediaUrl: null }, { mediaUrl: "" }] });
+  if (q.media_type === "video") andFilters.push({ mediaType: "video", NOT: [{ mediaUrl: null }, { mediaUrl: "" }] });
+  if (q.media_type === "any") andFilters.push({ NOT: [{ mediaUrl: null }, { mediaUrl: "" }] });
+  if (q.media_type === "none") andFilters.push({ OR: [{ mediaUrl: null }, { mediaUrl: "" }] });
   const where = {
     subjectId: q.subject_id,
     ...(ownerType ? { ownerType } : {}),
     ...(a.role === "doctor" ? { doctorId: a.userId } : q.mine ? { addedByTaId: a.userId } : {}),
     ...(q.difficulty ? { difficulty: q.difficulty } : {}),
+    ...(q.question_type ? { questionType: q.question_type } : {}),
     ...(q.search?.trim() ? { text: { contains: q.search.trim(), mode: "insensitive" as const } } : {}),
-    // Image presence: null or empty string both count as missing.
-    ...(q.has_image === true ? { NOT: [{ imageUrl: null }, { imageUrl: "" }] } : {}),
-    ...(q.has_image === false ? { OR: [{ imageUrl: null }, { imageUrl: "" }] } : {}),
+    ...(andFilters.length ? { AND: andFilters } : {}),
   };
   const [total, rows] = await Promise.all([
     prisma.question.count({ where }),
@@ -145,8 +158,11 @@ questionBank.post("/", async (req, res) => {
     ownerType = a.role === "doctor" ? "doctor" : "ta_shared";
     ownerId = a.userId;
   }
-  const optErr = checkOptions(body.questionType, body.options, body.correctAnswer);
-  if (optErr) return res.status(422).json({ error: optErr });
+  if (!body.text && !body.mediaPending) {
+    return res.status(422).json({ error: "question text or audio/video/image attachment is required" });
+  }
+  const spec = normalizeQuestionSpec(body.questionType, body.options, body.correctAnswer);
+  if (!spec.ok) return res.status(422).json({ error: spec.error });
   const row = await prisma.question.create({
     data: {
       subjectId: body.subjectId,
@@ -155,8 +171,8 @@ questionBank.post("/", async (req, res) => {
       addedByTaId: ownerType === "ta_shared" ? ownerId : null,
       questionType: body.questionType,
       text: body.text,
-      options: body.options,
-      correctAnswer: body.correctAnswer,
+      options: spec.options as object,
+      correctAnswer: spec.correctAnswer,
       grade: body.grade,
       difficulty: body.difficulty,
     },
@@ -177,17 +193,23 @@ async function ownQuestionOr403(userId: string, role: Role, id: string) {
 // Whitelist update — ownership/subject can never move via PATCH (transfer attack).
 questionBank.patch("/:id", async (req, res) => {
   const a = req as unknown as AuthedRequest;
-  const body = questionBody.omit({ subjectId: true }).partial().parse(req.body);
+  const parsed = questionBody.omit({ subjectId: true }).partial().parse(req.body);
+  const { mediaPending, ...body } = parsed;
   // Ownership first: validating options before the check leaks existence of
   // other banks' questions (404/422 vs 403 oracle).
   const own = await ownQuestionOr403(a.userId, a.role, String(req.params.id));
   if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
-  if (body.options || body.correctAnswer || body.questionType) {
-    const t = (body.questionType ?? own.q.questionType) as never;
-    const o = (body.options ?? (own.q.options as string[])) as string[];
-    const c = body.correctAnswer ?? own.q.correctAnswer;
-    const optErr = checkOptions(t, o, c);
-    if (optErr) return res.status(422).json({ error: optErr });
+  if (body.text !== undefined && !body.text.trim() && !own.q.mediaUrl && !own.q.imageUrl && !mediaPending) {
+    return res.status(422).json({ error: "question text or audio/video/image attachment is required" });
+  }
+  if (body.options !== undefined || body.correctAnswer !== undefined || body.questionType !== undefined) {
+    const t = (body.questionType ?? own.q.questionType) as QuestionTypeValue;
+    const o = body.options !== undefined ? body.options : own.q.options;
+    const c = body.correctAnswer !== undefined ? body.correctAnswer : own.q.correctAnswer;
+    const spec = normalizeQuestionSpec(t, o, c);
+    if (!spec.ok) return res.status(422).json({ error: spec.error });
+    body.options = spec.options;
+    body.correctAnswer = spec.correctAnswer;
   }
   const structuralChange =
     body.options !== undefined ||
@@ -239,14 +261,14 @@ questionBank.patch("/:id", async (req, res) => {
           }
         }
       }
-      const row = await tx.question.update({ where: { id: own.q.id }, data: body });
+      const row = await tx.question.update({ where: { id: own.q.id }, data: body as never });
       return { row };
     });
     if ("conflict" in result) return res.status(409).json(result.conflict);
     await audit(a.userId, "question.update", "question", result.row.id, body);
     return res.json(result.row);
   }
-  const row = await prisma.question.update({ where: { id: own.q.id }, data: body });
+  const row = await prisma.question.update({ where: { id: own.q.id }, data: body as never });
   await audit(a.userId, "question.update", "question", row.id, body);
   res.json(row);
 });
@@ -296,6 +318,10 @@ questionBank.delete("/:id", async (req, res) => {
     return null;
   });
   if (conflict) return res.status(409).json(conflict);
+  const imgKey = own.q.imageUrl ? storage.keyFromUrl(own.q.imageUrl) : null;
+  const mediaKey = own.q.mediaUrl ? storage.keyFromUrl(own.q.mediaUrl) : null;
+  if (imgKey) await storage.delete(imgKey).catch(() => undefined);
+  if (mediaKey) await storage.delete(mediaKey).catch(() => undefined);
   await audit(a.userId, "question.delete", "question", own.q.id);
   res.json({ ok: true });
 });
@@ -341,6 +367,67 @@ questionBank.delete("/:id/image", async (req, res) => {
   res.json({ ok: true });
 });
 
+// POST /question-bank/:id/media (multipart media=, optional mediaType=audio|video)
+// Attaches an audio recording or video clip to a question (max 25 MB, magic-byte verified).
+questionBank.post("/:id/media", mediaUpload.single("media"), async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  const own = await ownQuestionOr403(a.userId, a.role, String(req.params.id));
+  if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
+  if (!req.file) return res.status(400).json({ error: "media file required" });
+  if (!mediaExtOk(req.file.originalname)) {
+    return res.status(422).json({ error: "media must be mp3, wav, ogg, m4a, webm, mp4, or mov" });
+  }
+  const rawHint = String((req.body as Record<string, unknown> | undefined)?.mediaType ?? "").toLowerCase();
+  const hint: "audio" | "video" | undefined =
+    rawHint === "audio" || rawHint === "video"
+      ? rawHint
+      : req.file.mimetype.startsWith("audio/")
+        ? "audio"
+        : req.file.mimetype.startsWith("video/")
+          ? "video"
+          : undefined;
+  const sniffed = sniffMedia(req.file.buffer, hint);
+  if (!sniffed) {
+    return res.status(422).json({ error: "file is not a valid audio or video recording" });
+  }
+  const oldKey = own.q.mediaUrl ? storage.keyFromUrl(own.q.mediaUrl) : null;
+  const stored = await storage.put(`questions/${own.q.subjectId}`, `question-${sniffed.kind}${sniffed.ext}`, req.file.buffer);
+  const row = await prisma.question.update({
+    where: { id: own.q.id },
+    data: { mediaUrl: stored.url, mediaType: sniffed.kind },
+  });
+  if (oldKey && oldKey !== stored.key) {
+    await storage.delete(oldKey).catch(() => undefined);
+  }
+  await audit(a.userId, "question.media", "question", row.id, {
+    mediaType: sniffed.kind,
+    bytes: req.file.size,
+  });
+  res.json({ mediaUrl: stored.url, mediaType: sniffed.kind });
+});
+
+// DELETE /question-bank/:id/media — remove attached audio/video recording (orphan-safe).
+questionBank.delete("/:id/media", async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  const own = await ownQuestionOr403(a.userId, a.role, String(req.params.id));
+  if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
+  if (!own.q.mediaUrl) return res.status(404).json({ error: "no media attached" });
+  const key = storage.keyFromUrl(own.q.mediaUrl);
+  const row = await prisma.question.update({
+    where: { id: own.q.id },
+    data: { mediaUrl: null, mediaType: null },
+  });
+  if (key) {
+    try {
+      await storage.delete(key);
+    } catch {
+      await audit(a.userId, "question.media-orphan", "question", row.id, { key }).catch(() => undefined);
+    }
+  }
+  await audit(a.userId, "question.media-delete", "question", row.id);
+  res.json({ ok: true });
+});
+
 // Excel columns: subject_code*, question_type(mcq|true_false)*, text*, options(A|B|C)*,
 // correct_answer*, grade(number>0)*, difficulty(easy|medium|hard)*, image_filename?
 // (admin rows also need owner_type(doctor|ta_shared)* + owner(username)*).
@@ -355,13 +442,15 @@ interface BankRow {
   subjectId: string;
   ownerType: "doctor" | "ta_shared";
   ownerId: string;
-  questionType: "mcq" | "true_false";
+  questionType: QuestionTypeValue;
   text: string;
-  options: string[];
+  options: unknown;
   correctAnswer: string;
   grade: number;
   difficulty: "easy" | "medium" | "hard";
   imageFilename?: string;
+  mediaFilename?: string;
+  mediaType?: "audio" | "video";
 }
 
 async function readZipEntryBounded(
@@ -498,15 +587,32 @@ questionBank.post("/import/dry-run", rateLimit(30, 60_000, "bank-import:dry-run"
     const code = targetCode || str(r.subject_code);
     const subjectId = targetSubjectId ?? subjects.get(code);
     if (!subjectId) return fail(`unknown subject_code: ${code || "(empty)"}`);
-    const t = str(r.question_type).toLowerCase();
-    if (t !== "mcq" && t !== "true_false") return fail(`bad question_type: ${t}`);
+    const t = str(r.question_type).toLowerCase() as QuestionTypeValue;
+    if (!(TYPES as readonly string[]).includes(t)) return fail(`bad question_type: ${t}`);
     const text = str(r.text);
-    if (!text) return fail("missing text");
-    const options = str(r.options).split("|").map((s) => s.trim()).filter(Boolean);
-    if (options.length < 2) return fail("options needs 2+ pipe-separated values");
-    const correctAnswer = str(r.correct_answer);
-    const optErr = checkOptions(t, options, correctAnswer);
-    if (optErr) return fail(optErr);
+    const rawOptStr = str(r.options);
+    const rawCorrect = str(r.correct_answer);
+    let parsedOptions: unknown = rawOptStr.split("|").map((s) => s.trim()).filter(Boolean);
+    if (t === "matching") {
+      // Format: Left1=Right1|Left2=Right2
+      const pairs = rawOptStr
+        .split("|")
+        .map((part) => {
+          const idx = part.indexOf("=");
+          if (idx < 0) return null;
+          return { left: part.slice(0, idx).trim(), right: part.slice(idx + 1).trim() };
+        })
+        .filter((p): p is { left: string; right: string } => Boolean(p && p.left && p.right));
+      parsedOptions = { pairs };
+    } else if (t === "short_answer" && !rawOptStr && rawCorrect) {
+      parsedOptions = rawCorrect.split("|").map((s) => s.trim()).filter(Boolean);
+    } else if (t === "essay") {
+      parsedOptions = [];
+    }
+    const spec = normalizeQuestionSpec(t, parsedOptions, rawCorrect);
+    if (!spec.ok) return fail(spec.error);
+    const options = spec.options;
+    const correctAnswer = spec.correctAnswer;
     const grade = Number(str(r.grade));
     if (!Number.isFinite(grade) || grade <= 0) return fail(`bad grade: ${str(r.grade)}`);
     const d = str(r.difficulty).toLowerCase();
@@ -515,6 +621,18 @@ questionBank.post("/import/dry-run", rateLimit(30, 60_000, "bank-import:dry-run"
     if (imageFilename && !imageExtOk(imageFilename)) return fail(`bad image type (png|jpg|jpeg|webp|gif only): ${imageFilename}`);
     if (imageFilename && !images.has(imageFilename)) return fail(`image not in zip: ${imageFilename}`);
     if (imageFilename && !sniffImage(images.get(imageFilename)!)) return fail(`image is not a real png|jpg|gif|webp file: ${imageFilename}`);
+    const mediaFilename = str(r.media_filename) || undefined;
+    let mediaType: "audio" | "video" | undefined;
+    if (mediaFilename) {
+      if (!mediaExtOk(mediaFilename)) return fail(`bad media type (mp3|wav|ogg|m4a|webm|mp4|mov): ${mediaFilename}`);
+      if (!images.has(mediaFilename)) return fail(`media not in zip: ${mediaFilename}`);
+      const hintRaw = str(r.media_type).toLowerCase();
+      const hint = hintRaw === "audio" || hintRaw === "video" ? hintRaw : undefined;
+      const sniffed = sniffMedia(images.get(mediaFilename)!, hint);
+      if (!sniffed) return fail(`media is not a valid audio/video file: ${mediaFilename}`);
+      mediaType = sniffed.kind;
+    }
+    if (!text && !imageFilename && !mediaFilename) return fail("missing text (or attach image_filename / media_filename)");
 
     let ownerType: BankRow["ownerType"];
     let ownerId: string;
@@ -535,7 +653,7 @@ questionBank.post("/import/dry-run", rateLimit(30, 60_000, "bank-import:dry-run"
       ownerType = "ta_shared";
       ownerId = a.userId;
     }
-    rows.push({ line, subjectId, ownerType, ownerId, questionType: t, text, options, correctAnswer, grade, difficulty: d, imageFilename });
+    rows.push({ line, subjectId, ownerType, ownerId, questionType: t, text, options, correctAnswer, grade, difficulty: d, imageFilename, mediaFilename, mediaType });
     } catch (e) {
       if (!(e instanceof RowSkip)) throw e;
     }
@@ -629,8 +747,9 @@ questionBank.post("/import/commit", rateLimit(30, 60_000, "bank-import:commit"),
     for (let i = 0; i < staged.rows.length; i += 100) {
     const docs: {
       subjectId: string; ownerType: "doctor" | "ta_shared"; doctorId: string | null; addedByTaId: string | null;
-      questionType: "mcq" | "true_false"; text: string; options: object; correctAnswer: string;
+      questionType: QuestionTypeValue; text: string; options: object; correctAnswer: string;
       grade: number; difficulty: "easy" | "medium" | "hard"; imageUrl: string | null;
+      mediaUrl: string | null; mediaType: string | null;
     }[] = [];
     for (const r of staged.rows.slice(i, i + 100)) {
       try {
@@ -646,12 +765,28 @@ questionBank.post("/import/commit", rateLimit(30, 60_000, "bank-import:commit"),
           );
           imageUrl = (await storage.put(`questions/${subCodes.get(r.subjectId)}`, r.imageFilename, buf)).url;
         }
+        let mediaUrl: string | null = null;
+        let mediaType: string | null = null;
+        if (r.mediaFilename) {
+          if (!mediaExtOk(r.mediaFilename)) throw new Error(`bad media type: ${r.mediaFilename}`);
+          const buf = cimages.get(r.mediaFilename);
+          if (!buf) throw new Error(`media not in zip: ${r.mediaFilename}`);
+          const sniffed = sniffMedia(buf, r.mediaType);
+          if (!sniffed) throw new Error(`media is not a valid audio/video file: ${r.mediaFilename}`);
+          subCodes.set(
+            r.subjectId,
+            subCodes.get(r.subjectId) ?? (await prisma.subject.findUnique({ where: { id: r.subjectId }, select: { code: true } }))?.code ?? r.subjectId,
+          );
+          mediaUrl = (await storage.put(`questions/${subCodes.get(r.subjectId)}`, r.mediaFilename, buf)).url;
+          mediaType = sniffed.kind;
+        }
         docs.push({
           subjectId: r.subjectId, ownerType: r.ownerType,
           doctorId: r.ownerType === "doctor" ? r.ownerId : null,
           addedByTaId: r.ownerType === "ta_shared" ? r.ownerId : null,
           questionType: r.questionType, text: r.text, options: r.options as unknown as object,
           correctAnswer: r.correctAnswer, grade: r.grade, difficulty: r.difficulty, imageUrl,
+          mediaUrl, mediaType,
         });
       } catch (e) {
         rowErrors.push({ line: r.line, reason: e instanceof Error ? e.message : "failed" });

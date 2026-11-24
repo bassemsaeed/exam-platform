@@ -25,6 +25,8 @@ import { apiUrl, sebHeaders } from "../lib/seb";
 import { ApiError } from "../lib/api";
 import { ExamTools } from "../components/ExamTools";
 import { BriefingPlayer } from "../components/Instructions";
+import { QuestionMediaPlayer } from "../components/QuestionMedia";
+import { RunnerQuestionInput, questionTypeLabel } from "../components/QuestionTypesUI";
 import { Feedback, Confirm, Dialog, PageTitle } from "../components/ui";
 export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity: (path: string | null) => void }) {
   const t = useT();
@@ -235,8 +237,9 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
       ),
     onError: setError,
   });
+  const textTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const choose = useCallback(
-    (questionId: string, selectedAnswer: string | null) => {
+    (questionId: string, selectedAnswer: string | null, debounceMs = 0) => {
       // Refresh-proof drafts: every optimistic answer (including explicit clears)
       // lands in sessionStorage first, so a reload replays whatever the server never confirmed.
       try {
@@ -257,15 +260,35 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
             }
           : s,
       );
-      setQueued((n) => n + 1);
-      queue.current = queue.current
-        .catch(() => {})
-        .then(() => answer.mutateAsync({ questionId, selectedAnswer }))
-        .catch(() => {})
-        .finally(() => setQueued((n) => n - 1));
+      const prevTimer = textTimers.current.get(questionId);
+      if (prevTimer) {
+        clearTimeout(prevTimer);
+        textTimers.current.delete(questionId);
+      }
+      const enqueue = () => {
+        setQueued((n) => n + 1);
+        queue.current = queue.current
+          .catch(() => {})
+          .then(() => answer.mutateAsync({ questionId, selectedAnswer }))
+          .catch(() => {})
+          .finally(() => setQueued((n) => n - 1));
+      };
+      if (debounceMs > 0) {
+        const tm = setTimeout(() => {
+          textTimers.current.delete(questionId);
+          enqueue();
+        }, debounceMs);
+        textTimers.current.set(questionId, tm);
+      } else {
+        enqueue();
+      }
     },
     [answer, user.id, id],
   );
+  useEffect(() => () => {
+    textTimers.current.forEach((tm) => clearTimeout(tm));
+    textTimers.current.clear();
+  }, []);
   // Replay refresh-proof drafts once per attempt: anything the server never
   // confirmed (differs from the loaded sitting) goes back through the queue.
   const draftReplayed = useRef("");
@@ -451,13 +474,19 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
           setIndex(index + 1);
       } else if (e.key === "ArrowLeft") {
         if (index > 0) setIndex(index - 1);
-      } else if (cur && remaining > 0 && !finish.isPending) {
+      } else if (
+        cur &&
+        remaining > 0 &&
+        !finish.isPending &&
+        (cur.questionType === "mcq" || cur.questionType === "true_false") &&
+        Array.isArray(cur.options)
+      ) {
         const n = e.key >= "1" && e.key <= "9" ? Number(e.key) - 1 : -1;
         const letter =
           /^[a-dA-D]$/.test(e.key) ? e.key.toUpperCase().charCodeAt(0) - 65 : -1;
         const pick = n >= 0 ? n : letter;
         if (pick >= 0 && pick < cur.options.length)
-          choose(cur.questionId, cur.options[pick]);
+          choose(cur.questionId, String(cur.options[pick]));
         else if (e.key === "0" || e.key === "Delete" || e.key === "Backspace")
           choose(cur.questionId, null);
       }
@@ -793,7 +822,7 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
               <div className="question-meta">
                 <span>
                   {q.grade}
-                  {t(" marks")}
+                  {t(" marks")} · {questionTypeLabel(q.questionType, t)}
                 </span>
                 <button
                   className={`secondary ${q.isFlagged ? "flagged" : ""}`}
@@ -809,7 +838,29 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
                   {q.isFlagged ? t("Flagged for review") : t("Flag for review")}
                 </button>
               </div>
-              <h2>{pageStart + offset + 1}. {q.text}</h2>
+              {q.text?.trim() ? (
+                <h2>
+                  {pageStart + offset + 1}. {q.text}
+                </h2>
+              ) : (
+                <h2 className="media-only-q-heading">
+                  {t("Question {0}", { "0": pageStart + offset + 1 })}
+                  <span className="subtle">
+                    {" · "}
+                    {q.mediaType === "video"
+                      ? t("Watch the video and choose the correct answer")
+                      : q.mediaType === "audio"
+                        ? t("Listen to the recording and choose the correct answer")
+                        : t("Review the attachment and choose the correct answer")}
+                  </span>
+                </h2>
+              )}
+              {q.mediaUrl && q.mediaType && (
+                <QuestionMediaPlayer
+                  mediaUrl={q.mediaUrl}
+                  mediaType={q.mediaType}
+                />
+              )}
               {q.imageUrl && (
                 <img
                   className="question-image"
@@ -819,27 +870,20 @@ export function ExamRunner({ user, onActivity }: { user: SessionUser; onActivity
                   alt={t("Question diagram")}
                 />
               )}
-              <fieldset className="answer-options">
-                <legend className="sr-only">{t("Select an answer")}</legend>
-                {q.options.map((o, i) => (
-                  <label
-                    className={q.selectedAnswer === o ? "selected" : ""}
-                    key={`${q.questionId}-${i}`}
-                  >
-                    <input
-                      type="radio"
-                      name={"answer-" + q.questionId}
-                      checked={q.selectedAnswer === o}
-                      onChange={() => choose(q.questionId, o)}
-                      disabled={remaining === 0 || finish.isPending}
-                    />
-                    <span className="option-letter">
-                      {String.fromCharCode(65 + i)}
-                    </span>
-                    <span>{o}</span>
-                  </label>
-                ))}
-              </fieldset>
+              <RunnerQuestionInput
+                questionId={q.questionId}
+                questionType={q.questionType}
+                options={q.options}
+                selectedAnswer={q.selectedAnswer}
+                disabled={remaining === 0 || finish.isPending}
+                onChange={(val) =>
+                  choose(
+                    q.questionId,
+                    val,
+                    q.questionType === "short_answer" || q.questionType === "essay" ? 450 : 0,
+                  )
+                }
+              />
               <button
                 className="text-button"
                 onClick={() => choose(q.questionId, null)}

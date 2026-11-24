@@ -40,17 +40,21 @@ notifications.get("/", async (req, res) => {
           termId: term.id,
           status: "approved",
           endTime: { gte: now },
-          subjectId: { in: enrollments.map((e) => e.subjectId) },
           OR: [
-            { targetScope: "subject" },
+            { subjectId: { in: enrollments.map((e) => e.subjectId) }, targetScope: "subject" },
             {
+              subjectId: { in: enrollments.map((e) => e.subjectId) },
+              targetScope: "sections",
               targetSections: {
                 some: {
                   sectionId: { in: memberships.map((m) => m.sectionId) },
                 },
               },
             },
-            { targetStudents: { some: { studentId: userId } } },
+            {
+              targetScope: "student_list",
+              targetStudents: { some: { studentId: userId } },
+            },
           ],
           instances: {
             none: {

@@ -17,20 +17,25 @@ import { idempotency } from "../middleware/idempotency.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 import { hasValidSebHeader, requireSebForExam } from "../middleware/seb.js";
 import { shuffled } from "../lib/shuffle.js";
+import {
+  projectOptionsForStudent,
+  scoreQuestionAnswer,
+  validateStudentAnswer,
+  type QuestionTypeValue,
+} from "../lib/questionTypes.js";
 
-// Per-student display order: questions and MCQ options are shuffled with a
-// seed derived from the sitting id, so every attempt sees a stable but
-// student-unique order (refresh-safe, no two students match). Grading is
-// order-independent (answers are stored/compared by option VALUE), so this
-// only affects presentation, never scores.
+// Per-student display order & safe projection: shuffles questions/options per
+// sitting and strips answer keys/rubrics for short_answer and essay questions.
 function shuffleSittingQuestions<
-  T extends { questionId: string; options: unknown },
+  T extends { questionId: string; questionType: string; options: unknown },
 >(sittingId: string, questions: T[]): T[] {
   return shuffled(questions, `q:${sittingId}`).map((q) => ({
     ...q,
-    options: Array.isArray(q.options)
-      ? shuffled(q.options, `o:${sittingId}:${q.questionId}`)
-      : q.options,
+    options: projectOptionsForStudent(
+      q.questionType as QuestionTypeValue,
+      q.options,
+      `o:${sittingId}:${q.questionId}`,
+    ),
   }));
 }
 
@@ -133,13 +138,19 @@ student.get("/exams", async (req, res) => {
     where: {
       termId: term.id,
       status: "approved",
-      subjectId: { in: subjectIds },
       startTime: { lte: now },
       endTime: { gte: now },
       OR: [
-        { targetScope: "subject" },
-        { targetSections: { some: { sectionId: { in: sectionIds } } } },
-        { targetStudents: { some: { studentId: a.userId } } },
+        { subjectId: { in: subjectIds }, targetScope: "subject" },
+        {
+          subjectId: { in: subjectIds },
+          targetScope: "sections",
+          targetSections: { some: { sectionId: { in: sectionIds } } },
+        },
+        {
+          targetScope: "student_list",
+          targetStudents: { some: { studentId: a.userId } },
+        },
       ],
       // Submitted stays locked and disappears (resume lives in start â†’ existing instance).
       instances: { none: { studentId: a.userId, status: { in: ["submitted", "auto_submitted"] } } },
@@ -187,18 +198,27 @@ student.get("/exams/upcoming", async (req, res) => {
   ]);
   const subjectIds = enrolled.map((e) => e.subjectId);
   const sectionIds = memberOf.map((m) => m.sectionId);
-  if (!subjectIds.length) return res.json([]);
   const exams = await prisma.exam.findMany({
     where: {
       termId: term.id,
       status: "approved",
-      subjectId: { in: subjectIds },
       startTime: { gt: now },
       endTime: { gte: now },
       OR: [
-        { targetScope: "subject" },
-        { targetSections: { some: { sectionId: { in: sectionIds } } } },
-        { targetStudents: { some: { studentId: a.userId } } },
+        ...(subjectIds.length
+          ? [
+              { subjectId: { in: subjectIds }, targetScope: "subject" as const },
+              {
+                subjectId: { in: subjectIds },
+                targetScope: "sections" as const,
+                targetSections: { some: { sectionId: { in: sectionIds } } },
+              },
+            ]
+          : []),
+        {
+          targetScope: "student_list" as const,
+          targetStudents: { some: { studentId: a.userId } },
+        },
       ],
       instances: { none: { studentId: a.userId, status: { in: ["submitted", "auto_submitted"] } } },
     },
@@ -257,14 +277,17 @@ function compensationApplies(studentId: string, comp?: CompRow): boolean {
 }
 
 function gradeWithCompensation(
+  questionType: QuestionTypeValue,
   selectedAnswer: string | null,
   correctAnswer: string,
+  options: unknown,
   grade: unknown,
   studentId: string,
   comp?: CompRow,
 ): Prisma.Decimal {
   const full = Number(grade);
-  let v = selectedAnswer !== null && selectedAnswer === correctAnswer ? full : 0;
+  const res = scoreQuestionAnswer(questionType, selectedAnswer, correctAnswer, options, full);
+  let v = res.score;
   // Wrong scope = no compensation for this student.
   if (compensationApplies(studentId, comp) && comp) {
     if (comp.adjustmentType === "full_credit") v = full;
@@ -294,7 +317,15 @@ export async function autoSubmitExam(studentExamId: string) {
       const comp = comps.get(q.questionId);
       return {
         id: q.id,
-        awarded: gradeWithCompensation(q.selectedAnswer, q.question.correctAnswer, q.question.grade, se.studentId, comp),
+        awarded: gradeWithCompensation(
+          q.question.questionType as QuestionTypeValue,
+          q.selectedAnswer,
+          q.question.correctAnswer,
+          q.question.options,
+          q.question.grade,
+          se.studentId,
+          comp,
+        ),
         reason: compensationApplies(se.studentId, comp) ? (comp?.reason ?? null) : undefined,
       };
     });
@@ -358,6 +389,15 @@ async function examEligibility(
   },
   studentId: string,
 ): Promise<string | null> {
+  // Explicit student_list (hand-picked or Excel-imported roster): membership in
+  // the exam's targeted list is the direct eligibility grant.
+  if (exam.targetScope === "student_list") {
+    if (!exam.targetStudents.some((t) => t.studentId === studentId)) {
+      return "not in targeted student list";
+    }
+    return null;
+  }
+
   const enrolled = await prisma.enrollment.count({
     where: { studentId, subjectId: exam.subjectId, termId: exam.termId },
   });
@@ -373,10 +413,6 @@ async function examEligibility(
       },
     });
     if (!inSection) return "not in targeted section";
-  } else if (exam.targetScope === "student_list") {
-    if (!exam.targetStudents.some((t) => t.studentId === studentId)) {
-      return "not in targeted student list";
-    }
   }
   return null;
 }
@@ -529,6 +565,8 @@ student.post(
                 grade: true,
                 difficulty: true,
                 imageUrl: true,
+                mediaUrl: true,
+                mediaType: true,
                 // SECURITY: Never include correctAnswer in student queries!
               },
             },
@@ -587,6 +625,8 @@ student.post(
           grade: q.question.grade,
           difficulty: q.question.difficulty,
           imageUrl: q.question.imageUrl,
+          mediaUrl: q.question.mediaUrl,
+          mediaType: q.question.mediaType,
           selectedAnswer: q.selectedAnswer,
           isFlagged: q.isFlagged,
         }))),
@@ -654,6 +694,8 @@ student.post(
                     grade: true,
                     difficulty: true,
                     imageUrl: true,
+                    mediaUrl: true,
+                    mediaType: true,
                   },
                 },
               },
@@ -704,6 +746,8 @@ student.post(
           grade: q.question.grade,
           difficulty: q.question.difficulty,
           imageUrl: q.question.imageUrl,
+          mediaUrl: q.question.mediaUrl,
+          mediaType: q.question.mediaType,
           selectedAnswer: q.selectedAnswer,
           isFlagged: q.isFlagged,
         }))),
@@ -725,6 +769,8 @@ student.post(
                     grade: true,
                     difficulty: true,
                     imageUrl: true,
+                    mediaUrl: true,
+                    mediaType: true,
                   },
                 },
               },
@@ -767,6 +813,8 @@ student.post(
             grade: q.question.grade,
             difficulty: q.question.difficulty,
             imageUrl: q.question.imageUrl,
+            mediaUrl: q.question.mediaUrl,
+            mediaType: q.question.mediaType,
             selectedAnswer: q.selectedAnswer,
             isFlagged: q.isFlagged,
           }))),
@@ -821,18 +869,20 @@ student.patch("/exams/:id/answer", requireRole("student"), requirePermission("ta
 
   const seq = await prisma.studentExamQuestion.findUnique({
     where: { studentExamId_questionId: { studentExamId: active.se.id, questionId: body.questionId } },
-    include: { question: { select: { options: true } } },
+    include: { question: { select: { options: true, questionType: true } } },
   });
   if (!seq) return res.status(404).json({ error: "question not in exam" });
 
   // Empty string clears the answer (stored as NULL so the submit gate sees it).
-  const selected = body.selectedAnswer === "" ? null : body.selectedAnswer;
-  if (selected !== null) {
-    const validOptions = seq.question.options as string[];
-    if (!validOptions.includes(selected)) {
-      return res.status(422).json({ error: "selectedAnswer must be one of the question options" });
-    }
+  const check = validateStudentAnswer(
+    seq.question.questionType as QuestionTypeValue,
+    seq.question.options,
+    body.selectedAnswer,
+  );
+  if (!check.ok) {
+    return res.status(422).json({ error: check.error });
   }
+  const selected = check.value;
 
   // Atomic in_progress gate: a concurrent submit/auto-submit cannot have its
   // graded answers overwritten by a late in-flight PATCH.
@@ -871,19 +921,22 @@ student.patch("/exams/:id/answers", requireRole("student"), requirePermission("t
   const questionIds = [...deduped.keys()];
   const questions = await prisma.studentExamQuestion.findMany({
     where: { studentExamId: active.se.id, questionId: { in: questionIds } },
-    include: { question: { select: { options: true } } },
+    include: { question: { select: { options: true, questionType: true } } },
   });
   const qMap = new Map(questions.map((q) => [q.questionId, q]));
 
   for (const [questionId, selected] of deduped) {
     const q = qMap.get(questionId);
     if (!q) return res.status(404).json({ error: `question not in exam: ${questionId}` });
-    if (selected !== null) {
-      const validOptions = q.question.options as string[];
-      if (!validOptions.includes(selected)) {
-        return res.status(422).json({ error: `invalid answer for question ${questionId}` });
-      }
+    const check = validateStudentAnswer(
+      q.question.questionType as QuestionTypeValue,
+      q.question.options,
+      selected,
+    );
+    if (!check.ok) {
+      return res.status(422).json({ error: `invalid answer for question ${questionId}: ${check.error}` });
     }
+    deduped.set(questionId, check.value);
   }
 
   const closed = await prisma.$transaction(async (tx) => {
@@ -1037,7 +1090,15 @@ student.post(
         const comp = comps.get(q.questionId);
         return {
           id: q.id,
-          awarded: gradeWithCompensation(q.selectedAnswer, q.question.correctAnswer, q.question.grade, fresh.studentId, comp),
+          awarded: gradeWithCompensation(
+            q.question.questionType as QuestionTypeValue,
+            q.selectedAnswer,
+            q.question.correctAnswer,
+            q.question.options,
+            q.question.grade,
+            fresh.studentId,
+            comp,
+          ),
           reason: compensationApplies(fresh.studentId, comp) ? (comp?.reason ?? null) : undefined,
         };
       });

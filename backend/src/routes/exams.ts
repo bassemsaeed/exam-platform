@@ -1,5 +1,6 @@
 import { Router, type Router as RouterType } from "express";
 import multer from "multer";
+import * as XLSX from "xlsx";
 import { z } from "zod";
 import { audit } from "../lib/audit.js";
 import { config } from "../lib/config.js";
@@ -8,9 +9,11 @@ import { checkMix, checkWindow, mixShortfall, poolCounts } from "../lib/examRule
 import { Prisma } from "../generated/prisma/client.js";
 import { poolForExam } from "../lib/sampling.js";
 import { sniffMedia, storage } from "../lib/storage.js";
+import { QUESTION_TYPES, safeJsonParse, scoreQuestionAnswer, type QuestionTypeValue } from "../lib/questionTypes.js";
 import { envelope, page, pageQuery } from "../lib/pagination.js";
 import { prisma } from "../lib/prisma.js";
 import { hasPermission, requireAuth, type AuthedRequest } from "../middleware/auth.js";
+import { rateLimit } from "../middleware/rateLimit.js";
 
 export const exams: RouterType = Router();
 exams.use(requireAuth);
@@ -20,10 +23,20 @@ const instructionMediaUpload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: INSTRUCTION_MEDIA_MAX_BYTES },
 });
+const studentListUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: config.uploadMaxBytes },
+});
 const MEDIA_EXTS = [".mp3", ".wav", ".ogg", ".m4a", ".webm", ".mp4", ".mov"] as const;
 function mediaExtOk(filename: string): boolean {
   const dot = filename.lastIndexOf(".");
   return dot >= 0 && (MEDIA_EXTS as readonly string[]).includes(filename.slice(dot).toLowerCase());
+}
+function spreadsheetFileOk(filename: string, mimetype: string): boolean {
+  const lower = filename.toLowerCase();
+  if (!(lower.endsWith(".xlsx") || lower.endsWith(".xls") || lower.endsWith(".csv"))) return false;
+  if (/spreadsheet|excel|csv|text\/plain|octet-stream/.test(mimetype.toLowerCase())) return true;
+  return false;
 }
 
 const mixInput = z.record(z.string(), z.number().int().min(0));
@@ -195,6 +208,375 @@ function toSafeExam<T extends { accessCodeHash: string | null }>(exam: T) {
   return { ...safe, hasAccessCode: accessCodeHash !== null };
 }
 
+// GET /exams/import-students/template — downloads a ready-to-fill .xlsx
+// template for importing exam-eligible students. Optional ?subject_id=&prefill=true
+// prefills the caller's current-term roster for that subject.
+exams.get("/import-students/template", async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  if (a.role === "student") return res.status(403).json({ error: "forbidden" });
+  const q = z
+    .object({
+      subject_id: z.string().optional(),
+      prefill: z.enum(["true", "false"]).optional(),
+    })
+    .parse(req.query);
+
+  const rows: (string | number)[][] = [["username", "email", "full_name"]];
+  let filename = "exam-students-template.xlsx";
+
+  if (q.subject_id && q.prefill === "true") {
+    const termId = await currentTermId();
+    if (termId) {
+      let allowed = a.role === "admin";
+      if (a.role === "doctor") {
+        allowed = (await prisma.doctorAssignment.count({ where: { doctorId: a.userId, subjectId: q.subject_id, termId } })) > 0;
+      } else if (a.role === "ta") {
+        allowed = (await prisma.section.count({ where: { taId: a.userId, subjectId: q.subject_id, termId } })) > 0;
+      }
+      if (!allowed) return res.status(403).json({ error: "not assigned to subject for this term" });
+      const subj = await prisma.subject.findUnique({ where: { id: q.subject_id }, select: { code: true } });
+      if (subj) filename = `${subj.code}-students.xlsx`;
+      if (a.role === "ta") {
+        const secs = await prisma.section.findMany({
+          where: { taId: a.userId, subjectId: q.subject_id, termId },
+          select: {
+            memberships: {
+              select: { student: { select: { id: true, username: true, email: true, name: true, isActive: true } } },
+              take: config.lists.examTargetsMax,
+            },
+          },
+        });
+        const seen = new Set<string>();
+        for (const sec of secs) {
+          for (const m of sec.memberships) {
+            if (!m.student.isActive || seen.has(m.student.id)) continue;
+            seen.add(m.student.id);
+            rows.push([m.student.username ?? "", m.student.email, m.student.name]);
+          }
+        }
+      } else {
+        const enrolled = await prisma.enrollment.findMany({
+          where: { subjectId: q.subject_id, termId },
+          select: { student: { select: { username: true, email: true, name: true, isActive: true } } },
+          orderBy: { student: { name: "asc" } },
+          take: config.lists.examTargetsMax,
+        });
+        for (const e of enrolled) {
+          if (!e.student.isActive) continue;
+          rows.push([e.student.username ?? "", e.student.email, e.student.name]);
+        }
+      }
+    }
+  }
+  if (rows.length === 1) {
+    rows.push(["student1", "student1@uni.local", "Sample Student One"]);
+    rows.push(["student2", "student2@uni.local", "Sample Student Two"]);
+  }
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.aoa_to_sheet(rows);
+  ws["!cols"] = [{ wch: 22 }, { wch: 30 }, { wch: 28 }];
+  XLSX.utils.book_append_sheet(wb, ws, "Students");
+  const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename.replace(/[^a-zA-Z0-9_.-]/g, "_")}"`);
+  res.send(buf);
+});
+
+// POST /exams/import-students (multipart file=, subjectId=, enrolledOnly?)
+// Validates an uploaded .xlsx/.xls/.csv student list for exam targeting and
+// resolves each valid row to a real active student account.
+exams.post(
+  "/import-students",
+  rateLimit(30, 60_000, "exam:import-students"),
+  studentListUpload.single("file"),
+  async (req, res) => {
+    const a = req as unknown as AuthedRequest;
+    if (a.role === "student") return res.status(403).json({ error: "forbidden" });
+    const permErr = await creatorPermissionError(a.userId, a.role);
+    if (permErr) return res.status(403).json(permErr);
+
+    const body = z
+      .object({
+        subjectId: z.string().min(1),
+        enrolledOnly: z
+          .enum(["true", "false"])
+          .optional()
+          .transform((v) => v === "true"),
+      })
+      .parse(req.body ?? {});
+
+    const termId = await currentTermId();
+    if (!termId) return res.status(409).json({ error: "no current term" });
+    const subject = await prisma.subject.findUnique({ where: { id: body.subjectId }, select: { id: true, code: true, name: true } });
+    if (!subject) return res.status(404).json({ error: "subject not found" });
+
+    if (a.role === "doctor") {
+      const assigned = await prisma.doctorAssignment.count({ where: { doctorId: a.userId, subjectId: body.subjectId, termId } });
+      if (!assigned) return res.status(403).json({ error: "not assigned to subject for this term" });
+    } else if (a.role === "ta") {
+      const teaches = await prisma.section.count({ where: { taId: a.userId, subjectId: body.subjectId, termId } });
+      if (!teaches) return res.status(403).json({ error: "not assigned to any section of this subject for this term" });
+    }
+
+    if (!req.file) return res.status(400).json({ error: "file required" });
+    if (!spreadsheetFileOk(req.file.originalname, req.file.mimetype)) {
+      return res.status(422).json({ error: "file must be .xlsx, .xls, or .csv" });
+    }
+
+    let wb: XLSX.WorkBook;
+    try {
+      wb = XLSX.read(req.file.buffer, { type: "buffer" });
+    } catch {
+      return res.status(422).json({ error: "empty or corrupt spreadsheet file" });
+    }
+    const firstSheet = wb.SheetNames[0];
+    if (!firstSheet || !wb.Sheets[firstSheet]) {
+      return res.status(422).json({ error: "spreadsheet has no worksheets" });
+    }
+    const matrix = XLSX.utils.sheet_to_json<unknown[]>(wb.Sheets[firstSheet], { header: 1, defval: "" });
+    if (!matrix.length) {
+      return res.status(422).json({ error: "spreadsheet is empty" });
+    }
+
+    const normKey = (v: unknown) =>
+      String(v ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/[\s\-]+/g, "_")
+        .replace(/[^a-z0-9_]/g, "");
+
+    const headerRow = (matrix[0] ?? []).map((h) => String(h ?? "").trim());
+    const normHeaders = headerRow.map(normKey);
+    const USERNAME_ALIASES = new Set([
+      "username",
+      "user_name",
+      "student_id",
+      "studentid",
+      "student_username",
+      "student_code",
+      "university_id",
+      "uni_id",
+      "id",
+      "code",
+    ]);
+    const EMAIL_ALIASES = new Set(["email", "e_mail", "student_email", "mail"]);
+    const NAME_ALIASES = new Set(["name", "full_name", "fullname", "student_name"]);
+
+    const usernameIdx = normHeaders.findIndex((h) => USERNAME_ALIASES.has(h));
+    const emailIdx = normHeaders.findIndex((h) => EMAIL_ALIASES.has(h));
+    const nameIdx = normHeaders.findIndex((h) => NAME_ALIASES.has(h));
+    const detectedColumns = headerRow.filter(Boolean);
+
+    if (usernameIdx < 0 && emailIdx < 0) {
+      return res.status(422).json({
+        error: "Spreadsheet must include a 'username' (or 'student_id') or 'email' column in the first row.",
+        detectedColumns,
+      });
+    }
+
+    const maxParsedRows = Math.max(2000, config.lists.examTargetsMax * 4);
+    const dataRows = matrix.slice(1);
+    if (dataRows.length > maxParsedRows) {
+      return res.status(422).json({ error: `Spreadsheet exceeds maximum of ${maxParsedRows} rows.` });
+    }
+
+    const USERNAME_RE = /^[a-zA-Z0-9_.-]{1,120}$/;
+    const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+    interface ParsedRow {
+      line: number;
+      username: string;
+      email: string;
+      name: string;
+      displayVal: string;
+    }
+
+    const parsed: ParsedRow[] = [];
+    const errors: { line: number; value: string; reason: string }[] = [];
+    const duplicates: { line: number; firstLine: number; value: string }[] = [];
+    let nonEmptyRows = 0;
+
+    for (let i = 0; i < dataRows.length; i++) {
+      const row = dataRows[i] ?? [];
+      const line = i + 2;
+      const rawUser = usernameIdx >= 0 ? String(row[usernameIdx] ?? "").trim() : "";
+      const rawEmail = emailIdx >= 0 ? String(row[emailIdx] ?? "").trim() : "";
+      const rawName = nameIdx >= 0 ? String(row[nameIdx] ?? "").trim() : "";
+      // Skip completely empty trailing/spacer rows.
+      if (!rawUser && !rawEmail && !rawName && row.every((c) => !String(c ?? "").trim())) continue;
+      nonEmptyRows++;
+
+      const displayVal = rawUser || rawEmail || rawName || `Row ${line}`;
+      if (!rawUser && !rawEmail) {
+        errors.push({ line, value: displayVal, reason: "Missing username or email" });
+        continue;
+      }
+      const username = rawUser.toLowerCase();
+      const email = rawEmail.toLowerCase();
+      if (username && !USERNAME_RE.test(username)) {
+        errors.push({ line, value: rawUser, reason: "Invalid username format (allowed: letters, numbers, _, ., -)" });
+        continue;
+      }
+      if (email && !EMAIL_RE.test(email)) {
+        errors.push({ line, value: rawEmail, reason: "Invalid email format" });
+        continue;
+      }
+      parsed.push({ line, username, email, name: rawName, displayVal });
+    }
+
+    if (nonEmptyRows === 0) {
+      return res.status(422).json({ error: "Spreadsheet has headers but no student rows." });
+    }
+
+    // Batch lookup all referenced usernames and emails in a single DB query.
+    const allUsernames = [...new Set(parsed.map((r) => r.username).filter(Boolean))];
+    const allEmails = [...new Set(parsed.map((r) => r.email).filter(Boolean))];
+    const matchedUsers =
+      allUsernames.length || allEmails.length
+        ? await prisma.user.findMany({
+            where: {
+              OR: [
+                ...(allUsernames.length ? [{ username: { in: allUsernames } }] : []),
+                ...(allEmails.length ? [{ email: { in: allEmails } }] : []),
+              ],
+            },
+            select: { id: true, username: true, email: true, name: true, role: true, isActive: true },
+          })
+        : [];
+
+    const byUsername = new Map<string, (typeof matchedUsers)[number]>();
+    const byEmail = new Map<string, (typeof matchedUsers)[number]>();
+    for (const u of matchedUsers) {
+      if (u.username) byUsername.set(u.username.toLowerCase(), u);
+      byEmail.set(u.email.toLowerCase(), u);
+    }
+
+    const matchedIds = matchedUsers.filter((u) => u.role === "student").map((u) => u.id);
+    const [enrollments, sectionMemberships] = matchedIds.length
+      ? await Promise.all([
+          prisma.enrollment.findMany({
+            where: { subjectId: body.subjectId, termId, studentId: { in: matchedIds } },
+            select: { studentId: true },
+          }),
+          prisma.sectionMembership.findMany({
+            where: { studentId: { in: matchedIds }, section: { subjectId: body.subjectId, termId } },
+            select: { studentId: true, section: { select: { name: true, taId: true } } },
+          }),
+        ])
+      : [[], []];
+
+    const enrolledSet = new Set(enrollments.map((e) => e.studentId));
+    const sectionsByStudent = new Map<string, { names: string[]; inMySections: boolean }>();
+    for (const m of sectionMemberships) {
+      const entry = sectionsByStudent.get(m.studentId) ?? { names: [], inMySections: false };
+      if (!entry.names.includes(m.section.name)) entry.names.push(m.section.name);
+      if (m.section.taId === a.userId) entry.inMySections = true;
+      sectionsByStudent.set(m.studentId, entry);
+    }
+
+    const seenUserFirstLine = new Map<string, number>();
+    const validStudents: {
+      line: number;
+      id: string;
+      username: string | null;
+      name: string;
+      email: string;
+      enrolled: boolean;
+      sectionNames: string[];
+      inMySections: boolean;
+      warnings: string[];
+    }[] = [];
+
+    for (const r of parsed) {
+      const uByName = r.username ? byUsername.get(r.username) : undefined;
+      const uByEmail = r.email ? byEmail.get(r.email) : undefined;
+      if (uByName && uByEmail && uByName.id !== uByEmail.id) {
+        errors.push({ line: r.line, value: r.displayVal, reason: "Username and email belong to different accounts" });
+        continue;
+      }
+      const user = uByName ?? uByEmail;
+      if (!user) {
+        errors.push({ line: r.line, value: r.displayVal, reason: `Student not found (${r.displayVal})` });
+        continue;
+      }
+      if (user.role !== "student") {
+        errors.push({ line: r.line, value: r.displayVal, reason: `Account is a ${user.role}, not a student` });
+        continue;
+      }
+      if (!user.isActive) {
+        errors.push({ line: r.line, value: r.displayVal, reason: "Student account is inactive" });
+        continue;
+      }
+      const firstLine = seenUserFirstLine.get(user.id);
+      if (firstLine !== undefined) {
+        duplicates.push({ line: r.line, firstLine, value: user.username ?? user.email });
+        continue;
+      }
+      const enrolled = enrolledSet.has(user.id);
+      const secInfo = sectionsByStudent.get(user.id) ?? { names: [], inMySections: false };
+      if (body.enrolledOnly && !enrolled) {
+        errors.push({ line: r.line, value: r.displayVal, reason: "Not enrolled in this subject" });
+        continue;
+      }
+      if (validStudents.length >= config.lists.examTargetsMax) {
+        errors.push({
+          line: r.line,
+          value: r.displayVal,
+          reason: `Exceeds maximum of ${config.lists.examTargetsMax} targeted students per exam`,
+        });
+        continue;
+      }
+      seenUserFirstLine.set(user.id, r.line);
+
+      const warnings: string[] = [];
+      if (!enrolled) {
+        warnings.push("Not enrolled in subject (will still be granted access via this exam's student list)");
+      } else if (a.role === "ta" && !secInfo.inMySections) {
+        warnings.push("Enrolled in subject but not in your sections");
+      }
+      if (r.name && r.name.toLowerCase() !== user.name.trim().toLowerCase()) {
+        warnings.push(`Spreadsheet name "${r.name}" differs from account name "${user.name}"`);
+      }
+
+      validStudents.push({
+        line: r.line,
+        id: user.id,
+        username: user.username,
+        name: user.name,
+        email: user.email,
+        enrolled,
+        sectionNames: secInfo.names,
+        inMySections: secInfo.inMySections,
+        warnings,
+      });
+    }
+
+    await audit(a.userId, "exam.import-students.validate", "subject", body.subjectId, {
+      filename: req.file.originalname,
+      totalRows: nonEmptyRows,
+      valid: validStudents.length,
+      errors: errors.length,
+      duplicates: duplicates.length,
+    });
+
+    res.json({
+      filename: req.file.originalname,
+      sheetName: firstSheet,
+      detectedColumns,
+      totalRows: nonEmptyRows,
+      validCount: validStudents.length,
+      errorCount: errors.length,
+      duplicateCount: duplicates.length,
+      warningCount: validStudents.filter((s) => s.warnings.length > 0).length,
+      maxAllowed: config.lists.examTargetsMax,
+      students: validStudents,
+      errors,
+      duplicates,
+    });
+  },
+);
+
 // GET /exams/mine?term_id&status&include_subject — staff's own creations (plus
 // subject TA quizzes for doctors with view_all_grades when include_subject=true).
 exams.get("/mine", async (req, res) => {
@@ -304,14 +686,23 @@ exams.post("/", async (req, res) => {
     // TAs make quizzes only — midterms are a doctor+admin affair.
     if (body.purpose !== "quiz") return res.status(403).json({ error: "TAs create quizzes only" });
     if (!(await hasPermission(a.userId, a.role, "create_quiz"))) return res.status(403).json({ error: "forbidden", need: "create_quiz" });
-    if (body.targetScope !== "sections" || !body.targetSections?.length) {
-      return res.status(422).json({ error: "TA quiz needs targetSections" });
+    if (body.targetScope === "sections") {
+      if (!body.targetSections?.length) return res.status(422).json({ error: "TA quiz needs targetSections" });
+      // Every targeted section must be taught by this TA in this subject+term.
+      const own = await prisma.section.count({
+        where: { id: { in: body.targetSections }, taId: a.userId, subjectId: body.subjectId, termId },
+      });
+      if (own !== body.targetSections.length) return res.status(403).json({ error: "not your sections" });
+    } else if (body.targetScope === "student_list") {
+      if (!body.targetStudents?.length) return res.status(422).json({ error: "student_list needs targetStudents" });
+      // TA must teach at least one section of this subject in the current term.
+      const teaches = await prisma.section.count({
+        where: { taId: a.userId, subjectId: body.subjectId, termId },
+      });
+      if (!teaches) return res.status(403).json({ error: "not assigned to any section of this subject for this term" });
+    } else {
+      return res.status(422).json({ error: "TA quiz must target sections or student_list" });
     }
-    // Every targeted section must be taught by this TA in this subject+term.
-    const own = await prisma.section.count({
-      where: { id: { in: body.targetSections }, taId: a.userId, subjectId: body.subjectId, termId },
-    });
-    if (own !== body.targetSections.length) return res.status(403).json({ error: "not your sections" });
   }
   // Sections scope needs real sections of THIS subject+term, for every role —
   // otherwise the exam is born unstartable (empty IN-list rejects everyone).
@@ -320,20 +711,21 @@ exams.post("/", async (req, res) => {
     const valid = await prisma.section.count({ where: { id: { in: body.targetSections }, subjectId: body.subjectId, termId } });
     if (valid !== body.targetSections.length) return res.status(422).json({ error: "targetSections must belong to this subject+term" });
   }
-  if (body.targetScope === "student_list" && !body.targetStudents?.length) {
+  const uniqueTargetStudents = [...new Set(body.targetStudents ?? [])];
+  if (body.targetScope === "student_list" && !uniqueTargetStudents.length) {
     return res.status(422).json({ error: "student_list needs targetStudents" });
   }
-  if (body.targetStudents?.length) {
+  if (uniqueTargetStudents.length) {
     const tUsers = await prisma.user.findMany({
-      where: { id: { in: body.targetStudents } },
-      select: { id: true, role: true },
+      where: { id: { in: uniqueTargetStudents } },
+      select: { id: true, role: true, isActive: true },
     });
     const byId = new Map(tUsers.map((u) => [u.id, u]));
-    const bad = body.targetStudents.some((id) => {
+    const bad = uniqueTargetStudents.some((id) => {
       const u = byId.get(id);
-      return !u || u.role !== "student";
+      return !u || u.role !== "student" || !u.isActive;
     });
-    if (bad) return res.status(422).json({ error: "targetStudents must exist with role student" });
+    if (bad) return res.status(422).json({ error: "targetStudents must exist as active student accounts" });
   }
 
   const pool = await poolWhere(a.userId, a.role, body.subjectId, source);
@@ -382,7 +774,7 @@ exams.post("/", async (req, res) => {
         questionSource: a.role === "ta" ? source : "own",
         targetScope: body.targetScope,
         targetSections: body.targetSections?.length ? { create: body.targetSections.map((sectionId) => ({ sectionId })) } : undefined,
-        targetStudents: body.targetStudents?.length ? { create: body.targetStudents.map((studentId) => ({ studentId })) } : undefined,
+        targetStudents: uniqueTargetStudents.length ? { create: uniqueTargetStudents.map((studentId) => ({ studentId })) } : undefined,
       },
     });
     return exam;
@@ -526,7 +918,7 @@ exams.get("/:id/blueprint", async (req, res) => {
   if (manual.length) {
     const rows = await prisma.question.findMany({
       where: { id: { in: manual } },
-      select: { id: true, text: true, questionType: true, difficulty: true, options: true, correctAnswer: true, grade: true, imageUrl: true },
+      select: { id: true, text: true, questionType: true, difficulty: true, options: true, correctAnswer: true, grade: true, imageUrl: true, mediaUrl: true, mediaType: true },
     });
     const byId = new Map(rows.map((q) => [q.id, q]));
     questions = manual.map((id) => byId.get(id)).filter((q) => q !== undefined);
@@ -535,7 +927,7 @@ exams.get("/:id/blueprint", async (req, res) => {
     questions = pool.ok
       ? await prisma.question.findMany({
           where: pool.where,
-          select: { id: true, text: true, questionType: true, difficulty: true, options: true, correctAnswer: true, grade: true, imageUrl: true },
+          select: { id: true, text: true, questionType: true, difficulty: true, options: true, correctAnswer: true, grade: true, imageUrl: true, mediaUrl: true, mediaType: true },
           take: 50,
           orderBy: { createdAt: "desc" },
         })
@@ -546,18 +938,27 @@ exams.get("/:id/blueprint", async (req, res) => {
     where: { examId: exam.id },
     _count: true,
   });
-  const [targetSections, targetStudentCount] = await Promise.all([
+  const [targetSections, targetStudentRows] = await Promise.all([
     prisma.examTargetSection.findMany({
       where: { examId: exam.id },
       select: { section: { select: { id: true, name: true } } },
     }),
-    prisma.examTargetStudent.count({ where: { examId: exam.id } }),
+    prisma.examTargetStudent.findMany({
+      where: { examId: exam.id },
+      select: { student: { select: { id: true, name: true, username: true, email: true } } },
+      orderBy: { student: { name: "asc" } },
+      take: config.lists.examTargetsMax,
+    }),
   ]);
   res.json({
     exam: toSafeExam(exam),
     mode: manual.length ? "manual" : "sample",
     questions,
-    targets: { sections: targetSections.map((t) => t.section), studentCount: targetStudentCount },
+    targets: {
+      sections: targetSections.map((t) => t.section),
+      studentCount: targetStudentRows.length,
+      students: targetStudentRows.map((t) => t.student),
+    },
     sittings: Object.fromEntries(statusCounts.map((s) => [s.status, s._count])),
   });
 });
@@ -817,8 +1218,8 @@ exams.get("/:id/analytics", async (req, res) => {
         totalGrade: true, entryTokens: true,
         questions: {
           select: {
-            questionId: true, selectedAnswer: true, gradeAwarded: true, isFlagged: true,
-            question: { select: { text: true, questionType: true, difficulty: true, grade: true, correctAnswer: true, options: true } },
+            questionId: true, selectedAnswer: true, gradeAwarded: true, isFlagged: true, creditAdjustmentReason: true,
+            question: { select: { text: true, questionType: true, difficulty: true, grade: true, correctAnswer: true, options: true, imageUrl: true, mediaUrl: true, mediaType: true } },
           },
         },
       },
@@ -862,17 +1263,57 @@ exams.get("/:id/analytics", async (req, res) => {
   const pcts = graded.map(pctOf).filter((p): p is number => p !== null);
   const avg = pcts.length ? pcts.reduce((x, y) => x + y, 0) / pcts.length : 0;
   const sorted = [...pcts].sort((x, y) => x - y);
-  const median = sorted.length ? sorted[Math.floor((sorted.length - 1) / 2)] : 0;
+  const percentile = (arr: number[], q: number): number => {
+    if (!arr.length) return 0;
+    const pos = (arr.length - 1) * q;
+    const lo = Math.floor(pos);
+    const hi = Math.ceil(pos);
+    if (lo === hi) return arr[lo];
+    return arr[lo] + (arr[hi] - arr[lo]) * (pos - lo);
+  };
+  const median = percentile(sorted, 0.5);
+  const q1 = percentile(sorted, 0.25);
+  const q3 = percentile(sorted, 0.75);
+  const stdDev = pcts.length
+    ? Math.sqrt(pcts.reduce((acc, p) => acc + (p - avg) ** 2, 0) / pcts.length)
+    : 0;
   const passCount = pcts.filter((p) => p >= PASS).length;
   const autoSubmitted = graded.filter((s) => s.status === "auto_submitted").length;
+  const completionRate = assigned && assigned > 0 ? Math.round((graded.length / assigned) * 100) : null;
+
+  // Pacing / time-vs-score buckets (% of allowed duration).
+  const timeBucketDefs = [
+    { key: "under_25", label: "< 25% time", min: 0, max: 0.25 },
+    { key: "25_50", label: "25–50% time", min: 0.25, max: 0.5 },
+    { key: "50_75", label: "50–75% time", min: 0.5, max: 0.75 },
+    { key: "75_100", label: "75–100% time", min: 0.75, max: Infinity },
+  ];
+  const timeBucketPcts = timeBucketDefs.map(() => [] as number[]);
   let usedSum = 0, usedN = 0, rushSubmits = 0;
   for (const s of graded) {
     if (s.startedAt && s.submittedAt) {
-      const mins = (s.submittedAt.getTime() - s.startedAt.getTime()) / 60000;
+      const mins = Math.max(0, (s.submittedAt.getTime() - s.startedAt.getTime()) / 60000);
       usedSum += mins; usedN++;
-      if (mins < exam.durationMinutes * 0.25) rushSubmits++;
+      const frac = exam.durationMinutes > 0 ? mins / exam.durationMinutes : 1;
+      if (frac < 0.25) rushSubmits++;
+      const p = pctOf(s);
+      if (p !== null) {
+        const bIdx = timeBucketDefs.findIndex((b) => frac >= b.min && frac < b.max);
+        if (bIdx >= 0) timeBucketPcts[bIdx].push(p);
+      }
     }
   }
+  const timeBuckets = timeBucketDefs.map((b, i) => {
+    const arr = timeBucketPcts[i];
+    return {
+      key: b.key,
+      label: b.label,
+      n: arr.length,
+      avg: arr.length ? arr.reduce((x, y) => x + y, 0) / arr.length : 0,
+      passRate: arr.length ? (arr.filter((p) => p >= PASS).length / arr.length) * 100 : 0,
+    };
+  });
+
   const distribution = Array.from({ length: 10 }, () => 0);
   for (const p of pcts) distribution[Math.min(9, Math.floor(p / 10))]++;
 
@@ -918,42 +1359,100 @@ exams.get("/:id/analytics", async (req, res) => {
     passRate: (ps.filter((p) => p >= PASS).length / ps.length) * 100,
   })).sort((x, y) => y.avg - x.avg);
 
-  // Per-question deep stats + option heatmap + void impact in a single O(S * Q) pass.
+  // Upper 27% / Lower 27% cohorts for psychometric Discrimination Index (D).
+  const rankedSittings = graded
+    .map((s) => ({ id: s.id, pct: pctOf(s) }))
+    .filter((x): x is { id: string; pct: number } => x.pct !== null)
+    .sort((a, b) => b.pct - a.pct);
+  const cohortSize = rankedSittings.length >= 4 ? Math.max(1, Math.round(rankedSittings.length * 0.27)) : 0;
+  const upperIds = new Set(cohortSize ? rankedSittings.slice(0, cohortSize).map((x) => x.id) : []);
+  const lowerIds = new Set(cohortSize ? rankedSittings.slice(-cohortSize).map((x) => x.id) : []);
+
+  // Per-question deep stats + option heatmap + discrimination + void impact in a single O(S * Q) pass.
   type QAgg = {
     text: string; type: string; difficulty: string; grade: number;
+    correctAnswer: string;
+    imageUrl: string | null; mediaUrl: string | null; mediaType: string | null;
     attempts: number; answered: number; correct: number; awardSum: number; flagged: number;
     voidPassDelta: number;
+    upperAttempts: number; upperCorrect: number;
+    lowerAttempts: number; lowerCorrect: number;
     labels: Set<string>;
     picks: Map<string, number>;
   };
   const byQ = new Map<string, QAgg>();
+  let pendingManualGrades = 0;
   for (const s of graded) {
     const total = sittingTotal.get(s.id) ?? 0;
     const baseGrade = Number(s.totalGrade ?? 0);
     const alreadyPassed = (sittingPct.get(s.id) ?? 0) >= PASS;
+    const isUpper = upperIds.has(s.id);
+    const isLower = lowerIds.has(s.id);
     for (const r of s.questions) {
+      const qType = r.question.questionType as QuestionTypeValue;
       let g = byQ.get(r.questionId);
       if (!g) {
         g = {
           text: r.question.text, type: r.question.questionType, difficulty: r.question.difficulty,
-          grade: Number(r.question.grade ?? 0), attempts: 0, answered: 0, correct: 0, awardSum: 0, flagged: 0,
+          grade: Number(r.question.grade ?? 0),
+          correctAnswer: r.question.correctAnswer,
+          imageUrl: r.question.imageUrl,
+          mediaUrl: r.question.mediaUrl,
+          mediaType: r.question.mediaType,
+          attempts: 0, answered: 0, correct: 0, awardSum: 0, flagged: 0,
           voidPassDelta: 0,
+          upperAttempts: 0, upperCorrect: 0,
+          lowerAttempts: 0, lowerCorrect: 0,
           labels: new Set(),
           picks: new Map(),
         };
-        if (Array.isArray(r.question.options)) {
+        if ((qType === "mcq" || qType === "true_false" || qType === "multi_select") && Array.isArray(r.question.options)) {
           for (const o of r.question.options) g.labels.add(String(o));
         }
         byQ.set(r.questionId, g);
       }
       g.attempts++;
+      if (isUpper) g.upperAttempts++;
+      if (isLower) g.lowerAttempts++;
+      let gotRight = false;
+      const awarded = Number(r.gradeAwarded ?? 0);
       if (r.selectedAnswer !== null && r.selectedAnswer !== "") {
         g.answered++;
-        g.picks.set(r.selectedAnswer, (g.picks.get(r.selectedAnswer) ?? 0) + 1);
-        g.labels.add(r.selectedAnswer);
-        if (r.selectedAnswer === r.question.correctAnswer) g.correct++;
+        if (qType === "mcq" || qType === "true_false") {
+          g.picks.set(r.selectedAnswer, (g.picks.get(r.selectedAnswer) ?? 0) + 1);
+          g.labels.add(r.selectedAnswer);
+          if (r.selectedAnswer === r.question.correctAnswer) {
+            g.correct++;
+            gotRight = true;
+          }
+        } else if (qType === "multi_select") {
+          const pickedArr = safeJsonParse<string[]>(r.selectedAnswer) ?? [];
+          for (const p of pickedArr) {
+            g.picks.set(p, (g.picks.get(p) ?? 0) + 1);
+            g.labels.add(p);
+          }
+          const scored = scoreQuestionAnswer(qType, r.selectedAnswer, r.question.correctAnswer, r.question.options, g.grade);
+          if (scored.isFullCredit || (g.grade > 0 && awarded >= g.grade * 0.99)) {
+            g.correct++;
+            gotRight = true;
+          }
+        } else if (qType === "essay") {
+          if (awarded === 0 && !r.creditAdjustmentReason) pendingManualGrades++;
+          if (g.grade > 0 && awarded >= g.grade * 0.6) {
+            g.correct++;
+            gotRight = true;
+          }
+        } else {
+          // short_answer, matching, ordering
+          const scored = scoreQuestionAnswer(qType, r.selectedAnswer, r.question.correctAnswer, r.question.options, g.grade);
+          if (scored.isFullCredit || (g.grade > 0 && awarded >= g.grade * 0.99)) {
+            g.correct++;
+            gotRight = true;
+          }
+        }
       }
-      const awarded = Number(r.gradeAwarded ?? 0);
+      if (gotRight && isUpper) g.upperCorrect++;
+      if (gotRight && isLower) g.lowerCorrect++;
       g.awardSum += awarded;
       if (r.isFlagged) g.flagged++;
       // Void impact: count ONLY students who were actually sampled this question.
@@ -963,23 +1462,117 @@ exams.get("/:id/analytics", async (req, res) => {
       }
     }
   }
-  const questions = [...byQ].map(([questionId, g]) => ({
-    questionId,
-    text: g.text,
-    type: g.type,
-    difficulty: g.difficulty,
-    grade: g.grade,
-    attempts: g.attempts,
-    answered: g.answered,
-    skipped: g.attempts - g.answered,
-    correct: g.correct,
-    pctCorrect: g.attempts ? Math.round((g.correct / g.attempts) * 100) : 0,
-    answerRate: g.attempts ? Math.round((g.answered / g.attempts) * 100) : 0,
-    avgAward: g.attempts ? Number((g.awardSum / g.attempts).toFixed(2)) : 0,
-    flagged: g.flagged,
-    voidPassDelta: g.voidPassDelta,
-    options: [...g.labels].map((label) => ({ label, picks: g.picks.get(label) ?? 0 })),
-  })).sort((x, y) => x.pctCorrect - y.pctCorrect);
+
+  const questions = [...byQ].map(([questionId, g]) => {
+    const skipped = g.attempts - g.answered;
+    const wrong = g.answered - g.correct;
+    const missed = g.attempts - g.correct;
+    const pctCorrect = g.attempts ? Math.round((g.correct / g.attempts) * 100) : 0;
+    const pctWrong = g.attempts ? Math.round((missed / g.attempts) * 100) : 0;
+    const wrongOfAnsweredPct = g.answered ? Math.round((wrong / g.answered) * 100) : 0;
+    const multiCorrectSet = g.type === "multi_select" ? new Set(safeJsonParse<string[]>(g.correctAnswer) ?? []) : null;
+    const options = [...g.labels].map((label) => {
+      const picks = g.picks.get(label) ?? 0;
+      return {
+        label,
+        picks,
+        pct: g.attempts ? Math.round((picks / g.attempts) * 100) : 0,
+        isCorrect: multiCorrectSet ? multiCorrectSet.has(label) : label === g.correctAnswer,
+      };
+    });
+    const wrongOpts = options.filter((o) => !o.isCorrect && o.picks > 0).sort((a, b) => b.picks - a.picks);
+    const mostCommonWrongOption = wrongOpts.length
+      ? { label: wrongOpts[0].label, picks: wrongOpts[0].picks, pct: wrongOpts[0].pct }
+      : null;
+    const distractorBeatKey = Boolean(mostCommonWrongOption && mostCommonWrongOption.picks > g.correct);
+    const discriminationIndex =
+      g.upperAttempts > 0 && g.lowerAttempts > 0
+        ? Number(((g.upperCorrect / g.upperAttempts) - (g.lowerCorrect / g.lowerAttempts)).toFixed(2))
+        : null;
+
+    const flagReasons: string[] = [];
+    if (pctWrong >= 60) flagReasons.push("critical_wrong_rate");
+    else if (pctWrong >= 45) flagReasons.push("high_wrong_rate");
+    if (distractorBeatKey) flagReasons.push("distractor_beat_key");
+    if (discriminationIndex !== null && discriminationIndex < 0) flagReasons.push("negative_discrimination");
+    else if (discriminationIndex !== null && discriminationIndex < 0.15) flagReasons.push("low_discrimination");
+    if (g.attempts > 0 && skipped / g.attempts >= 0.25) flagReasons.push("high_skip_rate");
+    if (g.attempts > 0 && g.flagged / g.attempts >= 0.25) flagReasons.push("frequently_flagged");
+
+    const alertLevel: "critical" | "warning" | "ok" =
+      pctWrong >= 60 || distractorBeatKey || (discriminationIndex !== null && discriminationIndex < 0)
+        ? "critical"
+        : flagReasons.length > 0
+          ? "warning"
+          : "ok";
+
+    return {
+      questionId,
+      text: g.text,
+      type: g.type,
+      difficulty: g.difficulty,
+      grade: g.grade,
+      imageUrl: g.imageUrl,
+      mediaUrl: g.mediaUrl,
+      mediaType: g.mediaType,
+      attempts: g.attempts,
+      answered: g.answered,
+      skipped,
+      correct: g.correct,
+      wrong,
+      pctCorrect,
+      pctWrong,
+      wrongOfAnsweredPct,
+      answerRate: g.attempts ? Math.round((g.answered / g.attempts) * 100) : 0,
+      avgAward: g.attempts ? Number((g.awardSum / g.attempts).toFixed(2)) : 0,
+      flagged: g.flagged,
+      voidPassDelta: g.voidPassDelta,
+      discriminationIndex,
+      mostCommonWrongOption,
+      distractorBeatKey,
+      alertLevel,
+      flagReasons,
+      options,
+    };
+  }).sort((x, y) => x.pctCorrect - y.pctCorrect || y.wrong - x.wrong);
+
+  // Difficulty & question-type breakdowns.
+  const difficultyBreakdown = (["easy", "medium", "hard"] as const).map((diff) => {
+    const qs = questions.filter((q) => q.difficulty === diff);
+    const attempts = qs.reduce((s, q) => s + q.attempts, 0);
+    const correct = qs.reduce((s, q) => s + q.correct, 0);
+    const wrong = qs.reduce((s, q) => s + (q.attempts - q.correct), 0);
+    return {
+      difficulty: diff,
+      questionCount: qs.length,
+      attempts,
+      correct,
+      wrong,
+      pctCorrect: attempts ? Math.round((correct / attempts) * 100) : 0,
+    };
+  }).filter((d) => d.questionCount > 0);
+
+  const questionTypeBreakdown = QUESTION_TYPES.map((qt) => {
+    const qs = questions.filter((q) => q.type === qt);
+    const attempts = qs.reduce((s, q) => s + q.attempts, 0);
+    const correct = qs.reduce((s, q) => s + q.correct, 0);
+    return {
+      type: qt,
+      questionCount: qs.length,
+      attempts,
+      correct,
+      pctCorrect: attempts ? Math.round((correct / attempts) * 100) : 0,
+    };
+  }).filter((d) => d.questionCount > 0);
+
+  const flaggedSummary = {
+    totalQuestions: questions.length,
+    criticalCount: questions.filter((q) => q.alertLevel === "critical").length,
+    warningCount: questions.filter((q) => q.alertLevel === "warning").length,
+    highMissCount: questions.filter((q) => q.pctWrong >= 50).length,
+    lowDiscriminationCount: questions.filter((q) => q.discriminationIndex !== null && q.discriminationIndex < 0.15).length,
+    distractorBeatKeyCount: questions.filter((q) => q.distractorBeatKey).length,
+  };
 
   // Previous-term memory: same subject, latest other term with submissions.
   let prevTerm: { termName: string; avg: number; passRate: number; submitted: number } | null = null;
@@ -1018,12 +1611,14 @@ exams.get("/:id/analytics", async (req, res) => {
   await audit(a.userId, "exam.analytics", "exam", exam.id, { submitted: graded.length });
   res.json({
     examId: exam.id,
+    durationMinutes: exam.durationMinutes,
     assigned,
     started: startedIds.size,
     absent: assigned === null ? null : Math.max(0, assigned - startedIds.size),
     submitted: graded.length,
     inProgress: sittings.filter((s) => s.status === "in_progress").length,
-    avg, median,
+    completionRate,
+    avg, median, q1, q3, stdDev,
     high: sorted.length ? sorted[sorted.length - 1] : 0,
     low: sorted.length ? sorted[0] : 0,
     passRate: pcts.length ? (passCount / pcts.length) * 100 : 0,
@@ -1033,6 +1628,11 @@ exams.get("/:id/analytics", async (req, res) => {
     avgMinutesUsed: usedN ? usedSum / usedN : 0,
     distribution,
     submitCurve,
+    timeBuckets,
+    difficultyBreakdown,
+    questionTypeBreakdown,
+    flaggedSummary,
+    pendingManualGrades,
     reentry: {
       single: { n: single.length, avg: avgPct(single) },
       multi: { n: multi.length, avg: avgPct(multi) },
@@ -1065,6 +1665,62 @@ exams.get("/:id/results", async (req, res) => {
   }
   if (a.role === "ta" && exam.createdBy === a.userId && !(await hasPermission(a.userId, a.role, "view_own_grades"))) {
     return res.status(403).json({ error: "forbidden", need: "view_own_grades" });
+  }
+
+  if (exam.targetScope === "student_list") {
+    const [targets, sittings] = await Promise.all([
+      prisma.examTargetStudent.findMany({
+        where: { examId: exam.id },
+        select: { student: { select: { id: true, username: true, name: true, email: true, academicYear: true } } },
+        orderBy: { student: { name: "asc" } },
+        take: q.limit,
+      }),
+      prisma.studentExam.findMany({
+        where: { examId: exam.id },
+        select: {
+          studentId: true,
+          status: true,
+          totalGrade: true,
+          submittedAt: true,
+          notesForDoctor: true,
+          student: { select: { id: true, username: true, name: true, email: true, academicYear: true } },
+          questions: { select: { question: { select: { grade: true } } } },
+        },
+      }),
+    ]);
+    const studentMap = new Map<string, { id: string; username: string | null; name: string; email?: string; academicYear?: number | null }>();
+    for (const t of targets) studentMap.set(t.student.id, t.student);
+    const sittingById = new Map(
+      sittings.map((g) => {
+        studentMap.set(g.student.id, g.student);
+        return [
+          g.studentId,
+          {
+            studentId: g.studentId,
+            status: g.status,
+            totalGrade: g.totalGrade,
+            submittedAt: g.submittedAt,
+            notesForDoctor: g.notesForDoctor,
+            totalMarks: g.questions.reduce((sum, qu) => sum + Number(qu.question.grade ?? 0), 0),
+          },
+        ];
+      }),
+    );
+    const students = [...studentMap.values()].sort((x, y) => x.name.localeCompare(y.name));
+    const groups = students.length
+      ? [
+          {
+            sectionId: "student_list",
+            sectionName: "Targeted Student List",
+            taName: "—",
+            taUsername: null,
+            total: students.length,
+            rows: students.map((st) => ({ ...st, exam: sittingById.get(st.id) ?? null })),
+          },
+        ]
+      : [];
+    await audit(a.userId, "results.view", "exam", exam.id, { groups: groups.length, limit: q.limit });
+    return res.json({ examId: exam.id, groups });
   }
 
   const sections = await prisma.section.findMany({
@@ -1109,16 +1765,11 @@ exams.get("/:id/results", async (req, res) => {
         where: { examId: exam.id, ...(sectorsSeen.size > 0 ? { studentId: { notIn: [...sectorsSeen] } } : {}) },
         select: { studentId: true, status: true, totalGrade: true, submittedAt: true, notesForDoctor: true, student: { select: { id: true, username: true, name: true, email: true, academicYear: true } }, questions: { select: { question: { select: { grade: true } } } } },
       }),
-      exam.targetScope === "student_list"
-        ? prisma.examTargetStudent.findMany({
-            where: { examId: exam.id, ...(sectorsSeen.size > 0 ? { studentId: { notIn: [...sectorsSeen] } } : {}) },
-            select: { student: { select: { id: true, username: true, name: true, email: true, academicYear: true } } },
-          })
-        : prisma.enrollment.findMany({
-            where: { subjectId: exam.subjectId, termId: exam.termId, ...(sectorsSeen.size > 0 ? { studentId: { notIn: [...sectorsSeen] } } : {}) },
-            select: { student: { select: { id: true, username: true, name: true, email: true, academicYear: true } } },
-            take: q.limit,
-          }),
+      prisma.enrollment.findMany({
+        where: { subjectId: exam.subjectId, termId: exam.termId, ...(sectorsSeen.size > 0 ? { studentId: { notIn: [...sectorsSeen] } } : {}) },
+        select: { student: { select: { id: true, username: true, name: true, email: true, academicYear: true } } },
+        take: q.limit,
+      }),
     ]);
     const extraStudentMap = new Map<string, { id: string; username: string | null; name: string; email?: string; academicYear?: number | null }>();
     for (const e of extraEnrolled) extraStudentMap.set(e.student.id, e.student);
@@ -1152,4 +1803,125 @@ exams.get("/:id/results", async (req, res) => {
   }
   await audit(a.userId, "results.view", "exam", exam.id, { groups: groups.length, limit: q.limit });
   res.json({ examId: exam.id, groups });
+});
+
+// GET /exams/:id/manual-grading — lists submitted essay answers awaiting or
+// completed manual grading for the exam creator or admin.
+exams.get("/:id/manual-grading", async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  if (a.role === "student") return res.status(403).json({ error: "forbidden" });
+  const own = await ownExamOrAdmin(a.userId, a.role, String(req.params.id));
+  if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
+
+  const rows = await prisma.studentExamQuestion.findMany({
+    where: {
+      studentExam: { examId: own.exam.id, status: { in: ["submitted", "auto_submitted"] } },
+      question: { questionType: "essay" },
+    },
+    select: {
+      id: true,
+      questionId: true,
+      selectedAnswer: true,
+      gradeAwarded: true,
+      creditAdjustmentReason: true,
+      studentExam: {
+        select: {
+          id: true,
+          submittedAt: true,
+          totalGrade: true,
+          student: { select: { id: true, name: true, username: true } },
+        },
+      },
+      question: {
+        select: {
+          id: true,
+          text: true,
+          grade: true,
+          correctAnswer: true,
+          mediaUrl: true,
+          mediaType: true,
+        },
+      },
+    },
+    orderBy: [{ studentExam: { submittedAt: "desc" } }],
+    take: 500,
+  });
+
+  res.json({
+    examId: own.exam.id,
+    items: rows.map((r) => ({
+      id: r.id,
+      questionId: r.questionId,
+      studentExamId: r.studentExam.id,
+      student: r.studentExam.student,
+      submittedAt: r.studentExam.submittedAt,
+      questionText: r.question.text,
+      questionMediaUrl: r.question.mediaUrl,
+      questionMediaType: r.question.mediaType,
+      modelAnswer: r.question.correctAnswer,
+      maxGrade: Number(r.question.grade),
+      answer: r.selectedAnswer ?? "",
+      gradeAwarded: Number(r.gradeAwarded ?? 0),
+      feedback: r.creditAdjustmentReason ?? "",
+      isGraded: Number(r.gradeAwarded ?? 0) > 0 || Boolean(r.creditAdjustmentReason),
+    })),
+  });
+});
+
+// PATCH /exams/:id/manual-grading/:seqId — grade a student's essay response and
+// atomically recompute the student's total exam grade.
+exams.patch("/:id/manual-grading/:seqId", async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  if (a.role === "student") return res.status(403).json({ error: "forbidden" });
+  const own = await ownExamOrAdmin(a.userId, a.role, String(req.params.id));
+  if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
+
+  const body = z
+    .object({
+      gradeAwarded: z.number().min(0),
+      feedback: z.string().trim().max(1000).optional(),
+    })
+    .parse(req.body);
+
+  const seq = await prisma.studentExamQuestion.findUnique({
+    where: { id: String(req.params.seqId) },
+    include: {
+      studentExam: { select: { id: true, examId: true, status: true } },
+      question: { select: { grade: true, questionType: true } },
+    },
+  });
+  if (!seq || seq.studentExam.examId !== own.exam.id) {
+    return res.status(404).json({ error: "submission answer not found" });
+  }
+  const maxGrade = Number(seq.question.grade);
+  if (body.gradeAwarded > maxGrade) {
+    return res.status(422).json({ error: `gradeAwarded cannot exceed question max grade (${maxGrade})` });
+  }
+
+  const updatedTotal = await prisma.$transaction(async (tx) => {
+    await tx.studentExamQuestion.update({
+      where: { id: seq.id },
+      data: {
+        gradeAwarded: new Prisma.Decimal(body.gradeAwarded.toFixed(2)),
+        creditAdjustmentReason: body.feedback?.trim() || "Manually graded",
+      },
+    });
+    const all = await tx.studentExamQuestion.findMany({
+      where: { studentExamId: seq.studentExam.id },
+      select: { gradeAwarded: true },
+    });
+    let sum = new Prisma.Decimal(0);
+    for (const q of all) sum = sum.plus(new Prisma.Decimal(Number(q.gradeAwarded ?? 0).toFixed(2)));
+    await tx.studentExam.update({
+      where: { id: seq.studentExam.id },
+      data: { totalGrade: sum },
+    });
+    return Number(sum);
+  });
+
+  await audit(a.userId, "exam.manual-grade", "student_exam_question", seq.id, {
+    examId: own.exam.id,
+    gradeAwarded: body.gradeAwarded,
+  });
+  res.json({ ok: true, gradeAwarded: body.gradeAwarded, totalGrade: updatedTotal });
 });

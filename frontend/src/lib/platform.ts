@@ -44,15 +44,26 @@ export interface Exam extends Entity {
   difficultyMix?: Record<string, number>;
   rejectionReason?: string;
 }
+export type QuestionType =
+  | "mcq"
+  | "true_false"
+  | "multi_select"
+  | "short_answer"
+  | "essay"
+  | "matching"
+  | "ordering";
+
 export interface Question extends Entity {
   subjectId: string;
   text: string;
-  questionType: string;
-  options: string[];
+  questionType: QuestionType | string;
+  options: string[] | { pairs: { left: string; right: string }[] } | { left: string[]; right: string[] };
   correctAnswer?: string;
   grade: number;
   difficulty: string;
-  imageUrl?: string;
+  imageUrl?: string | null;
+  mediaUrl?: string | null;
+  mediaType?: "audio" | "video" | null;
 }
 export interface SittingQuestion extends Question {
   questionId: string;

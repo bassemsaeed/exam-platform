@@ -14,6 +14,8 @@ import {
   Plus,
   Settings2,
   Users,
+  Video,
+  Volume2,
 } from "lucide-react";
 import { api, type SessionUser } from "../lib/api";
 import {
@@ -31,6 +33,15 @@ import { apiUrl } from "../lib/seb";
 import { Badge, Dialog, Empty, Feedback, Loading, PageTitle } from "../components/ui";
 import { Combo, DateTimeField, MultiPicker, Sheet } from "../components/builder";
 import { InstructionsEditor } from "../components/Instructions";
+import { ExamStudentImport } from "../components/ExamStudentImport";
+import { QuestionMediaPlayer, questionDisplayText } from "../components/QuestionMedia";
+import {
+  ALL_QUESTION_TYPES,
+  QuestionOptionsSummary,
+  extractPairs,
+  questionTypeLabel,
+  safeJsonParse,
+} from "../components/QuestionTypesUI";
 
 const STEPS = ["Settings", "Audience", "Blueprint", "Review"];
 
@@ -60,10 +71,14 @@ function ExamPreview({
   questions: {
     id: string;
     text: string;
-    options: string[];
+    questionType?: string;
+    options: Question["options"];
     correctAnswer?: string;
     grade: number;
     difficulty: string;
+    imageUrl?: string | null;
+    mediaUrl?: string | null;
+    mediaType?: "audio" | "video" | null;
   }[];
 }) {
   const t = useT();
@@ -96,21 +111,30 @@ function ExamPreview({
           <div className="preview-card" key={q.id}>
             <p>
               <b>{i + 1}. </b>
-              {q.text}
+              {questionDisplayText(q, t)}
             </p>
-            <div className="answer-options">
-              {q.options.map((o, j) => (
-                <span key={j} className={o === q.correctAnswer ? "selected" : ""}>
-                  <span className="option-letter">
-                    {String.fromCharCode(65 + j)}
-                  </span>
-                  {o}
-                </span>
-              ))}
-            </div>
+            {q.mediaUrl && q.mediaType && (
+              <QuestionMediaPlayer
+                mediaUrl={q.mediaUrl}
+                mediaType={q.mediaType}
+                compact
+              />
+            )}
+            {q.imageUrl && (
+              <img
+                className="question-image"
+                src={q.imageUrl.startsWith("/") ? apiUrl(q.imageUrl) : q.imageUrl}
+                alt={t("Question diagram")}
+              />
+            )}
+            <QuestionOptionsSummary
+              questionType={q.questionType ?? "mcq"}
+              options={q.options}
+              correctAnswer={q.correctAnswer}
+            />
             <small>
               {q.grade} {t("marks")} · {t(label(q.difficulty))} ·{" "}
-              {t("answer")}: {q.correctAnswer}
+              {questionTypeLabel(q.questionType ?? "mcq", t)}
             </small>
           </div>
         ))}
@@ -161,6 +185,9 @@ export function ExamWizard({ user }: { user: SessionUser }) {
   const [scope, setScope] = useState(user.role === "ta" ? "sections" : "subject");
   const [sectionSel, setSectionSel] = useState<string[]>([]);
   const [pickedStudents, setPickedStudents] = useState<string[]>([]);
+  const [importedStudentsMeta, setImportedStudentsMeta] = useState<
+    { id: string; name: string; username?: string | null; sub?: string }[]
+  >([]);
   const [source, setSource] = useState("shared");
   const [manual, setManual] = useState(false);
   const [mix, setMix] = useState({ easy: 3, medium: 2, hard: 1 });
@@ -287,30 +314,44 @@ export function ExamWizard({ user }: { user: SessionUser }) {
         secNamesByStudent.set(st.id, list);
       }
     }
-    if (roster.data?.enrolledStudents?.length) {
-      return roster.data.enrolledStudents.map((st) => ({
-        id: st.id,
-        name: st.name,
-        username: st.username,
-        sub: secNamesByStudent.get(st.id)?.join(", ") || t("Enrolled"),
-      }));
-    }
+    const base: { id: string; name: string; username?: string; sub: string }[] = [];
     const seen = new Set<string>();
-    const out: { id: string; name: string; username: string; sub: string }[] = [];
-    for (const sec of roster.data?.sections ?? []) {
-      for (const st of sec.students) {
-        if (seen.has(st.id)) continue;
+    if (roster.data?.enrolledStudents?.length) {
+      for (const st of roster.data.enrolledStudents) {
         seen.add(st.id);
-        out.push({
+        base.push({
           id: st.id,
           name: st.name,
           username: st.username,
-          sub: secNamesByStudent.get(st.id)?.join(", ") || sec.name,
+          sub: secNamesByStudent.get(st.id)?.join(", ") || t("Enrolled"),
         });
       }
+    } else {
+      for (const sec of roster.data?.sections ?? []) {
+        for (const st of sec.students) {
+          if (seen.has(st.id)) continue;
+          seen.add(st.id);
+          base.push({
+            id: st.id,
+            name: st.name,
+            username: st.username,
+            sub: secNamesByStudent.get(st.id)?.join(", ") || sec.name,
+          });
+        }
+      }
     }
-    return out;
-  }, [roster.data, t]);
+    for (const imp of importedStudentsMeta) {
+      if (seen.has(imp.id)) continue;
+      seen.add(imp.id);
+      base.push({
+        id: imp.id,
+        name: imp.name,
+        username: imp.username ?? undefined,
+        sub: imp.sub || t("Imported via spreadsheet"),
+      });
+    }
+    return base;
+  }, [roster.data, importedStudentsMeta, t]);
 
   function valid(s: number): string {
     if (s === 0) {
@@ -760,7 +801,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
             </h2>
             <div className="scope-cards">
               {(user.role === "ta"
-                ? ["sections"]
+                ? ["sections", "student_list"]
                 : ["subject", "sections", "student_list"]
               ).map((o) => (
                 <button
@@ -775,7 +816,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
                       ? t("Everyone enrolled")
                       : o === "sections"
                         ? t("Chosen sections only")
-                        : t("Hand-picked students")}
+                        : t("Pick or import Excel (.xlsx)")}
                   </small>
                 </button>
               ))}
@@ -806,23 +847,44 @@ export function ExamWizard({ user }: { user: SessionUser }) {
               </div>
             )}
             {scope === "student_list" && (
-              <div className="field">
-                <span className="field-label">
-                  {t("Target students")} ({roster.data?.totalEnrolled ?? 0}{" "}
-                  {t("enrolled")})
-                </span>
-                <Feedback error={roster.error} />
-                {roster.isPending ? (
-                  <p className="subtle">{t("Loading enrolled students…")}</p>
-                ) : (
-                  <MultiPicker
-                    options={studentPickerOptions}
-                    value={pickedStudents}
-                    onChange={setPickedStudents}
-                    placeholder="Search enrolled students…"
-                    emptyText="No enrolled students in this subject."
-                  />
-                )}
+              <div className="student-list-step">
+                <ExamStudentImport
+                  subjectId={subject}
+                  selectedIds={pickedStudents}
+                  onApplyStudents={(ids, meta, mode) => {
+                    setImportedStudentsMeta((prev) => {
+                      const map = new Map(prev.map((p) => [p.id, p]));
+                      for (const m of meta) map.set(m.id, m);
+                      return [...map.values()];
+                    });
+                    setPickedStudents((prev) =>
+                      mode === "merge"
+                        ? [...new Set([...prev, ...ids])]
+                        : [...new Set(ids)],
+                    );
+                  }}
+                />
+                <div className="field">
+                  <span className="field-label">
+                    {t("Target students")} ({pickedStudents.length} {t("selected")}
+                    {roster.data?.totalEnrolled
+                      ? ` · ${roster.data.totalEnrolled} ${t("enrolled")}`
+                      : ""}
+                    )
+                  </span>
+                  <Feedback error={roster.error} />
+                  {roster.isPending ? (
+                    <p className="subtle">{t("Loading enrolled students…")}</p>
+                  ) : (
+                    <MultiPicker
+                      options={studentPickerOptions}
+                      value={pickedStudents}
+                      onChange={setPickedStudents}
+                      placeholder="Search enrolled or imported students…"
+                      emptyText="No students yet — import an .xlsx / .csv file above or select enrolled students."
+                    />
+                  )}
+                </div>
               </div>
             )}
             {user.role === "ta" && (
@@ -928,7 +990,19 @@ export function ExamWizard({ user }: { user: SessionUser }) {
                       <span className="pick-n">
                         {picked.includes(q.id) ? <Check size={13} /> : <ListChecks size={13} />}
                       </span>
-                      <span>{q.text}</span>
+                      <span>
+                        {questionDisplayText(q, t)}
+                        {q.mediaType === "video" && (
+                          <span className="meta-pill inline-pill">
+                            <Video size={11} /> {t("Video")}
+                          </span>
+                        )}
+                        {q.mediaType === "audio" && (
+                          <span className="meta-pill inline-pill">
+                            <Volume2 size={11} /> {t("Audio")}
+                          </span>
+                        )}
+                      </span>
                       <Badge value={q.difficulty} />
                     </button>
                   ))}
@@ -954,7 +1028,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
               <div><dt>{t("Duration")}</dt><dd>{duration}{t(" min")}</dd></div>
               <div><dt>{t("Opens")}</dt><dd>{startLocal || "—"}</dd></div>
               <div><dt>{t("Closes")}</dt><dd>{endLocal || "—"}</dd></div>
-              <div><dt>{t("Audience")}</dt><dd>{t(label(scope))}{scope === "sections" ? ` (${sectionSel.length})` : ""}</dd></div>
+              <div><dt>{t("Audience")}</dt><dd>{t(label(scope))}{scope === "sections" ? ` (${sectionSel.length})` : scope === "student_list" ? ` (${pickedStudents.length} ${t("students")})` : ""}</dd></div>
               <div>
                 <dt>{t("Questions")}</dt>
                 <dd>{manual ? `${picked.length} hand-picked` : `${totalQ} (E${mix.easy}/M${mix.medium}/H${mix.hard})`}</dd>
@@ -1044,7 +1118,7 @@ export interface QDraft {
   difficulty: string;
 }
 
-// Modern side-sheet question editor with live student-view preview.
+// Modern side-sheet question editor supporting all 7 question types with live student-view preview.
 export function QuestionSheet({
   initial,
   subjectLocked,
@@ -1053,118 +1127,428 @@ export function QuestionSheet({
   onClose,
   onSubmit,
   imageUpload,
+  mediaUpload,
+  hasPendingAttachment = false,
+  pendingMedia = null,
+  pendingImageUrl = null,
 }: {
-  initial: Partial<Question> & { options?: string[] | string };
+  initial: Partial<Question> & { options?: Question["options"] | string };
   subjectLocked?: boolean;
   busy?: boolean;
   error?: unknown;
   onClose: () => void;
   onSubmit: (body: Record<string, unknown>) => void;
   imageUpload?: React.ReactNode;
+  mediaUpload?: React.ReactNode;
+  hasPendingAttachment?: boolean;
+  pendingMedia?: { url: string; type: "audio" | "video" } | null;
+  pendingImageUrl?: string | null;
 }) {
   const t = useT();
+  const initType = String(initial.questionType ?? "mcq");
   const [text, setText] = useState(String(initial.text ?? ""));
-  const [qtype, setQtype] = useState(String(initial.questionType ?? "mcq"));
-  const [options, setOptions] = useState<string[]>(
-    Array.isArray(initial.options)
-      ? initial.options
-      : String(initial.options ?? "A\nB\nC").split("\n"),
-  );
+  const [qtype, setQtype] = useState(initType);
+  const [options, setOptions] = useState<string[]>(() => {
+    if (initType === "true_false") return ["True", "False"];
+    if (Array.isArray(initial.options)) return initial.options.map(String);
+    if (typeof initial.options === "string") return initial.options.split("\n");
+    return ["", "", ""];
+  });
   const [correct, setCorrect] = useState(String(initial.correctAnswer ?? ""));
+  const [multiCorrect, setMultiCorrect] = useState<string[]>(() => {
+    if (initType !== "multi_select") return [];
+    return safeJsonParse<string[]>(initial.correctAnswer) ?? [];
+  });
+  const [shortAnswers, setShortAnswers] = useState<string[]>(() => {
+    if (initType === "short_answer") {
+      if (Array.isArray(initial.options) && initial.options.length) return initial.options.map(String);
+      if (initial.correctAnswer) return [String(initial.correctAnswer)];
+    }
+    return [""];
+  });
+  const [essayRubric, setEssayRubric] = useState(
+    initType === "essay" ? String(initial.correctAnswer ?? "") : "",
+  );
+  const [pairs, setPairs] = useState<{ left: string; right: string }[]>(() => {
+    if (initType === "matching") {
+      const existing = extractPairs(initial.options);
+      if (existing.length >= 2) return existing;
+    }
+    return [
+      { left: "", right: "" },
+      { left: "", right: "" },
+      { left: "", right: "" },
+    ];
+  });
+  const [orderItems, setOrderItems] = useState<string[]>(() => {
+    if (initType === "ordering" && Array.isArray(initial.options) && initial.options.length >= 2) {
+      return initial.options.map(String);
+    }
+    return ["", "", ""];
+  });
   const [grade, setGrade] = useState(Number(initial.grade ?? 2));
   const [diff, setDiff] = useState(String(initial.difficulty ?? "easy"));
   const [localErr, setLocalErr] = useState("");
   const clean = options.map((o) => o.trim()).filter(Boolean);
+  const cleanShort = shortAnswers.map((s) => s.trim()).filter(Boolean);
+  const cleanPairs = pairs
+    .map((p) => ({ left: p.left.trim(), right: p.right.trim() }))
+    .filter((p) => p.left || p.right);
+  const cleanOrder = orderItems.map((s) => s.trim()).filter(Boolean);
+  const hasAnyMedia = Boolean(
+    hasPendingAttachment || initial.mediaUrl || initial.imageUrl || pendingMedia || pendingImageUrl,
+  );
 
   function setOpt(i: number, v: string) {
+    const prevVal = options[i]?.trim();
     setOptions((o) => o.map((x, j) => (j === i ? v : x)));
+    if (prevVal && multiCorrect.includes(prevVal)) {
+      setMultiCorrect((mc) => mc.map((x) => (x === prevVal ? v.trim() : x)).filter(Boolean));
+    }
+    if (prevVal && correct === prevVal) setCorrect(v.trim());
   }
+
+  function switchType(nextType: string) {
+    setQtype(nextType);
+    setLocalErr("");
+    if (nextType === "true_false") {
+      setOptions(["True", "False"]);
+      if (correct !== "True" && correct !== "False") setCorrect("True");
+    } else if (nextType === "mcq" && options.length < 2) {
+      setOptions(["", "", ""]);
+    } else if (nextType === "multi_select" && options.length < 2) {
+      setOptions(["", "", "", ""]);
+    }
+  }
+
   function save() {
-    if (!text.trim()) return setLocalErr("Write the question text first.");
-    if (clean.length < 2) return setLocalErr("Add at least two answer options.");
-    if (new Set(clean).size !== clean.length)
-      return setLocalErr("Answer options must be unique.");
-    if (!correct.trim() || !clean.includes(correct.trim()))
-      return setLocalErr("Pick the correct answer from the options.");
-    if (!Number.isFinite(grade) || grade <= 0)
-      return setLocalErr("Marks must be a positive number.");
+    if (!text.trim() && !hasAnyMedia) {
+      return setLocalErr(t("Write the question text or attach an audio/video recording or image."));
+    }
+    if (!Number.isFinite(grade) || grade <= 0) {
+      return setLocalErr(t("Marks must be a positive number."));
+    }
+
+    let payloadOptions: unknown = [];
+    let payloadCorrect = "";
+
+    if (qtype === "mcq" || qtype === "true_false") {
+      if (clean.length < 2) return setLocalErr(t("Add at least two answer options."));
+      if (new Set(clean).size !== clean.length) return setLocalErr(t("Answer options must be unique."));
+      if (!correct.trim() || !clean.includes(correct.trim())) {
+        return setLocalErr(t("Pick the correct answer from the options."));
+      }
+      payloadOptions = clean;
+      payloadCorrect = correct.trim();
+    } else if (qtype === "multi_select") {
+      if (clean.length < 2) return setLocalErr(t("Add at least two answer options."));
+      if (new Set(clean).size !== clean.length) return setLocalErr(t("Answer options must be unique."));
+      const picked = [...new Set(multiCorrect.map((x) => x.trim()).filter((x) => clean.includes(x)))];
+      if (!picked.length) return setLocalErr(t("Check at least one correct answer."));
+      payloadOptions = clean;
+      payloadCorrect = JSON.stringify(picked.sort());
+    } else if (qtype === "short_answer") {
+      const uniqueShort = [...new Set(cleanShort)];
+      if (!uniqueShort.length) return setLocalErr(t("Add at least one accepted short answer."));
+      payloadOptions = uniqueShort;
+      payloadCorrect = uniqueShort[0];
+    } else if (qtype === "essay") {
+      payloadOptions = [];
+      payloadCorrect = essayRubric.trim();
+    } else if (qtype === "matching") {
+      if (cleanPairs.length < 2 || cleanPairs.some((p) => !p.left || !p.right)) {
+        return setLocalErr(t("Add at least 2 complete matching pairs (both left and right filled)."));
+      }
+      if (new Set(cleanPairs.map((p) => p.left)).size !== cleanPairs.length) {
+        return setLocalErr(t("Left-side matching items must be unique."));
+      }
+      if (new Set(cleanPairs.map((p) => p.right)).size !== cleanPairs.length) {
+        return setLocalErr(t("Right-side matching answers must be unique."));
+      }
+      const keyMap: Record<string, string> = {};
+      for (const p of cleanPairs) keyMap[p.left] = p.right;
+      payloadOptions = { pairs: cleanPairs };
+      payloadCorrect = JSON.stringify(keyMap);
+    } else if (qtype === "ordering") {
+      if (cleanOrder.length < 2) return setLocalErr(t("Add at least 2 items to order."));
+      if (new Set(cleanOrder).size !== cleanOrder.length) {
+        return setLocalErr(t("Ordering items must be unique."));
+      }
+      payloadOptions = cleanOrder;
+      payloadCorrect = JSON.stringify(cleanOrder);
+    }
+
     setLocalErr("");
     onSubmit({
       text: text.trim(),
+      mediaPending: hasPendingAttachment,
       questionType: qtype,
-      options: clean,
-      correctAnswer: correct.trim(),
+      options: payloadOptions,
+      correctAnswer: payloadCorrect,
       grade,
       difficulty: diff,
     });
   }
+
+  const previewMediaUrl = pendingMedia?.url ?? initial.mediaUrl ?? null;
+  const previewMediaType = pendingMedia?.type ?? initial.mediaType ?? null;
+  const previewImg = pendingImageUrl ?? initial.imageUrl ?? null;
+
   return (
     <Sheet title={initial.id ? "Edit question" : "Add question"} onClose={onClose} wide>
       <div className="sheet-grid">
         <div>
           <div className="field">
             <span className="field-label">{t("Question type")}</span>
-            <div className="scope-cards two">
-              {["mcq", "true_false"].map((o) => (
+            <div className="qtype-grid">
+              {ALL_QUESTION_TYPES.map((item) => (
                 <button
-                  key={o}
+                  key={item.value}
                   type="button"
-                  className={qtype === o ? "on" : ""}
-                  onClick={() => {
-                    setQtype(o);
-                    if (o === "true_false") {
-                      setOptions(["True", "False"]);
-                      if (correct !== "True" && correct !== "False") setCorrect("True");
-                    }
-                  }}
+                  className={`qtype-card ${qtype === item.value ? "on" : ""}`}
+                  onClick={() => switchType(item.value)}
                 >
-                  <b>{t(label(o))}</b>
-                  <small>{o === "mcq" ? t("2–6 options") : t("True / False")}</small>
+                  <b>{t(item.label)}</b>
+                  <small>{t(item.hint)}</small>
                 </button>
               ))}
             </div>
           </div>
+
           <div className="field">
-            <label htmlFor="qs-text">{t("Question text")}</label>
+            <div className="field-label-row">
+              <label htmlFor="qs-text">{t("Question text")}</label>
+              <span className="subtle">
+                {t("Optional when audio, video, or image is attached")}
+              </span>
+            </div>
             <textarea
               id="qs-text"
               value={text}
               onChange={(e) => setText(e.target.value)}
-              placeholder={t("What is…?")}
+              placeholder={t("Write a prompt, or leave blank for a video/voice-only question…")}
             />
           </div>
-          <div className="field">
-            <span className="field-label">{t("Answer options")}</span>
-            {options.map((o, i) => (
-              <div className="opt-row" key={i}>
+
+          {mediaUpload}
+
+          {/* Type-specific answer builders */}
+          {(qtype === "mcq" || qtype === "true_false") && (
+            <div className="field">
+              <span className="field-label">{t("Answer options")}</span>
+              {options.map((o, i) => (
+                <div className="opt-row" key={i}>
+                  <button
+                    type="button"
+                    className={`opt-radio ${correct === o.trim() && o.trim() ? "on" : ""}`}
+                    title={t("Mark as correct")}
+                    onClick={() => setCorrect(o.trim())}
+                    disabled={!o.trim()}
+                  >
+                    {correct === o.trim() && o.trim() ? <Check size={13} /> : String.fromCharCode(65 + i)}
+                  </button>
+                  <input
+                    value={o}
+                    onChange={(e) => setOpt(i, e.target.value)}
+                    placeholder={`${t("Option")} ${String.fromCharCode(65 + i)}`}
+                    disabled={qtype === "true_false"}
+                  />
+                  {options.length > 2 && qtype !== "true_false" && (
+                    <button type="button" className="icon-button" aria-label={t("Remove option")} onClick={() => setOptions((x) => x.filter((_, j) => j !== i))}>
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+              {qtype !== "true_false" && options.length < 6 && (
+                <button type="button" className="text-button" onClick={() => setOptions((x) => [...x, ""])}>
+                  <Plus size={13} /> {t(" Add option ")}
+                </button>
+              )}
+            </div>
+          )}
+
+          {qtype === "multi_select" && (
+            <div className="field">
+              <span className="field-label">{t("Answer options (check all correct answers)")}</span>
+              {options.map((o, i) => {
+                const trimmed = o.trim();
+                const isOn = Boolean(trimmed && multiCorrect.includes(trimmed));
+                return (
+                  <div className="opt-row" key={i}>
+                    <button
+                      type="button"
+                      className={`opt-radio square ${isOn ? "on" : ""}`}
+                      title={t("Toggle correct answer")}
+                      disabled={!trimmed}
+                      onClick={() =>
+                        setMultiCorrect((prev) =>
+                          prev.includes(trimmed)
+                            ? prev.filter((x) => x !== trimmed)
+                            : [...prev, trimmed],
+                        )
+                      }
+                    >
+                      {isOn ? <Check size={13} /> : String.fromCharCode(65 + i)}
+                    </button>
+                    <input
+                      value={o}
+                      onChange={(e) => setOpt(i, e.target.value)}
+                      placeholder={`${t("Option")} ${String.fromCharCode(65 + i)}`}
+                    />
+                    {options.length > 2 && (
+                      <button
+                        type="button"
+                        className="icon-button"
+                        aria-label={t("Remove option")}
+                        onClick={() => setOptions((x) => x.filter((_, j) => j !== i))}
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+              {options.length < 8 && (
+                <button type="button" className="text-button" onClick={() => setOptions((x) => [...x, ""])}>
+                  <Plus size={13} /> {t(" Add option ")}
+                </button>
+              )}
+              <small className="subtle">{t("Partial credit is awarded automatically based on correct selections.")}</small>
+            </div>
+          )}
+
+          {qtype === "short_answer" && (
+            <div className="field">
+              <span className="field-label">{t("Accepted answers (auto-graded, case-insensitive)")}</span>
+              {shortAnswers.map((ans, i) => (
+                <div className="opt-row" key={i}>
+                  <span className="opt-radio on">
+                    <Check size={13} />
+                  </span>
+                  <input
+                    value={ans}
+                    onChange={(e) =>
+                      setShortAnswers((arr) => arr.map((x, j) => (j === i ? e.target.value : x)))
+                    }
+                    placeholder={i === 0 ? t("Primary accepted answer…") : t("Alternative accepted spelling…")}
+                  />
+                  {shortAnswers.length > 1 && (
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={t("Remove answer")}
+                      onClick={() => setShortAnswers((arr) => arr.filter((_, j) => j !== i))}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+              {shortAnswers.length < 10 && (
+                <button type="button" className="text-button" onClick={() => setShortAnswers((arr) => [...arr, ""])}>
+                  <Plus size={13} /> {t("Add alternative accepted answer")}
+                </button>
+              )}
+            </div>
+          )}
+
+          {qtype === "essay" && (
+            <div className="field">
+              <label htmlFor="qs-rubric">{t("Model answer / Grading rubric (optional, hidden from students)")}</label>
+              <textarea
+                id="qs-rubric"
+                rows={4}
+                value={essayRubric}
+                onChange={(e) => setEssayRubric(e.target.value)}
+                placeholder={t("Key points to look for when grading this essay manually…")}
+              />
+              <small className="subtle">
+                {t("Students get a multi-line essay box. You can grade submissions from the exam's 'Grade Essays' tab.")}
+              </small>
+            </div>
+          )}
+
+          {qtype === "matching" && (
+            <div className="field">
+              <span className="field-label">{t("Matching pairs (shuffled automatically for students)")}</span>
+              {pairs.map((p, i) => (
+                <div className="pair-edit-row" key={i}>
+                  <span className="opt-radio">{i + 1}</span>
+                  <input
+                    value={p.left}
+                    onChange={(e) =>
+                      setPairs((arr) => arr.map((x, j) => (j === i ? { ...x, left: e.target.value } : x)))
+                    }
+                    placeholder={`${t("Prompt / Term")} ${i + 1}`}
+                  />
+                  <span className="pair-sep">↔</span>
+                  <input
+                    value={p.right}
+                    onChange={(e) =>
+                      setPairs((arr) => arr.map((x, j) => (j === i ? { ...x, right: e.target.value } : x)))
+                    }
+                    placeholder={`${t("Matching Answer")} ${i + 1}`}
+                  />
+                  {pairs.length > 2 && (
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={t("Remove pair")}
+                      onClick={() => setPairs((arr) => arr.filter((_, j) => j !== i))}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+              {pairs.length < 8 && (
                 <button
                   type="button"
-                  className={`opt-radio ${correct === o.trim() && o.trim() ? "on" : ""}`}
-                  title={t("Mark as correct")}
-                  onClick={() => setCorrect(o)}
-                  disabled={!o.trim()}
+                  className="text-button"
+                  onClick={() => setPairs((arr) => [...arr, { left: "", right: "" }])}
                 >
-                  {correct === o.trim() && o.trim() ? <Check size={13} /> : String.fromCharCode(65 + i)}
+                  <Plus size={13} /> {t("Add matching pair")}
                 </button>
-                <input
-                  value={o}
-                  onChange={(e) => setOpt(i, e.target.value)}
-                  placeholder={`${t("Option")} ${String.fromCharCode(65 + i)}`}
-                  disabled={qtype === "true_false"}
-                />
-                {options.length > 2 && qtype !== "true_false" && (
-                  <button type="button" className="icon-button" aria-label={t("Remove option")} onClick={() => setOptions((x) => x.filter((_, j) => j !== i))}>
-                    ×
-                  </button>
-                )}
-              </div>
-            ))}
-            {qtype !== "true_false" && options.length < 6 && (
-              <button type="button" className="text-button" onClick={() => setOptions((x) => [...x, ""])}>
-                <Plus size={13} /> {t(" Add option ")}
-              </button>
-            )}
-          </div>
+              )}
+              <small className="subtle">{t("Students receive proportional credit for every pair matched correctly.")}</small>
+            </div>
+          )}
+
+          {qtype === "ordering" && (
+            <div className="field">
+              <span className="field-label">{t("Items in the CORRECT order (1 = first)")}</span>
+              {orderItems.map((item, i) => (
+                <div className="opt-row" key={i}>
+                  <span className="opt-radio on">{i + 1}</span>
+                  <input
+                    value={item}
+                    onChange={(e) =>
+                      setOrderItems((arr) => arr.map((x, j) => (j === i ? e.target.value : x)))
+                    }
+                    placeholder={`${t("Step / Item")} ${i + 1}`}
+                  />
+                  {orderItems.length > 2 && (
+                    <button
+                      type="button"
+                      className="icon-button"
+                      aria-label={t("Remove item")}
+                      onClick={() => setOrderItems((arr) => arr.filter((_, j) => j !== i))}
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+              ))}
+              {orderItems.length < 8 && (
+                <button type="button" className="text-button" onClick={() => setOrderItems((arr) => [...arr, ""])}>
+                  <Plus size={13} /> {t("Add item")}
+                </button>
+              )}
+              <small className="subtle">{t("Shown in shuffled order to students; graded proportionally by position.")}</small>
+            </div>
+          )}
+
           <div className="form-grid">
             <div className="field">
               <span className="field-label">{t("Marks")}</span>
@@ -1197,29 +1581,101 @@ export function QuestionSheet({
             </button>
           </div>
         </div>
+
         <div className="live-preview">
-          <p className="field-label">{t("Student preview")}</p>
+          <p className="field-label">
+            {t("Student preview")} · {questionTypeLabel(qtype, t)}
+          </p>
           <div className="preview-card">
-            <p>{text || t("Your question appears here…")}</p>
-            <div className="answer-options">
-              {clean.map((o, i) => (
-                <span key={i} className={o === correct.trim() ? "selected" : ""}>
-                  <span className="option-letter">{String.fromCharCode(65 + i)}</span>
-                  {o}
-                </span>
-              ))}
-            </div>
+            <p>
+              {text.trim()
+                ? text
+                : previewMediaType === "video"
+                  ? t("Watch the video and choose the correct answer")
+                  : previewMediaType === "audio"
+                    ? t("Listen to the recording and choose the correct answer")
+                    : previewImg
+                      ? t("Review the image and choose the correct answer")
+                      : t("Your question appears here…")}
+            </p>
+            {previewMediaUrl && previewMediaType && (
+              <QuestionMediaPlayer
+                mediaUrl={previewMediaUrl}
+                mediaType={previewMediaType}
+              />
+            )}
+            {previewImg && (
+              <img
+                className="question-image"
+                src={String(previewImg).startsWith("/") ? apiUrl(String(previewImg)) : String(previewImg)}
+                alt={t("Question diagram")}
+              />
+            )}
+
+            {(qtype === "mcq" || qtype === "true_false") && (
+              <div className="answer-options">
+                {clean.map((o, i) => (
+                  <span key={i} className={o === correct.trim() ? "selected" : ""}>
+                    <span className="option-letter">{String.fromCharCode(65 + i)}</span>
+                    {o}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {qtype === "multi_select" && (
+              <div className="answer-options">
+                {clean.map((o, i) => (
+                  <span key={i} className={multiCorrect.includes(o) ? "selected" : ""}>
+                    <span className="option-letter">
+                      {multiCorrect.includes(o) ? "✓" : String.fromCharCode(65 + i)}
+                    </span>
+                    {o}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {qtype === "short_answer" && (
+              <div className="preview-input-box">
+                <input type="text" disabled placeholder={t("Student types short answer here…")} />
+                {cleanShort.length > 0 && (
+                  <small>{t("Accepted")}: {cleanShort.join(" · ")}</small>
+                )}
+              </div>
+            )}
+
+            {qtype === "essay" && (
+              <div className="preview-input-box">
+                <textarea rows={4} disabled placeholder={t("Student writes their essay answer here…")} />
+              </div>
+            )}
+
+            {qtype === "matching" && (
+              <div className="q-pairs-chips">
+                {cleanPairs.map((p, i) => (
+                  <span className="q-pair-pill" key={i}>
+                    <b>{p.left || "…"}</b> ↔ <span>{p.right || "…"}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {qtype === "ordering" && (
+              <div className="answer-options">
+                {cleanOrder.map((o, i) => (
+                  <span key={i} className="selected">
+                    <span className="option-letter">{i + 1}</span>
+                    {o}
+                  </span>
+                ))}
+              </div>
+            )}
+
             <small>
               {grade} {t("marks")} · {t(label(diff))}
             </small>
           </div>
-          {initial.imageUrl && (
-            <img
-              className="question-image"
-              src={String(initial.imageUrl).startsWith("/") ? apiUrl(String(initial.imageUrl)) : String(initial.imageUrl)}
-              alt={t("Question diagram")}
-            />
-          )}
         </div>
       </div>
     </Sheet>
