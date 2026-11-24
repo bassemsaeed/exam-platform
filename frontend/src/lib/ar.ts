@@ -1427,4 +1427,41 @@ export const arabic: Record<string, string> = {
   "Move down": "تحريك لأسفل",
   "Student types short answer here…": "يكتب الطالب الإجابة القصيرة هنا…",
   "Student writes their essay answer here…": "يكتب الطالب الإجابة المقالية هنا…",
+
+  // Simplified analytics flags & clear diagrams
+  "Grade breakdown": "توزيع الدرجات",
+  "Number and percentage of students in each grade level":
+    "عدد ونسبة الطلاب في كل تقدير",
+  "Excellent": "ممتاز",
+  "Very Good": "جيد جدًا",
+  "Pass": "مقبول",
+  "Below Pass": "دون النجاح",
+  "Grade level": "التقدير",
+  "Pass overview & difficulty": "ملخص النجاح ومستوى الصعوبة",
+  "Pass line is 60% · accuracy grouped by question difficulty":
+    "حد النجاح 60% · نسبة الصواب حسب صعوبة السؤال",
+  "Passed (≥60%)": "ناجح (≥60%)",
+  "Below pass (<60%)": "دون النجاح (<60%)",
+  "Accuracy by difficulty": "نسبة الصواب حسب الصعوبة",
+  "Click a question to inspect student answers.":
+    "اضغط على أي سؤال لعرض إجابات الطلاب.",
+  "Flag ≥": "تمييز ≥",
+  "Show flagged": "عرض المميزة",
+  "{0} flagged questions": "{0} أسئلة مميزة",
+  "≥{0}% wrong": "≥{0}% خطأ",
+  "{0} essays awaiting manual grade": "{0} أسئلة مقالية بانتظار التصحيح",
+  "Most wrong first": "الأكثر خطأً أولًا",
+  "Most correct first": "الأكثر صحة أولًا",
+  "Most student flags": "الأكثر تمييزًا من الطلاب",
+  "Check answer key": "راجع الإجابة الصحيحة",
+  "Fair": "متوسط",
+  "OK": "سليم",
+  "Correct": "صحيح",
+  "Top wrong": "أكثر خطأ",
+  "Quality": "الجودة",
+  "Full-credit lift": "أثر الدرجة الكاملة",
+  "Adjust grade": "تعديل الدرجة",
+  "Time spent & scores": "الوقت المستغرق والدرجات",
+  "How long students spent compared to their average score":
+    "المدة التي استغرقها الطلاب مقارنة بمتوسط درجاتهم",
 };

@@ -2354,3 +2354,308 @@
 .essay-grade-controls input[type="number"] {
   width: 110px;
 }
+
+/* ==========================================================================
+   Simplified Calm Flags & Clear Analytics Diagrams
+   ========================================================================== */
+.an-slim-notice {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 9px 14px;
+  border-radius: 9px;
+  font-size: 12.5px;
+}
+.an-slim-notice > span {
+  flex: 1;
+}
+.an-slim-notice.warn {
+  background: #fff9ef;
+  border: 1px solid #f0dcba;
+  color: #7c4a08;
+}
+.an-slim-notice.info {
+  background: #f2f7fc;
+  border: 1px solid #d5e4f2;
+  color: #164466;
+}
+[data-theme="dark"] .an-slim-notice.warn {
+  background: #282014;
+  border-color: #4f3d20;
+  color: #f3c87b;
+}
+[data-theme="dark"] .an-slim-notice.info {
+  background: #132535;
+  border-color: #274259;
+  color: #b7d7f0;
+}
+
+/* Calm, compact flag chip on questions (no heavy red walls) */
+.an-q-card.is-flagged-soft {
+  border-color: #ecd4b0;
+  background: #fffdf9;
+}
+[data-theme="dark"] .an-q-card.is-flagged-soft {
+  border-color: #544022;
+  background: #17232d;
+}
+.an-flag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fff3df;
+  color: #9a5206;
+  border: 1px solid #f1d3a2;
+}
+[data-theme="dark"] .an-flag-chip {
+  background: #332512;
+  color: #f6c478;
+  border-color: #5c431f;
+}
+.an-filter-tabs button.flag-tab-soft.on {
+  background: #9a5206;
+  border-color: #9a5206;
+  color: #ffffff;
+}
+[data-theme="dark"] .an-filter-tabs button.flag-tab-soft.on {
+  background: #b5650c;
+  border-color: #d48224;
+  color: #ffffff;
+}
+.an-thr-chip.on {
+  background: #103e60;
+  border-color: #103e60;
+  color: #ffffff;
+}
+[data-theme="dark"] .an-thr-chip.on {
+  background: #2374ab;
+  border-color: #4fa2d4;
+  color: #ffffff;
+}
+.an-opt-tag.soft-warn {
+  background: #fff3df;
+  color: #9a5206;
+}
+[data-theme="dark"] .an-opt-tag.soft-warn {
+  background: #332512;
+  color: #f6c478;
+}
+
+/* Clear 5-band Grade Breakdown & Time-Spent Horizontal Charts */
+.an-band-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.an-band-row {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr) 74px;
+  align-items: center;
+  gap: 12px;
+}
+.an-band-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.an-band-label b {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #193b54;
+}
+.an-band-label small {
+  font-size: 10.5px;
+  color: #7890a3;
+}
+[data-theme="dark"] .an-band-label b {
+  color: #e4eff7;
+}
+[data-theme="dark"] .an-band-label small {
+  color: #90aac0;
+}
+.an-band-track {
+  height: 12px;
+  border-radius: 999px;
+  background: #edf3f8;
+  overflow: hidden;
+}
+[data-theme="dark"] .an-band-track {
+  background: #1a2d3d;
+}
+.an-band-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.25s ease;
+}
+.an-band-fill.tone-emerald {
+  background: #1b8a5a;
+}
+.an-band-fill.tone-blue {
+  background: #0a4d7b;
+}
+.an-band-fill.tone-sky {
+  background: #3c8dbc;
+}
+.an-band-fill.tone-slate {
+  background: #6c97b5;
+}
+.an-band-fill.tone-amber {
+  background: #d9822b;
+}
+.an-band-val {
+  text-align: end;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  color: #193b54;
+  white-space: nowrap;
+}
+.an-band-val small {
+  margin-inline-start: 4px;
+  font-size: 11px;
+  color: #7890a3;
+}
+[data-theme="dark"] .an-band-val {
+  color: #e4eff7;
+}
+
+/* SVG Pass Donut + Clear Legend */
+.an-pass-summary {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 6px 0 12px;
+  border-bottom: 1px solid #e8f0f6;
+}
+[data-theme="dark"] .an-pass-summary {
+  border-bottom-color: #243849;
+}
+.an-donut-wrap {
+  position: relative;
+  width: 96px;
+  height: 96px;
+  flex-shrink: 0;
+}
+.an-donut-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.an-donut-track {
+  fill: none;
+  stroke: #e8f0f6;
+  stroke-width: 10;
+}
+[data-theme="dark"] .an-donut-track {
+  stroke: #1f3344;
+}
+.an-donut-ring {
+  fill: none;
+  stroke-width: 10;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.3s ease;
+}
+.an-donut-ring.good {
+  stroke: #1b8a5a;
+}
+.an-donut-ring.warn {
+  stroke: #d9822b;
+}
+.an-donut-center {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+.an-donut-center strong {
+  font-size: 20px;
+  font-weight: 700;
+  color: #103e60;
+  font-variant-numeric: tabular-nums;
+}
+[data-theme="dark"] .an-donut-center strong {
+  color: #e8f2fa;
+}
+.an-pass-legend {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.an-pass-stat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: #46657c;
+}
+.an-pass-stat b {
+  margin-inline-start: auto;
+  color: #143b57;
+  font-variant-numeric: tabular-nums;
+}
+[data-theme="dark"] .an-pass-stat {
+  color: #b7cede;
+}
+[data-theme="dark"] .an-pass-stat b {
+  color: #e8f2fa;
+}
+.an-dot-round {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.an-dot-round.good {
+  background: #1b8a5a;
+}
+.an-dot-round.warn {
+  background: #d9822b;
+}
+.an-dot-round.blue {
+  background: #0a4d7b;
+}
+.an-diff-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.an-timing-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding-top: 10px;
+  border-top: 1px solid #e8f0f6;
+  font-size: 12px;
+  color: #5a768c;
+}
+.an-timing-footer span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.an-timing-footer b {
+  color: #163d58;
+}
+[data-theme="dark"] .an-timing-footer {
+  border-top-color: #243849;
+  color: #9bb4c7;
+}
+[data-theme="dark"] .an-timing-footer b {
+  color: #e4eff7;
+}
+@media (max-width: 560px) {
+  .an-band-row {
+    grid-template-columns: 104px minmax(0, 1fr) 64px;
+    gap: 8px;
+  }
+  .an-pass-summary {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}

@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
 import {
-  AlertTriangle,
   Award,
   BarChart3,
   CheckCircle2,
@@ -14,7 +13,6 @@ import {
   HelpCircle,
   Image as ImageIcon,
   Layers,
-  ShieldAlert,
   TrendingDown,
   TrendingUp,
   Users,
@@ -132,6 +130,25 @@ export interface ExamAnalyticsData {
   } | null;
 }
 
+export function buildGradeBands(distribution: number[], total: number) {
+  const sum = (from: number, to: number) => {
+    let s = 0;
+    for (let i = from; i <= to; i++) s += distribution[i] ?? 0;
+    return s;
+  };
+  const bands = [
+    { key: "excellent", label: "Excellent", range: "90–100%", count: sum(9, 9), tone: "emerald" as const },
+    { key: "very_good", label: "Very Good", range: "80–89%", count: sum(8, 8), tone: "blue" as const },
+    { key: "good", label: "Good", range: "70–79%", count: sum(7, 7), tone: "sky" as const },
+    { key: "pass", label: "Pass", range: "60–69%", count: sum(6, 6), tone: "slate" as const },
+    { key: "below", label: "Below Pass", range: "0–59%", count: sum(0, 5), tone: "amber" as const },
+  ];
+  return bands.map((b) => ({
+    ...b,
+    pct: total > 0 ? Math.round((b.count / total) * 100) : 0,
+  }));
+}
+
 function downloadAnalyticsCsv(
   examTitle: string,
   questions: AnalyticsQuestion[],
@@ -155,8 +172,7 @@ function downloadAnalyticsCsv(
     t("Correct %"),
     t("Wrong %"),
     t("Status"),
-    t("Most chosen wrong answer"),
-    t("Student flags"),
+    t("Top wrong choice"),
   ];
   const rows = questions.map((q) => [
     questionDisplayText(q, t),
@@ -169,11 +185,10 @@ function downloadAnalyticsCsv(
     q.skipped,
     `${q.pctCorrect}%`,
     `${q.pctWrong}%`,
-    q.pctWrong >= threshold || q.distractorBeatKey ? t("Needs review") : t("Good"),
+    q.pctWrong >= threshold || q.distractorBeatKey ? t("Flagged") : t("OK"),
     q.mostCommonWrongOption
       ? `${q.mostCommonWrongOption.label} (${q.mostCommonWrongOption.picks})`
       : "",
-    q.flagged,
   ]);
   const csv = [
     headers.map(esc).join(","),
@@ -190,23 +205,44 @@ function downloadAnalyticsCsv(
   URL.revokeObjectURL(url);
 }
 
-function plainQuality(
+function shortQuality(
   q: AnalyticsQuestion,
   t: (s: string) => string,
 ): { text: string; tone: "good" | "warn" | "bad" | "neutral" } {
-  if (q.distractorBeatKey) {
-    return { text: t("Wrong choice beat right answer"), tone: "bad" };
-  }
+  if (q.distractorBeatKey) return { text: t("Check answer key"), tone: "bad" };
   if (q.discriminationIndex !== null && q.discriminationIndex < 0) {
-    return { text: t("Top students missed it too — check wording"), tone: "bad" };
+    return { text: t("Check wording"), tone: "warn" };
   }
   if (q.discriminationIndex !== null && q.discriminationIndex < 0.15) {
-    return { text: t("Similar results across all levels"), tone: "warn" };
+    return { text: t("Fair"), tone: "neutral" };
   }
-  if (q.discriminationIndex === null) {
-    return { text: t("Not enough attempts yet"), tone: "neutral" };
-  }
-  return { text: t("Good — separates strong & weak students"), tone: "good" };
+  if (q.discriminationIndex === null) return { text: "—", tone: "neutral" };
+  return { text: t("Good"), tone: "good" };
+}
+
+function PassDonut({ passRate }: { passRate: number }) {
+  const clamped = Math.max(0, Math.min(100, Math.round(passRate)));
+  const r = 42;
+  const c = 2 * Math.PI * r;
+  const dash = (clamped / 100) * c;
+  return (
+    <div className="an-donut-wrap" aria-hidden="true">
+      <svg viewBox="0 0 104 104" className="an-donut-svg">
+        <circle cx="52" cy="52" r={r} className="an-donut-track" />
+        <circle
+          cx="52"
+          cy="52"
+          r={r}
+          className={`an-donut-ring ${clamped >= 60 ? "good" : "warn"}`}
+          strokeDasharray={`${dash} ${c}`}
+          transform="rotate(-90 52 52)"
+        />
+      </svg>
+      <div className="an-donut-center">
+        <strong>{clamped}%</strong>
+      </div>
+    </div>
+  );
 }
 
 export function ExamAnalytics({
@@ -225,14 +261,12 @@ export function ExamAnalytics({
   const t = useT();
   const language = useUIStore((s) => s.language);
   const [wrongThreshold, setWrongThreshold] = useState(50);
-  const [qFilter, setQFilter] = useState<"all" | "flagged" | "distractor">("all");
+  const [qFilter, setQFilter] = useState<"all" | "flagged">("all");
   const [qSort, setQSort] = useState<"worst" | "best" | "flags">("worst");
   const [openQ, setOpenQ] = useState<string | null>(null);
 
   const isFlaggedByRule = (q: AnalyticsQuestion) =>
-    q.pctWrong >= wrongThreshold ||
-    q.distractorBeatKey ||
-    (q.discriminationIndex !== null && q.discriminationIndex < 0);
+    q.pctWrong >= wrongThreshold || q.distractorBeatKey;
 
   const flaggedQuestions = useMemo(
     () => data.questions.filter(isFlaggedByRule),
@@ -241,10 +275,7 @@ export function ExamAnalytics({
   );
 
   const visibleQuestions = useMemo(() => {
-    let list = data.questions;
-    if (qFilter === "flagged") list = list.filter(isFlaggedByRule);
-    else if (qFilter === "distractor") list = list.filter((q) => q.distractorBeatKey);
-
+    const list = qFilter === "flagged" ? data.questions.filter(isFlaggedByRule) : data.questions;
     const copy = [...list];
     if (qSort === "worst") copy.sort((a, b) => b.pctWrong - a.pctWrong || b.wrong - a.wrong);
     else if (qSort === "best") copy.sort((a, b) => b.pctCorrect - a.pctCorrect);
@@ -262,11 +293,12 @@ export function ExamAnalytics({
     );
   }
 
-  const maxDist = Math.max(1, ...data.distribution);
-  const maxCurve = Math.max(1, ...data.submitCurve.map((x) => x.n));
+  const gradeBands = buildGradeBands(data.distribution, data.submitted);
+  const maxBandCount = Math.max(1, ...gradeBands.map((b) => b.count));
   const avgDelta = data.prevTerm ? Math.round(data.avg - data.prevTerm.avg) : null;
-  const passDelta = data.prevTerm ? Math.round(data.passRate - data.prevTerm.passRate) : null;
   const failedCount = Math.max(0, data.submitted - data.passCount);
+  const passPct = Math.round(data.passRate);
+  const failPct = Math.max(0, 100 - passPct);
   const durationUsedPct =
     data.durationMinutes && data.durationMinutes > 0
       ? Math.min(100, Math.round((data.avgMinutesUsed / data.durationMinutes) * 100))
@@ -274,7 +306,7 @@ export function ExamAnalytics({
 
   return (
     <div className="an-dashboard">
-      {/* Clean Header Bar with PDF + CSV Export */}
+      {/* Header Bar */}
       <div className="an-topbar">
         <div className="an-topbar-left">
           <span className="an-live-pill">
@@ -322,45 +354,33 @@ export function ExamAnalytics({
         </div>
       </div>
 
-      {/* Pending Manual Essay Grading Notice */}
+      {/* Pending Essay Grading Strip */}
       {Boolean(data.pendingManualGrades && data.pendingManualGrades > 0) && (
-        <div className="info-banner" role="status">
-          <FilePenLine size={16} />
-          <span style={{ flex: 1 }}>
-            {t("{0} essay answers are still waiting for manual grading. Scores will update once graded.", {
-              "0": data.pendingManualGrades,
-            })}
+        <div className="an-slim-notice info" role="status">
+          <FilePenLine size={15} />
+          <span>
+            {t("{0} essays awaiting manual grade", { "0": data.pendingManualGrades })}
           </span>
           {onJumpToGrading && (
-            <button type="button" className="secondary" onClick={onJumpToGrading}>
+            <button type="button" className="text-button" onClick={onJumpToGrading}>
               {t("Grade essays")}
             </button>
           )}
         </div>
       )}
 
-      {/* Executive Callout: Flagged Questions */}
-      {flaggedQuestions.length > 0 ? (
-        <div className="an-alert-banner" role="region" aria-label={t("Questions needing review")}>
-          <div className="an-alert-icon">
-            <ShieldAlert size={20} />
-          </div>
-          <div className="an-alert-copy">
-            <strong>
-              {t("{0} of {1} questions need review", {
-                "0": flaggedQuestions.length,
-                "1": data.questions.length,
-              })}
-            </strong>
-            <p>
-              {t("These questions were answered wrong by ≥{0}% of students or had a wrong choice picked more than the right answer.", {
-                "0": wrongThreshold,
-              })}
-            </p>
-          </div>
+      {/* Calm, 1-line Flag Summary Bar (no heavy red wall) */}
+      {flaggedQuestions.length > 0 && (
+        <div className="an-slim-notice warn" role="region" aria-label={t("Flagged questions")}>
+          <Flag size={14} />
+          <span>
+            <b>{t("{0} flagged questions", { "0": flaggedQuestions.length })}</b>
+            {" · "}
+            {t("≥{0}% wrong", { "0": wrongThreshold })}
+          </span>
           <button
             type="button"
-            className="secondary an-alert-cta"
+            className="text-button"
             onClick={() => {
               setQFilter("flagged");
               setQSort("worst");
@@ -369,22 +389,12 @@ export function ExamAnalytics({
                 ?.scrollIntoView({ behavior: "smooth", block: "start" });
             }}
           >
-            <AlertTriangle size={14} />
-            {t("Review flagged ({0})", { "0": flaggedQuestions.length })}
+            {t("Show flagged")}
           </button>
-        </div>
-      ) : (
-        <div className="an-ok-banner" role="status">
-          <CheckCircle2 size={17} />
-          <span>
-            {t("Great balance — no questions crossed the ≥{0}% wrong-answer threshold.", {
-              "0": wrongThreshold,
-            })}
-          </span>
         </div>
       )}
 
-      {/* 4 Clear Executive KPI Cards */}
+      {/* 4 Clean KPI Cards */}
       <div className="an-kpi-grid">
         <div className="an-kpi-card">
           <div className="an-kpi-head">
@@ -420,22 +430,22 @@ export function ExamAnalytics({
 
         <div className="an-kpi-card">
           <div className="an-kpi-head">
-            <span>{t("Pass rate (≥60%)")}</span>
-            <span className={`an-kpi-ico ${data.passRate >= 60 ? "green" : "amber"}`}>
+            <span>{t("Pass rate")}</span>
+            <span className={`an-kpi-ico ${passPct >= 60 ? "green" : "amber"}`}>
               <Award size={15} />
             </span>
           </div>
-          <div className="an-kpi-val">{Math.round(data.passRate)}%</div>
+          <div className="an-kpi-val">{passPct}%</div>
           <div className="an-kpi-sub">
             {data.passCount} {t("passed")} · {failedCount} {t("did not pass")}
           </div>
         </div>
 
-        <div className={`an-kpi-card ${flaggedQuestions.length > 0 ? "an-kpi-alert" : ""}`}>
+        <div className="an-kpi-card">
           <div className="an-kpi-head">
-            <span>{t("Questions needing review")}</span>
-            <span className={`an-kpi-ico ${flaggedQuestions.length > 0 ? "red" : "green"}`}>
-              <AlertTriangle size={15} />
+            <span>{t("Flagged questions")}</span>
+            <span className={`an-kpi-ico ${flaggedQuestions.length > 0 ? "amber" : "green"}`}>
+              <Flag size={15} />
             </span>
           </div>
           <div className="an-kpi-val">
@@ -443,117 +453,121 @@ export function ExamAnalytics({
             <span className="an-kpi-denom"> / {data.questions.length}</span>
           </div>
           <div className="an-kpi-sub">
-            {t("Answered wrong by ≥{0}%", { "0": wrongThreshold })}
+            {t("≥{0}% wrong", { "0": wrongThreshold })}
           </div>
         </div>
       </div>
 
-      {/* 2-Column Clean Visual Summary */}
+      {/* 2 Crystal-Clear Visual Diagrams */}
       <div className="an-charts-grid">
-        {/* Score Distribution */}
+        {/* Diagram 1: 5-Band Grade Breakdown (Horizontal, Fully Labeled) */}
         <div className="an-card">
           <div className="an-card-head">
             <div>
-              <h3>{t("Score distribution")}</h3>
-              <p className="subtle">{t("How many students scored in each 10% range (pass line is 60%)")}</p>
-            </div>
-            <div className="an-legend">
-              <span>
-                <i className="an-dot fail" /> {t("Below pass")}
-              </span>
-              <span>
-                <i className="an-dot pass" /> {t("Passing")}
-              </span>
+              <h3>{t("Grade breakdown")}</h3>
+              <p className="subtle">{t("Number and percentage of students in each grade level")}</p>
             </div>
           </div>
-          <div className="an-hist" role="img" aria-label={t("Score distribution")}>
-            {data.distribution.map((n, i) => {
-              const passing = i >= 6;
-              const pctH = n > 0 ? Math.max(8, Math.round((n / maxDist) * 100)) : 2;
+
+          <div className="an-band-list" role="img" aria-label={t("Grade breakdown")}>
+            {gradeBands.map((b) => {
+              const barWidth = b.count > 0 ? Math.max(6, Math.round((b.count / maxBandCount) * 100)) : 0;
               return (
-                <div
-                  className={`an-hist-col ${i === 6 ? "pass-divider" : ""}`}
-                  key={i}
-                  title={`${i * 10}–${i * 10 + 10}%: ${n}`}
-                >
-                  <b className={n === 0 ? "zero" : ""}>{n}</b>
-                  <div className="an-hist-track">
-                    <span
-                      className={`an-hist-bar ${passing ? "pass" : "fail"} ${n === 0 ? "empty" : ""}`}
-                      style={{ height: `${pctH}%` }}
-                    />
+                <div className="an-band-row" key={b.key}>
+                  <div className="an-band-label">
+                    <b>{t(b.label)}</b>
+                    <small>{b.range}</small>
                   </div>
-                  <small>{i * 10}%</small>
+                  <div className="an-band-track">
+                    {barWidth > 0 && (
+                      <i className={`an-band-fill tone-${b.tone}`} style={{ width: `${barWidth}%` }} />
+                    )}
+                  </div>
+                  <div className="an-band-val">
+                    <b>{b.count}</b>
+                    <small>({b.pct}%)</small>
+                  </div>
                 </div>
               );
             })}
           </div>
         </div>
 
-        {/* Difficulty & Time Taken */}
+        {/* Diagram 2: Pass Overview Ring + Difficulty Accuracy */}
         <div className="an-card">
           <div className="an-card-head">
             <div>
-              <h3>{t("Performance by difficulty & time")}</h3>
-              <p className="subtle">{t("Average accuracy per difficulty level and how time spent affected grades")}</p>
+              <h3>{t("Pass overview & difficulty")}</h3>
+              <p className="subtle">{t("Pass line is 60% · accuracy grouped by question difficulty")}</p>
+            </div>
+          </div>
+
+          <div className="an-pass-summary">
+            <PassDonut passRate={passPct} />
+            <div className="an-pass-legend">
+              <div className="an-pass-stat">
+                <i className="an-dot-round good" />
+                <span>{t("Passed (≥60%)")}</span>
+                <b>
+                  {data.passCount} ({passPct}%)
+                </b>
+              </div>
+              <div className="an-pass-stat">
+                <i className="an-dot-round warn" />
+                <span>{t("Below pass (<60%)")}</span>
+                <b>
+                  {failedCount} ({failPct}%)
+                </b>
+              </div>
+              <div className="an-pass-stat">
+                <i className="an-dot-round blue" />
+                <span>{t("Avg time used")}</span>
+                <b>
+                  {Math.round(data.avgMinutesUsed)} {t("min")}
+                  {data.durationMinutes ? ` / ${data.durationMinutes}` : ""}
+                </b>
+              </div>
             </div>
           </div>
 
           {data.difficultyBreakdown && data.difficultyBreakdown.length > 0 && (
-            <div className="an-breakdown-list">
-              {data.difficultyBreakdown.map((d) => {
-                const tone =
-                  d.pctCorrect < 45 ? "bad" : d.pctCorrect < 65 ? "warn" : "good";
-                return (
-                  <div className="an-break-row" key={d.difficulty}>
-                    <div className="an-break-meta">
-                      <span className={`badge badge-${d.difficulty}`}>{t(label(d.difficulty))}</span>
-                      <span className="subtle">
-                        {d.questionCount} {t("questions")} · {d.correct}/{d.attempts} {t("correct")}
-                      </span>
-                      <strong className={`an-pct ${tone}`}>{d.pctCorrect}%</strong>
+            <div className="an-diff-section">
+              <div className="an-mini-title">{t("Accuracy by difficulty")}</div>
+              <div className="an-breakdown-list">
+                {data.difficultyBreakdown.map((d) => {
+                  const tone = d.pctCorrect < 45 ? "warn" : d.pctCorrect < 65 ? "neutral" : "good";
+                  return (
+                    <div className="an-break-row" key={d.difficulty}>
+                      <div className="an-break-meta">
+                        <span className={`badge badge-${d.difficulty}`}>{t(label(d.difficulty))}</span>
+                        <span className="subtle">
+                          {d.questionCount} {t("questions")}
+                        </span>
+                        <strong className={`an-pct ${tone}`}>{d.pctCorrect}% {t("correct")}</strong>
+                      </div>
+                      <div className="an-bar-track">
+                        <i className={`an-bar-fill ${tone}`} style={{ width: `${d.pctCorrect}%` }} />
+                      </div>
                     </div>
-                    <div className="an-bar-track">
-                      <i className={`an-bar-fill ${tone}`} style={{ width: `${d.pctCorrect}%` }} />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {data.timeBuckets && data.timeBuckets.some((b) => b.n > 0) && (
-            <div className="an-pacing-block">
-              <div className="an-mini-title">
-                <Clock size={13} /> {t("Average score by time spent")}
-              </div>
-              <div className="an-pacing-grid">
-                {data.timeBuckets.map((b) => (
-                  <div className="an-pacing-cell" key={b.key}>
-                    <small>{t(b.label)}</small>
-                    <strong>{b.n > 0 ? `${Math.round(b.avg)}%` : "—"}</strong>
-                    <span>
-                      {b.n} {t("students")}
-                    </span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
         </div>
       </div>
 
-      {/* Main Section: Question Review & High-Wrong Flagging */}
+      {/* Question Review & Clean Short Flags */}
       <div className="an-card" id="an-question-analysis">
         <div className="an-card-head wrap">
           <div>
             <h3>{t("Questions review")}</h3>
             <p className="subtle">
-              {t("Hardest questions appear first. Click any question to see what students answered.")}
+              {t("Click a question to inspect student answers.")}
             </p>
           </div>
           <div className="an-threshold-picker">
-            <span className="subtle">{t("Flag if wrong ≥")}</span>
+            <span className="subtle">{t("Flag ≥")}</span>
             {[40, 50, 60, 70].map((thr) => (
               <button
                 key={thr}
@@ -576,26 +590,16 @@ export function ExamAnalytics({
               className={qFilter === "all" ? "on" : ""}
               onClick={() => setQFilter("all")}
             >
-              {t("All questions")} ({data.questions.length})
+              {t("All")} ({data.questions.length})
             </button>
             <button
               type="button"
               role="tab"
               aria-selected={qFilter === "flagged"}
-              className={`flag-tab ${qFilter === "flagged" ? "on" : ""}`}
+              className={`flag-tab-soft ${qFilter === "flagged" ? "on" : ""}`}
               onClick={() => setQFilter("flagged")}
             >
-              <AlertTriangle size={12} /> {t("Flagged")} ({flaggedQuestions.length})
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={qFilter === "distractor"}
-              className={qFilter === "distractor" ? "on" : ""}
-              onClick={() => setQFilter("distractor")}
-            >
-              {t("Wrong choice won")} (
-              {data.questions.filter((q) => q.distractorBeatKey).length})
+              <Flag size={12} /> {t("Flagged")} ({flaggedQuestions.length})
             </button>
           </div>
 
@@ -608,9 +612,9 @@ export function ExamAnalytics({
               value={qSort}
               onChange={(e) => setQSort(e.target.value as typeof qSort)}
             >
-              <option value="worst">{t("Hardest first (most wrong)")}</option>
-              <option value="best">{t("Easiest first (most correct)")}</option>
-              <option value="flags">{t("Most flagged by students")}</option>
+              <option value="worst">{t("Most wrong first")}</option>
+              <option value="best">{t("Most correct first")}</option>
+              <option value="flags">{t("Most student flags")}</option>
             </select>
           </div>
         </div>
@@ -625,20 +629,13 @@ export function ExamAnalytics({
             {visibleQuestions.map((q) => {
               const open = openQ === q.questionId;
               const flagged = isFlaggedByRule(q);
-              const severity =
-                q.pctWrong >= Math.max(wrongThreshold + 10, 60) || q.distractorBeatKey
-                  ? "critical"
-                  : flagged
-                    ? "warning"
-                    : "ok";
-              const barTone =
-                q.pctCorrect < 40 ? "bad" : q.pctCorrect < 60 ? "warn" : "good";
-              const quality = plainQuality(q, t);
+              const barTone = q.pctCorrect < 45 ? "warn" : q.pctCorrect < 65 ? "neutral" : "good";
+              const quality = shortQuality(q, t);
               const titleText = questionDisplayText(q, t);
 
               return (
                 <div
-                  className={`an-q-card ${severity !== "ok" ? `flagged-${severity}` : ""}`}
+                  className={`an-q-card ${flagged ? "is-flagged-soft" : ""}`}
                   key={q.questionId}
                 >
                   <button
@@ -650,11 +647,9 @@ export function ExamAnalytics({
                     <div className="an-q-main">
                       <div className="an-q-badges">
                         {flagged && (
-                          <span className={`an-flag-badge ${severity}`}>
-                            <AlertTriangle size={11} />
-                            {q.pctWrong >= wrongThreshold
-                              ? t("Needs review · {0}% wrong", { "0": q.pctWrong })
-                              : t("Needs review")}
+                          <span className="an-flag-chip">
+                            <Flag size={10} />
+                            {q.pctWrong}% {t("wrong")}
                           </span>
                         )}
                         <span className={`badge badge-${q.difficulty}`}>
@@ -682,17 +677,13 @@ export function ExamAnalytics({
 
                       <div className="an-q-submeta">
                         <span>
-                          <b>{q.correct}</b> {t("correct")}
-                        </span>
-                        <span>·</span>
-                        <span className={q.wrong > 0 ? "an-txt-bad" : ""}>
-                          <b>{q.wrong}</b> {t("wrong")}
+                          {q.correct} / {q.attempts} {t("correct")}
                         </span>
                         {q.skipped > 0 && (
                           <>
                             <span>·</span>
                             <span>
-                              <b>{q.skipped}</b> {t("skipped")}
+                              {q.skipped} {t("skipped")}
                             </span>
                           </>
                         )}
@@ -700,17 +691,7 @@ export function ExamAnalytics({
                           <>
                             <span>·</span>
                             <span>
-                              <Flag size={11} style={{ verticalAlign: "-1px" }} /> {q.flagged}{" "}
-                              {t("flagged")}
-                            </span>
-                          </>
-                        )}
-                        {q.mostCommonWrongOption && flagged && (
-                          <>
-                            <span>·</span>
-                            <span className="an-txt-warn">
-                              {t("Most chosen wrong answer")}: “{q.mostCommonWrongOption.label}” (
-                              {q.mostCommonWrongOption.pct}%)
+                              {q.flagged} {t("flagged")}
                             </span>
                           </>
                         )}
@@ -721,7 +702,6 @@ export function ExamAnalytics({
                       <div className="an-q-meter">
                         <div className="an-q-meter-nums">
                           <strong className={`an-pct ${barTone}`}>{q.pctCorrect}%</strong>
-                          <small>{t("correct")}</small>
                         </div>
                         <div className="an-bar-track sm">
                           <i
@@ -750,33 +730,33 @@ export function ExamAnalytics({
                         <div className="an-opt-list">
                           <div className="an-mini-title">{t("How students answered")}</div>
                           {q.options.map((o) => {
-                            const isTopDistractor =
+                            const isTopWrong =
                               !o.isCorrect &&
                               q.mostCommonWrongOption &&
                               o.label === q.mostCommonWrongOption.label &&
                               o.picks > 0;
                             return (
                               <div
-                                className={`an-opt-row ${o.isCorrect ? "is-key" : ""} ${isTopDistractor ? "is-top-wrong" : ""}`}
+                                className={`an-opt-row ${o.isCorrect ? "is-key" : ""}`}
                                 key={o.label}
                               >
                                 <div className="an-opt-label">
                                   <span dir="auto">{o.label}</span>
                                   {o.isCorrect && (
                                     <span className="an-opt-tag key">
-                                      <CheckCircle2 size={11} /> {t("Correct answer")}
+                                      <CheckCircle2 size={11} /> {t("Correct")}
                                     </span>
                                   )}
-                                  {isTopDistractor && (
-                                    <span className="an-opt-tag wrong">
-                                      {t("Most chosen wrong answer")}
+                                  {isTopWrong && (
+                                    <span className="an-opt-tag soft-warn">
+                                      {t("Top wrong")}
                                     </span>
                                   )}
                                 </div>
                                 <div className="an-opt-bar-wrap">
                                   <div className="an-bar-track">
                                     <i
-                                      className={`an-bar-fill ${o.isCorrect ? "good" : isTopDistractor ? "bad" : "neutral"}`}
+                                      className={`an-bar-fill ${o.isCorrect ? "good" : isTopWrong ? "warn" : "neutral"}`}
                                       style={{ width: `${Math.max(o.picks > 0 ? 4 : 0, o.pct)}%` }}
                                     />
                                   </div>
@@ -792,21 +772,21 @@ export function ExamAnalytics({
 
                       <div className="an-q-metrics-strip clean-3">
                         <div className="an-metric-pill">
-                          <small>{t("Average marks earned")}</small>
+                          <small>{t("Avg marks")}</small>
                           <b>
                             {q.avgAward} / {q.grade}
                           </b>
                         </div>
                         <div className="an-metric-pill">
-                          <small>{t("Question quality")}</small>
+                          <small>{t("Quality")}</small>
                           <b className={`an-pct ${quality.tone}`}>{quality.text}</b>
                         </div>
                         <div className="an-metric-pill">
-                          <small>{t("If given full credit")}</small>
+                          <small>{t("Full-credit lift")}</small>
                           <b>
                             {q.voidPassDelta > 0
-                              ? t("+{0} students would pass", { "0": q.voidPassDelta })
-                              : t("No change to pass count")}
+                              ? `+${q.voidPassDelta} ${t("passed")}`
+                              : "—"}
                           </b>
                         </div>
                       </div>
@@ -818,7 +798,7 @@ export function ExamAnalytics({
                             className="secondary"
                             onClick={onJumpToAdjustments}
                           >
-                            <Layers size={14} /> {t("Adjust grade for this question")}
+                            <Layers size={14} /> {t("Adjust grade")}
                           </button>
                         </div>
                       )}
@@ -831,7 +811,7 @@ export function ExamAnalytics({
         )}
       </div>
 
-      {/* Bottom Clean Insights: Sections + Time & Submissions */}
+      {/* Bottom: Sections + Clear Time-Spent Breakdown */}
       <div className="an-charts-grid">
         {data.sections.length > 0 && (
           <div className="an-card">
@@ -843,7 +823,7 @@ export function ExamAnalytics({
             </div>
             <div className="an-breakdown-list">
               {data.sections.map((s) => {
-                const tone = s.avg < 50 ? "bad" : s.avg < 65 ? "warn" : "good";
+                const tone = s.avg < 50 ? "warn" : s.avg < 65 ? "neutral" : "good";
                 return (
                   <div className="an-break-row" key={s.sectionId}>
                     <div className="an-break-meta">
@@ -866,49 +846,54 @@ export function ExamAnalytics({
         <div className="an-card">
           <div className="an-card-head">
             <div>
-              <h3>{t("Time & submissions")}</h3>
-              <p className="subtle">{t("How long students took and when they submitted")}</p>
+              <h3>{t("Time spent & scores")}</h3>
+              <p className="subtle">{t("How long students spent compared to their average score")}</p>
             </div>
           </div>
 
-          <div className="an-integrity-grid">
-            <div className="an-metric-pill">
-              <small>{t("Avg time used")}</small>
+          {data.timeBuckets && data.timeBuckets.some((b) => b.n > 0) && (
+            <div className="an-band-list">
+              {data.timeBuckets.map((b) => {
+                const avgScore = Math.round(b.avg);
+                return (
+                  <div className="an-band-row" key={b.key}>
+                    <div className="an-band-label">
+                      <b>{t(b.label)}</b>
+                      <small>
+                        {b.n} {t("students")}
+                      </small>
+                    </div>
+                    <div className="an-band-track">
+                      {b.n > 0 && (
+                        <i
+                          className={`an-band-fill tone-${avgScore >= 60 ? "blue" : "amber"}`}
+                          style={{ width: `${Math.max(6, avgScore)}%` }}
+                        />
+                      )}
+                    </div>
+                    <div className="an-band-val">
+                      <b>{b.n > 0 ? `${avgScore}%` : "—"}</b>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="an-timing-footer">
+            <span>
+              <Clock size={12} /> {t("Avg time used")}:{" "}
               <b>
                 {Math.round(data.avgMinutesUsed)} {t("min")}
                 {durationUsedPct !== null ? ` (${durationUsedPct}%)` : ""}
               </b>
-            </div>
-            <div className="an-metric-pill">
-              <small>{t("Finished very fast")}</small>
-              <b>{data.rushSubmits}</b>
-            </div>
-            <div className="an-metric-pill">
-              <small>{t("Auto-submitted")}</small>
-              <b>{data.autoSubmitted}</b>
-            </div>
-            <div className="an-metric-pill">
-              <small>{t("Re-entered exam")}</small>
-              <b>
-                {data.reentry.multi.n}{" "}
-                {data.reentry.multi.n > 0 ? `(${Math.round(data.reentry.multi.avg)}%)` : ""}
-              </b>
-            </div>
-          </div>
-
-          <div className="an-curve" role="img" aria-label={t("Submissions over time")}>
-            {data.submitCurve.map((b, i) => {
-              const h = b.n > 0 ? Math.max(10, Math.round((b.n / maxCurve) * 100)) : 3;
-              return (
-                <div
-                  className="an-curve-col"
-                  key={i}
-                  title={`${new Date(b.t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}: ${b.n}`}
-                >
-                  <span className={b.n === 0 ? "empty" : ""} style={{ height: `${h}%` }} />
-                </div>
-              );
-            })}
+            </span>
+            <span>
+              {t("Auto-submitted")}: <b>{data.autoSubmitted}</b>
+            </span>
+            <span>
+              {t("Re-entered")}: <b>{data.reentry.multi.n}</b>
+            </span>
           </div>
 
           {data.prevTerm && (
@@ -921,11 +906,6 @@ export function ExamAnalytics({
                   "3": data.prevTerm.submitted,
                 })}
               </span>
-              {passDelta !== null && (
-                <span className={`an-delta-pill ${passDelta >= 0 ? "up" : "down"}`}>
-                  {t("Pass rate")}: {passDelta >= 0 ? `+${passDelta}%` : `${passDelta}%`}
-                </span>
-              )}
             </div>
           )}
         </div>

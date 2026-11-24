@@ -1,4 +1,4 @@
-import type { ExamAnalyticsData, AnalyticsQuestion } from "../components/ExamAnalytics";
+import { buildGradeBands, type ExamAnalyticsData, type AnalyticsQuestion } from "../components/ExamAnalytics";
 import { questionDisplayText } from "../components/QuestionMedia";
 import { questionTypeLabel } from "../components/QuestionTypesUI";
 import { label } from "./platform";
@@ -34,34 +34,32 @@ export function exportAnalyticsPdf({
   }).format(new Date());
 
   const isFlagged = (q: AnalyticsQuestion) =>
-    q.pctWrong >= wrongThreshold ||
-    q.distractorBeatKey ||
-    (q.discriminationIndex !== null && q.discriminationIndex < 0);
+    q.pctWrong >= wrongThreshold || q.distractorBeatKey;
 
   const flagged = data.questions.filter(isFlagged);
-  const maxDist = Math.max(1, ...data.distribution);
+  const bands = buildGradeBands(data.distribution, data.submitted);
+  const maxBand = Math.max(1, ...bands.map((b) => b.count));
 
   const qualityText = (q: AnalyticsQuestion) => {
-    if (q.distractorBeatKey) return t("Wrong choice beat right answer");
-    if (q.discriminationIndex !== null && q.discriminationIndex < 0) return t("Confusing wording");
-    if (q.pctWrong >= wrongThreshold) return t("Most students missed it");
-    if (q.discriminationIndex !== null && q.discriminationIndex < 0.15) return t("Check wording");
-    return t("Healthy");
+    if (q.distractorBeatKey) return t("Check answer key");
+    if (q.discriminationIndex !== null && q.discriminationIndex < 0) return t("Check wording");
+    if (q.pctWrong >= wrongThreshold) return `${q.pctWrong}% ${t("wrong")}`;
+    return t("OK");
   };
 
-  const distBarsHtml = data.distribution
-    .map((n, i) => {
-      const h = n > 0 ? Math.max(10, Math.round((n / maxDist) * 100)) : 3;
-      const cls = i >= 6 ? "pass" : "fail";
+  const gradeBandsHtml = bands
+    .map((b) => {
+      const w = b.count > 0 ? Math.max(6, Math.round((b.count / maxBand) * 100)) : 0;
       return `
-        <div class="bar-col ${i === 6 ? "pass-line" : ""}">
-          <div class="bar-num">${n}</div>
-          <div class="bar-track">
-            <div class="bar-fill ${cls} ${n === 0 ? "empty" : ""}" style="height:${h}%"></div>
-          </div>
-          <div class="bar-lbl">${i * 10}%</div>
-        </div>
-      `;
+        <tr>
+          <td><b>${escHtml(t(b.label))}</b> <span class="cell-sub">${b.range}</span></td>
+          <td>
+            <div class="inline-bar">
+              <div class="inline-track"><div class="inline-fill ${b.key === "below" ? "warn" : "good"}" style="width:${w}%"></div></div>
+              <b>${b.count}</b> <span class="cell-sub">(${b.pct}%)</span>
+            </div>
+          </td>
+        </tr>`;
     })
     .join("");
 
@@ -351,8 +349,16 @@ export function exportAnalyticsPdf({
 
   <div class="two-col">
     <div class="box">
-      <h2>${escHtml(t("Score distribution"))}</h2>
-      <div class="hist">${distBarsHtml}</div>
+      <h2>${escHtml(t("Grade breakdown"))}</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>${escHtml(t("Grade level"))}</th>
+            <th>${escHtml(t("Students"))}</th>
+          </tr>
+        </thead>
+        <tbody>${gradeBandsHtml}</tbody>
+      </table>
     </div>
     <div class="box">
       <h2>${escHtml(t("Performance by difficulty"))}</h2>
