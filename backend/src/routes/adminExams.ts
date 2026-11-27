@@ -358,8 +358,8 @@ adminExams.post("/:id/compensate", async (req, res) => {
     if (body.adjustment_value == null || body.adjustment_value < 0 || body.adjustment_value > fullGrade) {
       return res.status(422).json({ error: "set value must be within 0 and the question grade" });
     }
-  } else if (body.adjustment_type === "delta" && body.adjustment_value == null) {
-    return res.status(422).json({ error: "delta adjustment requires adjustment_value" });
+  } else if (body.adjustment_type === "delta" && (body.adjustment_value == null || body.adjustment_value === 0)) {
+    return res.status(422).json({ error: "delta adjustment requires a non-zero adjustment_value" });
   }
   // One row per (exam, question) — enforced by unique index. Duplicates grade
   // inconsistently by submit timing (live SQL is incremental, submit-time
@@ -461,7 +461,13 @@ adminExams.post("/:id/compensate", async (req, res) => {
 });
 
 adminExams.get("/:id/compensations", async (req, res) => {
-  res.json(await prisma.examCompensation.findMany({ where: { examId: String(req.params.id) }, orderBy: { createdAt: "desc" } }));
+  res.json(
+    await prisma.examCompensation.findMany({
+      where: { examId: String(req.params.id) },
+      include: { question: { select: { id: true, text: true, grade: true } } },
+      orderBy: { createdAt: "desc" },
+    }),
+  );
 });
 
 // GET /api/v1/admin/exams/:id/live — who is sitting THIS exam right now.

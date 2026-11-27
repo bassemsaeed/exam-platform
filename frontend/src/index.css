@@ -4541,4 +4541,274 @@ input[type="datetime-local"],
   color: #f6b96e;
 }
 
+/* ==========================================================================
+   Dark Mode Completeness & Global Layout Alignment Polish
+   ========================================================================== */
+html[data-theme="dark"],
+html[data-theme="dark"] body {
+  background: #0d1822;
+  color: #d9e5ed;
+}
+[data-theme="dark"] * {
+  scrollbar-color: #2d465a transparent;
+}
+[data-theme="dark"] *::-webkit-scrollbar-thumb {
+  background: #2d465a;
+}
+
+/* Fix remaining white/light controls, popovers, lists, and native form fields */
+[data-theme="dark"]
+  :is(
+    input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]),
+    select,
+    textarea
+  ) {
+  background-color: #10202d;
+  border-color: #344b5c;
+  color: #d7e5ef;
+}
+[data-theme="dark"]
+  :is(
+    .search-box input,
+    .input-wrap input,
+    .combo-search input,
+    .mpick-search input
+  ) {
+  background-color: transparent;
+  border-color: transparent;
+  color: #d7e5ef;
+}
+[data-theme="dark"] select option,
+[data-theme="dark"] select optgroup {
+  background-color: #10202d;
+  color: #d7e5ef;
+}
+[data-theme="dark"] input[type="file"] {
+  background-color: #10202d;
+  border-color: #344b5c;
+  color: #bdd1e0;
+}
+[data-theme="dark"] input[type="file"]::file-selector-button {
+  background: #1b3447;
+  color: #d9ecf9;
+  border: 1px solid #35566e;
+  border-radius: 5px;
+  padding: 5px 10px;
+  margin-inline-end: 10px;
+  cursor: pointer;
+}
+[data-theme="dark"] input[type="file"]::file-selector-button:hover {
+  background: #24455d;
+}
+[data-theme="dark"] input:-webkit-autofill,
+[data-theme="dark"] input:-webkit-autofill:hover,
+[data-theme="dark"] input:-webkit-autofill:focus,
+[data-theme="dark"] textarea:-webkit-autofill,
+[data-theme="dark"] select:-webkit-autofill {
+  -webkit-box-shadow: 0 0 0 1000px #10202d inset !important;
+  -webkit-text-fill-color: #d7e5ef !important;
+  caret-color: #d7e5ef;
+}
+[data-theme="dark"] .question-pick-list.modern button {
+  background: #10202d;
+  border-color: #2a3e4e;
+  color: #c3d7e5;
+}
+[data-theme="dark"] .question-pick-list.modern button:hover {
+  background: #172e40;
+  border-color: #3b5c75;
+}
+[data-theme="dark"] .sheet-head h2 {
+  color: #e6f0f8;
+}
+[data-theme="dark"] .college-pill:hover {
+  background: #46311a;
+}
+[data-theme="dark"] .preference-control select,
+[data-theme="dark"] .login-header-tools select {
+  background: #10202d;
+  border-color: #344b5c;
+  color: #d7e5ef;
+}
+[data-theme="dark"] .tabs button {
+  color: #93acc0;
+}
+[data-theme="dark"] .tabs button:hover {
+  color: #d9e8f5;
+}
+[data-theme="dark"] .tabs button.active {
+  color: #83c4ed;
+  border-bottom-color: #4ea3d8;
+}
+[data-theme="dark"] .dt-pop {
+  background: #14232f;
+  border-color: #2a3e4e;
+  color: #d9e5ed;
+}
+[data-theme="dark"] .pair-edit-row input,
+[data-theme="dark"] .preview-input-box input,
+[data-theme="dark"] .preview-input-box textarea {
+  background: #10202d;
+  border-color: #344b5c;
+  color: #d7e5ef;
+}
+[data-theme="dark"] :is(.brand img, .sidebar-brand img) {
+  background: rgba(255, 255, 255, 0.94);
+  border-radius: 9px;
+  padding: 6px 10px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+/* Global Spacing & Element Alignment Polish */
+.page-heading {
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 16px 24px;
+  margin-bottom: 24px;
+}
+.page-heading > div:first-child {
+  min-width: 0;
+  flex: 1 1 280px;
+}
+.action-row {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.workspace .primary,
+.workspace .secondary,
+.workspace .danger {
+  min-height: 38px;
+  height: auto;
+  padding: 8px 14px;
+  line-height: 1.25;
+}
+.workspace .primary svg,
+.workspace .secondary svg,
+.workspace .danger svg {
+  flex-shrink: 0;
+}
+.toolbar {
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 20px;
+}
+.toolbar > .search-box,
+.toolbar > select,
+.toolbar .combo-button {
+  min-height: 40px;
+}
+.panel-heading {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px 16px;
+  margin-bottom: 18px;
+}
+.panel-heading > div:first-child {
+  min-width: 0;
+  flex: 1 1 220px;
+}
+.stat-grid {
+  gap: 16px;
+  margin-bottom: 22px;
+}
+.tabs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 20px;
+}
+table th,
+table td {
+  vertical-align: middle;
+}
+.workspace th {
+  padding: 10px 14px;
+}
+.workspace td {
+  padding: 13px 14px;
+}
+.workspace th:first-child,
+.workspace td:first-child {
+  padding-inline-start: 0;
+}
+.workspace th:last-child,
+.workspace td:last-child {
+  padding-inline-end: 0;
+}
+.workspace .compact td {
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+
+/* Roster & Results Filter Bar: perfectly aligned controls & clean wrapping */
+.roster-filter-bar.panel,
+.roster-filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 14px;
+  margin-bottom: 16px;
+}
+.roster-filter-bar > * {
+  margin: 0;
+}
+.roster-filter-bar .search-box {
+  flex: 1 1 240px;
+  min-width: 200px;
+  height: 40px;
+  padding: 0 12px;
+}
+.roster-filter-bar .search-box input {
+  height: 100%;
+  padding: 0;
+  font-size: 12px;
+}
+.roster-filter-bar .combo {
+  flex: 0 1 220px;
+  min-width: 175px;
+}
+.roster-filter-bar .combo-button {
+  height: 40px;
+  padding: 0 12px;
+}
+.roster-filter-bar .segmented,
+.toolbar .segmented,
+.essay-grading-bar .segmented {
+  margin: 0;
+  min-height: 40px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px;
+  padding: 4px;
+  max-width: 100%;
+}
+.roster-filter-bar .segmented button,
+.toolbar .segmented button,
+.essay-grading-bar .segmented button {
+  min-height: 30px;
+  padding: 6px 11px;
+  font-size: 11.5px;
+  font-weight: 550;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+@media (max-width: 780px) {
+  .roster-filter-bar .search-box,
+  .roster-filter-bar .combo,
+  .roster-filter-bar .segmented {
+    flex: 1 1 100%;
+    width: 100%;
+    min-width: 0;
+  }
+  .roster-filter-bar .segmented button {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+}
+
+
 

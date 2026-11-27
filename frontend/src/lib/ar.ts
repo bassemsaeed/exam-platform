@@ -1464,4 +1464,434 @@ export const arabic: Record<string, string> = {
   "Time spent & scores": "الوقت المستغرق والدرجات",
   "How long students spent compared to their average score":
     "المدة التي استغرقها الطلاب مقارنة بمتوسط درجاتهم",
+
+  // Question import template & official O6U Results PDF
+  "Download template (.xlsx)": "تنزيل القالب الجاهز (.xlsx)",
+  "Download ready-to-fill Excel template with examples for all 7 question types (MCQ, True/False, Multiple Answers, Short Answer, Essay, Matching, Ordering).":
+    "قم بتنزيل قالب Excel جاهز يحتوي على أمثلة لجميع أنواع الأسئلة السبعة (اختيار من متعدد، صح/خطأ، اختيارات متعددة، إجابة قصيرة، مقالي، توصيل، ترتيب).",
+  "Official Exam Results Sheet": "كشف نتائج الامتحان الرسمي",
+  "Exam date": "تاريخ الامتحان",
+  "Printed": "تاريخ الطباعة",
+  "Student name": "اسم الطالب",
+  "Username / ID": "اسم المستخدم / الرقم الجامعي",
+  "Percentage": "النسبة المئوية",
+  "Result": "النتيجة",
+  "Submitted at": "وقت التسليم",
+  "Course Doctor": "أستاذ المادة",
+  "Department / Control Review": "اعتماد القسم / الكنترول",
+  "Fail": "راسب",
+  "Absent": "غائب",
+  "In progress": "قيد الحل",
+  "No students": "لا يوجد طلاب",
+
+  // Educator analytics v2
+  "Key takeaways": "أهم الملاحظات",
+  "Strong overall outcome: {0}% passed with a {1}% class average.":
+    "نتيجة عامة ممتازة: نجح {0}% من الطلاب بمتوسط {1}%.",
+  "Moderate outcome: {0}% passed (average {1}%, middle score {2}%).":
+    "نتيجة متوسطة: نجح {0}% من الطلاب (المتوسط {1}%، الوسيط {2}%).",
+  "Low pass rate ({0}%) with a {1}% average — consider reviewing difficult items.":
+    "نسبة نجاح منخفضة ({0}%) بمتوسط {1}% — يُنصح بمراجعة الأسئلة الصعبة.",
+  "Check answer key on {0}: a wrong choice was picked more than the right answer.":
+    "راجع مفتاح الإجابة في {0}: تم اختيار إجابة خاطئة أكثر من الإجابة الصحيحة.",
+  "{0} questions crossed ≥{1}% wrong — hardest is {2} ({3}% missed).":
+    "تجاوز {0} سؤالًا نسبة خطأ ≥{1}% — أصعبها {2} (أخطأ فيه {3}%).",
+  "All {0} questions stayed within healthy accuracy ranges.":
+    "جميع الأسئلة ({0}) ضمن نطاق دقة سليم ومتوازن.",
+  "{0} trails by {1} pts ({2}% vs {3}% in {4}).":
+    "شعبة {0} أقل بـ {1} نقطة ({2}% مقابل {3}% في {4}).",
+  "{0} students ({1}%) finished in under a quarter of the allotted time.":
+    "أنهى {0} طالبًا ({1}%) الامتحان في أقل من ربع الوقت المخصص.",
+  "Attendance": "الحضور",
+  "Class average": "متوسط الدفعة",
+  "≥{0}% wrong · Click to review": "≥{0}% خطأ · اضغط للمراجعة",
+  "All items balanced": "جميع الأسئلة متوازنة",
+  "Score distribution & spread": "توزيع الدرجات وانتشارها",
+  "Students per 10% score band with 60% pass line and class average":
+    "عدد الطلاب في كل شريحة 10% مع خط النجاح 60% ومتوسط الدفعة",
+  "60% Pass": "النجاح 60%",
+  "Avg": "المتوسط",
+  "Score spread (middle 50% in shaded box)": "انتشار الدرجات (أوسط 50% في الصندوق المظلل)",
+  "Low": "الأدنى",
+  "Median": "الوسيط",
+  "High": "الأعلى",
+  "Students in each university grade tier": "عدد الطلاب في كل تقدير جامعي",
+  "Passed": "ناجح",
+  "Question calibration map": "خريطة معايرة الأسئلة",
+  "Intended difficulty vs. actual % correct — click any question dot to inspect its answers below":
+    "الصعوبة المتوقعة مقابل نسبة الصواب الفعلية — اضغط على أي سؤال لعرض تفاصيل إجاباته بالأسفل",
+  "Review zone (<{0}% correct)": "منطقة المراجعة (أقل من {0}% صواب)",
+  "Click any row to inspect how students answered each choice.":
+    "اضغط على أي صف لعرض تفاصيل اختيارات الطلاب.",
+  "Check key": "راجع المفتاح",
+  "Time spent vs. score": "الوقت المستغرق مقابل الدرجة",
+  "Spot rushing (left) or time pressure (right) across all submitted attempts":
+    "رصد التسرّع (يسارًا) أو ضغط الوقت (يمينًا) لجميع المحاولات المُسلَّمة",
+  "Avg time": "متوسط الوقت",
+  "Finished fast": "أنهوا سريعًا",
+  "Sections vs. class average": "الشُّعب مقارنةً بمتوسط الدفعة",
+  "Dashed line marks the overall class average ({0}%)":
+    "الخط المتقطع يوضح متوسط الدفعة العام ({0}%)",
+  "pass": "نجاح",
+  "Average": "المتوسط",
+
+  // Grade adjustments & improved essay grading UX
+  "Give full marks": "منح الدرجة الكاملة",
+  "Award maximum marks to everyone (e.g. flawed or cancelled question).":
+    "منح الدرجة الكاملة لجميع الطلاب (مثلًا لسؤال غير واضح أو ملغى).",
+  "Add or subtract marks": "إضافة أو خصم درجات",
+  "Shift each student's earned score up (+1) or down (-0.5), capped at 0–max.":
+    "زيادة (+1) أو خصم (-0.5) من درجة كل طالب مع الالتزام بحدود 0 إلى الدرجة القصوى.",
+  "Set exact score": "تعيين درجة ثابتة",
+  "Replace everyone's score on this question with one fixed number.":
+    "استبدال درجة كل طالب في هذا السؤال برقم ثابت محدد.",
+  "How should this question be adjusted?": "كيف تريد تعديل درجة هذا السؤال؟",
+  "Marks to add or subtract (e.g. +1 or -0.5)":
+    "الدرجات المراد إضافتها أو خصمها (مثل +1 أو -0.5)",
+  "Exact marks to assign (0–{0})": "الدرجة الثابتة المطلوبة (0–{0})",
+  "Every affected student receives {0} / {0} marks on this question.":
+    "سيحصل كل طالب مشمول بالتعديل على {0} / {0} درجة في هذا السؤال.",
+  "Enter a positive number to add bonus marks (e.g. +1) or negative to deduct (e.g. -0.5).":
+    "أدخل رقمًا موجبًا لإضافة درجات (+1) أو سالبًا للخصم (-0.5).",
+  "Example: a student with 0/{0} becomes {1}/{0}; a student with {2}/{0} becomes {3}/{0} (always capped between 0 and {0}).":
+    "مثال: الطالب الحاصل على 0/{0} يصبح {1}/{0}، والحاصل على {2}/{0} يصبح {3}/{0} (محصورة دائمًا بين 0 و {0}).",
+  "Enter an exact mark between 0 and {0}.": "أدخل درجة صحيحة بين 0 و {0}.",
+  "Every affected student's score on this question is replaced with {0} / {1} marks.":
+    "سيتم استبدال درجة كل طالب مشمول في هذا السؤال بـ {0} / {1} درجة.",
+  "Select a question to adjust.": "اختر السؤال المراد تعديل درجته.",
+  "Write a short reason (at least 3 characters).": "اكتب سببًا مختصرًا (3 أحرف على الأقل).",
+  "Enter a non-zero number of marks to add or subtract.":
+    "أدخل قيمة غير صفرية للإضافة أو الخصم.",
+  "Already adjusted": "تم التعديل مسبقًا",
+  "Document why this grade adjustment is being applied…":
+    "وثّق سبب تطبيق تعديل الدرجة…",
+  "Applying…": "جارٍ التطبيق…",
+  "Apply adjustment": "تطبيق التعديل",
+  "Full marks ({0})": "الدرجة الكاملة ({0})",
+  "+{0} marks": "+{0} درجة",
+  "{0} marks": "{0} درجة",
+  "Set to {0} / {1}": "تعيين إلى {0} / {1}",
+  "Set to {0}": "تعيين إلى {0}",
+  "Applied to {0} selected students": "مُطبّق على {0} طلاب محددين",
+  "Applied to all students": "مُطبّق على جميع الطلاب",
+  "Graded {0} of {1}": "تم تصحيح {0} من {1}",
+  "Quick score": "تقييم سريع",
+  "Full": "كاملة",
+
+  // Comprehensive i18n coverage across Roster, Results, Builder, Briefing, Media, Runner & Admin
+  "Academic years": "السنوات الدراسية",
+  "Active accounts": "الحسابات النشطة",
+  "Active only": "النشطون فقط",
+  "Inactive only": "غير النشطين فقط",
+  "Add at least 2 complete matching pairs (both left and right filled).":
+    "أضف زوجي مطابقة مكتملين على الأقل (الطرفان الأيمن والأيسر).",
+  "Add at least 2 items to order.": "أضف عنصرين على الأقل للترتيب.",
+  "Add at least one accepted short answer.": "أضف إجابة قصيرة مقبولة واحدة على الأقل.",
+  "Add written briefing instructions (attach voice/video from the Briefing panel on this page)…":
+    "أضف تعليمات مكتوبة (يمكنك إرفاق صوت أو فيديو من تبويب التعليمات في هذه الصفحة)…",
+  "Administrators set or rotate midterm entry codes during approval.":
+    "يقوم المسؤولون بتعيين أو تغيير رمز دخول امتحان منتصف الفصل عند الاعتماد.",
+  "All Sections": "جميع الشُّعب",
+  "All sections": "جميع الشُّعب",
+  "All academic years": "جميع السنوات الدراسية",
+  "All students placed in sections": "جميع الطلاب موزَّعون على الشُّعب",
+  "An entry code is currently active for this assessment.":
+    "يوجد رمز دخول مُفعّل حاليًا لهذا التقييم.",
+  "Answer options must be unique.": "يجب أن تكون خيارات الإجابة غير مكررة.",
+  "Applied {0} students to exam audience": "تم تعيين {0} طالبًا كجمهور للامتحان",
+  "Assessment policies & tools": "سياسات وأدوات الامتحان",
+  "Attempts": "المحاولات",
+  "Audio": "صوت",
+  "Blueprint, briefing instructions, status, and assessment activity.":
+    "مخطط الأسئلة والتعليمات والحالة ونشاط التقييم.",
+  "Briefing": "تعليمات",
+  "Briefing attached": "تعليمات مرفقة",
+  "Briefing completed": "تم إتمام التعليمات",
+  "Briefing media mode": "وضع وسائط التعليمات",
+  "Cards": "بطاقات",
+  "Check at least one correct answer.": "حدد إجابة صحيحة واحدة على الأقل.",
+  "Choose audio or video file": "اختر ملف صوت أو فيديو",
+  "Clear all filters": "مسح جميع الفلاتر",
+  "College & Department": "الكلية والقسم",
+  "Completed and graded attempts": "المحاولات المكتملة والمُصححة",
+  "Could not remove media.": "تعذر إزالة الوسائط.",
+  "Could not start recording. Check microphone/camera permissions or upload a file.":
+    "تعذر بدء التسجيل. تحقق من أذونات الميكروفون/الكاميرا أو ارفع ملفًا.",
+  "Direct Enrollment": "تسجيل مباشر",
+  "Direct Enrollment (No Section)": "تسجيل مباشر (بدون شعبة)",
+  "Direct list": "قائمة مباشرة",
+  "Directory": "الدليل",
+  "Dismiss validation report": "إخفاء تقرير التحقق",
+  "Displayed to students in the pre-exam lobby before they start their attempt.":
+    "تظهر للطلاب في شاشة الانتظار قبل بدء الامتحان.",
+  "Enables the scientific/base calculator inside the runner.":
+    "يُفعّل الآلة الحاسبة العلمية والبرمجية داخل شاشة الامتحان.",
+  "Enrolled": "المسجلون",
+  "Enrolled (no section)": "مسجل (بدون شعبة)",
+  "Enrolled in subject · No section assigned": "مسجل في المادة · بدون شعبة",
+  "Enrolled in this subject": "مسجل في هذه المادة",
+  "Enter the assessment entry code": "أدخل رمز دخول الامتحان",
+  "Entry code (set)": "رمز الدخول (مُعيَّن)",
+  "Entry code active": "رمز الدخول مُفعّل",
+  "Exams": "الامتحانات",
+  "Failed to validate spreadsheet.": "تعذر التحقق من جدول البيانات.",
+  "Filter attempt status": "تصفية حسب حالة المحاولة",
+  "Filter by academic year": "تصفية حسب السنة الدراسية",
+  "Filter by account status": "تصفية حسب حالة الحساب",
+  "Filter by audio or video": "تصفية حسب الصوت أو الفيديو",
+  "Filter by section": "تصفية حسب الشعبة",
+  "Finish listening to the instructor's voice briefing to enable Start.":
+    "أكمل الاستماع إلى التسجيل الصوتي للمدرس لتفعيل زر البدء.",
+  "Finish watching the instructor's video briefing to enable Start.":
+    "أكمل مشاهدة فيديو التعليمات للمدرس لتفعيل زر البدء.",
+  "Grade & Percentage": "الدرجة والنسبة المئوية",
+  "Imported via spreadsheet": "مستورد عبر ملف جدول",
+  "In progress / Not started": "قيد الحل / لم يبدأ",
+  "In-browser recording is not supported on this device. Upload an audio or video file instead.":
+    "التسجيل عبر المتصفح غير مدعوم على هذا الجهاز. ارفع ملف صوت أو فيديو بدلًا من ذلك.",
+  "Instructions": "التعليمات",
+  "Instructions saved.": "تم حفظ التعليمات.",
+  "Instructor instructions": "تعليمات المدرس",
+  "Leave blank for open entry (or 4+ characters)":
+    "اتركه فارغًا للدخول المفتوح (أو 4 أحرف فأكثر)",
+  "Left-side matching items must be unique.": "يجب ألا تتكرر العناصر في العمود الأول للمطابقة.",
+  "Right-side matching answers must be unique.": "يجب ألا تتكرر الإجابات في العمود المقابل للمطابقة.",
+  "Listen before starting": "استمع قبل البدء",
+  "Watch before starting": "شاهد قبل البدء",
+  "Locks students into SEB with registered lab keys.":
+    "يقفل الامتحان داخل متصفح SEB الآمن بمفاتيح المعامل المسجلة.",
+  "Locks the Start button until the briefing finishes playing (resumes are never blocked).":
+    "يقفل زر البدء حتى ينتهي تشغيل التعليمات (لا يمنع استئناف المحاولة).",
+  "MP3, WAV, OGG, M4A, MP4, WebM, or MOV · up to 25 MB":
+    "MP3 أو WAV أو OGG أو M4A أو MP4 أو WebM أو MOV · بحد أقصى 25 ميجابايت",
+  "Manage questions, answer keys, voice/video prompts, and difficulty levels.":
+    "إدارة الأسئلة ومفاتيح الإجابة والوسائط الصوتية/المرئية ومستويات الصعوبة.",
+  "Media file must be 25 MB or smaller.": "يجب ألا يتجاوز حجم ملف الوسائط 25 ميجابايت.",
+  "Members": "الأعضاء",
+  "Merged into exam audience": "تم الدمج مع جمهور الامتحان",
+  "Microphone/camera permission was denied. Allow access in your browser or upload a file instead.":
+    "تم رفض إذن الميكروفون أو الكاميرا. اسمح بالوصول في المتصفح أو ارفع ملفًا.",
+  "Midterm entry code": "رمز دخول امتحان منتصف الفصل",
+  "Quiz entry code (optional)": "رمز دخول الاختبار (اختياري)",
+  "No TA section assigned": "لم تُسند شعبة لمعيد",
+  "No graded submissions yet": "لا توجد تسليمات مُصححة بعد",
+  "No matching student results": "لا توجد نتائج طلاب مطابقة",
+  "No students match your filter in this section": "لا يوجد طلاب يطابقون التصفية في هذه الشعبة",
+  "No students match your filters": "لا يوجد طلاب يطابقون عوامل التصفية",
+  "Not assigned to a TA section": "غير مُعيَّن في شعبة معيد",
+  "Not started": "لم يبدأ",
+  "Note": "ملاحظة",
+  "Official export": "تصدير رسمي",
+  "Optional briefing shown to students before they click Start. Add written guidance, a voice note, or a short video.":
+    "تعليمات اختيارية تظهر للطلاب قبل الضغط على «بدء». أضف نصًا أو رسالة صوتية أو فيديو قصير.",
+  "Ordering items must be unique.": "يجب ألا تتكرر عناصر الترتيب.",
+  "Otherwise scores stay hidden until you publish them.":
+    "وإلا تبقى الدرجات مخفية حتى تقوم بنشرها.",
+  "Participation, grade distribution, item diagnostics, and automatically flagged high-miss questions.":
+    "المشاركة وتوزيع الدرجات وتحليل الأسئلة والأسئلة المميزة تلقائيًا.",
+  "Please upload an Excel (.xlsx, .xls) or CSV (.csv) spreadsheet.":
+    "يرجى رفع ملف Excel (.xlsx, .xls) أو CSV (.csv).",
+  "Pre-exam instructions": "تعليمات ما قبل الامتحان",
+  "Pre-exam instructions & briefing": "تعليمات وتوجيهات ما قبل الامتحان",
+  "Private scratchpad saved during the attempt (not graded).":
+    "مسودة خاصة تُحفظ أثناء الامتحان (لا تُحسب في الدرجة).",
+  "Question media mode": "وضع وسائط السؤال",
+  "Question {0}": "السؤال {0}",
+  "Questions": "الأسئلة",
+  "Quick CSV": "تصدير CSV سريع",
+  "Quick subject switch": "تبديل سريع للمقرر",
+  "Record video": "تسجيل فيديو",
+  "Record voice": "تسجيل صوت",
+  "Recording": "جارٍ التسجيل",
+  "Records directly from your camera & microphone.": "يسجل مباشرة من الكاميرا والميكروفون.",
+  "Records directly from your microphone.": "يسجل مباشرة من الميكروفون.",
+  "Remove answer": "حذف الإجابة",
+  "Remove item": "حذف العنصر",
+  "Remove pair": "حذف الزوج",
+  "Replace audio / video": "استبدال الصوت / الفيديو",
+  "Require students to finish listening/watching before starting":
+    "إلزام الطلاب بإنهاء الاستماع أو المشاهدة قبل البدء",
+  "Required column: username (or student_id) or email · Optional: full_name":
+    "عمود مطلوب: username (أو student_id) أو email · اختياري: full_name",
+  "Required · {0}% played": "مطلوب · تم تشغيل {0}%",
+  "SEB": "SEB",
+  "SEB required": "يتطلب متصفح SEB",
+  "Save instructions": "حفظ التعليمات",
+  "Search by student name, @username, email, college, or TA…":
+    "ابحث باسم الطالب أو اسم المستخدم أو البريد أو الكلية أو المعيد…",
+  "Search full student directory by name or username…":
+    "ابحث في دليل الطلاب بالاسم أو اسم المستخدم…",
+  "Search student name, @username, email, or note…":
+    "ابحث باسم الطالب أو اسم المستخدم أو البريد أو الملاحظة…",
+  "Section & TA": "الشعبة والمعيد",
+  "Section placement": "توزيع الشُّعب",
+  "Section quiz": "اختبار شعبة",
+  "Sections, teaching assistants, and enrolled students across your subjects.":
+    "الشُّعب والمعيدون والطلاب المسجلون في مقرراتك.",
+  "Select a subject first before importing students.":
+    "اختر المقرر أولًا قبل استيراد الطلاب.",
+  "Select assessment…": "اختر تقييمًا…",
+  "Set entry code": "تعيين رمز الدخول",
+  "Share exam rules, allowed materials, grading notes, or guidance students should read before starting…":
+    "شارك قواعد الامتحان والمواد المسموحة وتوجيهات ما قبل البدء…",
+  "Showing first 50 of {0} invalid rows.": "عرض أول 50 من أصل {0} صفًا غير صالح.",
+  "Skipped": "متروك",
+  "Sort students": "ترتيب الطلاب",
+  "Sort: Academic year": "الترتيب: السنة الدراسية",
+  "Sort: Attempt status": "الترتيب: حالة المحاولة",
+  "Sort: Highest grade": "الترتيب: الأعلى درجة",
+  "Sort: Lowest grade": "الترتيب: الأقل درجة",
+  "Sort: Name (A–Z)": "الترتيب: الاسم (أ–ي)",
+  "Sort: Section": "الترتيب: الشعبة",
+  "Sort: Username": "الترتيب: الرقم الجامعي",
+  "Start video recording": "بدء تسجيل الفيديو",
+  "Start voice recording": "بدء التسجيل الصوتي",
+  "Stop & attach": "إيقاف وإرفاق",
+  "Student Roster": "قائمة الطلاب",
+  "Student flags": "إشارات الطلاب",
+  "Student grades, attempt statuses, and section performance.":
+    "درجات الطلاب وحالات المحاولة وأداء الشُّعب.",
+  "Student lobby preview": "معاينة شاشة انتظار الطالب",
+  "Students across your sections": "الطلاب في شُعبك",
+  "Students can leave a short note visible in Results.":
+    "يمكن للطلاب ترك ملاحظة قصيرة تظهر في صفحة النتائج.",
+  "TA": "المعيد",
+  "TAs": "المعيدون",
+  "Taking": "قيد الاختبار",
+  "Teaching sections": "الشُّعب الدراسية",
+  "Toggle correct answer": "تحديد كإجابة صحيحة",
+  "Total students": "إجمالي الطلاب",
+  "Try clearing your search or status filter.": "جرّب مسح البحث أو تصفية الحالة.",
+  "Try clearing your search query or section filters.": "جرّب مسح البحث أو تصفية الشُّعب.",
+  "Upload": "رفع ملف",
+  "Upload an .xlsx, .xls, or .csv sheet with a 'username' (or 'student_id') or 'email' column. Every row is validated against active student accounts.":
+    "ارفع ملف .xlsx أو .xls أو .csv يحتوي على عمود username (أو student_id) أو email. يتم التحقق من كل صف مقابل حسابات الطلاب النشطة.",
+  "Upload failed.": "فشل رفع الملف.",
+  "Uploading…": "جارٍ الرفع…",
+  "Verified student accounts": "حسابات طلاب موثّقة",
+  "Video briefing": "تعليمات فيديو",
+  "View mode": "طريقة العرض",
+  "Voice briefing": "تعليمات صوتية",
+  "Voice or video briefing (optional)": "تعليمات صوتية أو فيديو (اختياري)",
+  "Write the question text or attach an audio/video recording or image.":
+    "اكتب نص السؤال أو أرفق تسجيلًا صوتيًا أو فيديو أو صورة.",
+  "Written instructions (optional)": "تعليمات مكتوبة (اختياري)",
+  "Written pre-exam instructions (optional)": "تعليمات مكتوبة قبل الامتحان (اختياري)",
+  "Wrong": "خطأ",
+  "You're exploring sample data. Switch roles above to view each workspace. Changes are saved only in this browser.":
+    "أنت تستعرض بيانات تجريبية. بدّل الدور بالأعلى لتجربة كل واجهة؛ التغييرات تُحفظ في هذا المتصفح فقط.",
+  "Your assigned teaching sections and enrolled students.":
+    "الشُّعب المسندة إليك والطلاب المسجلون بها.",
+  "colleges": "كليات",
+  "columns": "أعمدة",
+  "graded submissions": "تسليمات مُصححة",
+  "in direct enrollment (no section)": "في التسجيل المباشر (بدون شعبة)",
+  "more": "المزيد",
+  "not started": "لم يبدأ",
+  "same as #{0}": "مكرر من الصف #{0}",
+  "sections": "شُعب",
+  "sections in this assessment": "شُعب في هذا التقييم",
+  "teaching assistants assigned": "معيدون مسندون",
+
+  // Target-first bulk student import (College / Subject)
+  "Import students": "استيراد طلاب",
+  "Import users (all roles)": "استيراد المستخدمين (جميع الأدوار)",
+  "Import or enroll large batches of students directly into a college or subject from Excel.":
+    "استيراد أو تسجيل دفعات كبيرة من الطلاب مباشرةً في كلية أو مقرر عبر ملف Excel.",
+  "Students → College / Subject": "الطلاب ← كلية / مقرر",
+  "All roles (advanced)": "جميع الأدوار (متقدم)",
+  "Import target": "جهة الاستيراد",
+  "Import to College": "استيراد إلى كلية",
+  "Assign or create a batch of students under a college, optional department, and academic year.":
+    "إنشاء أو ربط دفعة من الطلاب بكلية محددة مع قسم وسنة دراسية اختيارية.",
+  "Import to Subject": "استيراد إلى مقرر",
+  "Enroll students into a subject (and optional section) without repeating subject codes in Excel.":
+    "تسجيل الطلاب في مقرر (وشعبة اختيارية) دون تكرار كود المقرر في ملف Excel.",
+  "1. Choose target college": "1. اختر الكلية المستهدفة",
+  "1. Choose target subject": "1. اختر المقرر المستهدف",
+  "Every student row in your spreadsheet will be linked to this college automatically.":
+    "سيتم ربط كل طالب في الملف بهذه الكلية تلقائيًا.",
+  "Every student row in your spreadsheet will be enrolled in this subject automatically.":
+    "سيتم تسجيل كل طالب في الملف في هذا المقرر تلقائيًا.",
+  "Download College template (.xlsx)": "تنزيل قالب الكلية (.xlsx)",
+  "Download Subject template (.xlsx)": "تنزيل قالب المقرر (.xlsx)",
+  "Select target college…": "اختر الكلية المستهدفة…",
+  "Department (optional)": "القسم (اختياري)",
+  "No specific department": "بدون قسم محدد",
+  "Default academic year (optional)": "الفرقة الدراسية الافتراضية (اختياري)",
+  "Use year column from spreadsheet": "استخدام عمود الفرقة من الملف",
+  "Year {0}": "الفرقة {0}",
+  "Select target subject…": "اختر المقرر المستهدف…",
+  "Section (optional)": "الشعبة (اختياري)",
+  "Use section column or enroll without section": "استخدام عمود الشعبة أو التسجيل بدون شعبة",
+  "Create new accounts for students not yet in the portal":
+    "إنشاء حسابات جديدة للطلاب غير المسجلين بالمنصة بعد",
+  "Turn off to enroll existing students only and flag unknown student IDs.":
+    "أوقف هذا الخيار لتسجيل الطلاب الحاليين فقط ورفض الأرقام الجامعية غير المعروفة.",
+  "Initial password for new accounts (if password column is blank)":
+    "كلمة المرور المبدئية للحسابات الجديدة (عند ترك عمود كلمة المرور فارغًا)",
+  "Auto-generate passwords": "توليد كلمات مرور تلقائيًا",
+  "Download a one-time Excel credentials sheet after import.":
+    "تنزيل ملف Excel لبيانات الدخول لمرة واحدة بعد الاستيراد.",
+  "Use Student ID": "استخدام الرقم الجامعي",
+  "Sets initial password to the student's ID (padded if short).":
+    "يجعل كلمة المرور المبدئية هي الرقم الجامعي للطالب.",
+  "Custom initial password": "كلمة مرور مبدئية مخصصة",
+  "Same temporary password for all newly created students.":
+    "نفس كلمة المرور المؤقتة لجميع الطلاب الجدد.",
+  "Temporary password (8+ characters)…": "كلمة مرور مؤقتة (8 أحرف فأكثر)…",
+  "Existing students always keep their current password untouched.":
+    "يحتفظ الطلاب الحاليون بكلمات مرورهم الحالية دون أي تغيير.",
+  "2. Upload student spreadsheet": "2. رفع ملف Excel للطلاب",
+  "Accepts English or Arabic headers: student_id (الرقم الجامعي), full_name (اسم الطالب), email, year (الفرقة), section (الشعبة), password.":
+    "يقبل عناوين عربية أو إنجليزية: student_id (الرقم الجامعي)، full_name (اسم الطالب)، email، year (الفرقة)، section (الشعبة)، password.",
+  "Columns: student_id, full_name, email (optional), year (optional), password (optional)":
+    "الأعمدة: student_id، full_name، email (اختياري)، year (اختياري)، password (اختياري)",
+  "Columns: student_id, full_name (for new students), email, section, year, password (all optional for existing students)":
+    "الأعمدة: student_id، full_name (للجدد)، email، section، year، password (اختيارية للطلاب الحاليين)",
+  "Choose an Excel or CSV file first.": "اختر ملف Excel أو CSV أولًا.",
+  "Select a target college first.": "اختر الكلية المستهدفة أولًا.",
+  "Select a target subject first.": "اختر المقرر المستهدف أولًا.",
+  "Student import completed": "تم استيراد الطلاب بنجاح",
+  "{0} new accounts created · {1} updated · {2} enrolled":
+    "تم إنشاء {0} حسابًا جديدًا · تحديث {1} · تسجيل {2}",
+  "{0} placed in sections": "تم توزيع {0} في الشُّعب",
+  "{0} already up to date": "{0} محدّثون بالفعل",
+  "{0} newly created accounts have initial passwords ready to export (one-time download).":
+    "يوجد {0} حسابًا جديدًا بكلمات مرور مبدئية جاهزة للتنزيل (تنزيل لمرة واحدة).",
+  "Preparing Excel…": "جارٍ تجهيز ملف Excel…",
+  "Download new credentials (.xlsx)": "تنزيل بيانات دخول الطلاب الجدد (.xlsx)",
+  "Validation summary": "ملخص التحقق",
+  "Importing students…": "جارٍ استيراد الطلاب…",
+  "Commit {0} students": "اعتماد استيراد {0} طالبًا",
+  "New accounts": "حسابات جديدة",
+  "Existing students": "طلاب حاليون",
+  "Already linked": "مرتبطون بالفعل",
+  "Student ID": "الرقم الجامعي",
+  "New account": "حساب جديد",
+  "Existing": "حالي",
+  "Link students to a college": "ربط الطلاب بكلية",
+  "Enroll students in a subject": "تسجيل الطلاب في مقرر",
+  "1. Target college": "1. الكلية المستهدفة",
+  "1. Target subject": "1. المقرر المستهدف",
+  "College template (.xlsx)": "قالب الكلية (.xlsx)",
+  "Subject template (.xlsx)": "قالب المقرر (.xlsx)",
+  "Create missing student accounts": "إنشاء حسابات للطلاب الجدد",
+  "New account passwords": "كلمات مرور الحسابات الجديدة",
+  "Auto-generate": "توليد تلقائي",
+  "One-time Excel download": "تنزيل Excel لمرة واحدة",
+  "Matches student ID": "مطابقة للرقم الجامعي",
+  "Custom password": "كلمة مرور مخصصة",
+  "Same for all new accounts": "موحّدة لجميع الحسابات الجديدة",
+  "2. Upload file": "2. رفع الملف",
+  "Accepts .xlsx, .xls, or .csv": "يدعم .xlsx أو .xls أو .csv",
+  "Bulk import students into a college or subject.": "استيراد الطلاب إلى كلية أو مقرر عبر Excel.",
+  "Validate and import spreadsheet rows.": "التحقق من ملف Excel واستيراد الصفوف.",
+  "Supports all 7 question types. Download the template for examples.":
+    "يدعم جميع أنواع الأسئلة السبعة. نزّل القالب للاطلاع على الأمثلة.",
+  "Required: username, password, full_name, role.":
+    "الأعمدة المطلوبة: username، password، full_name، role.",
+  "Max marks for everyone": "الدرجة الكاملة للجميع",
+  "Add (+1) or deduct (-0.5)": "زيادة (+1) أو خصم (-0.5)",
+  "One fixed mark (0–max)": "درجة ثابتة (0–القصوى)",
 };

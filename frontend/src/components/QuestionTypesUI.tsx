@@ -96,11 +96,15 @@ export function QuestionOptionsSummary({
     const arr = Array.isArray(options) ? options.map(String) : [];
     return (
       <div className="option-chips">
-        {arr.map((o) => (
-          <span key={o} className={o === correctAnswer ? "correct" : ""}>
-            {o}
-          </span>
-        ))}
+        {arr.map((o) => {
+          const isRight = o === correctAnswer;
+          return (
+            <span key={o} className={isRight ? "correct" : ""} dir="auto">
+              {isRight && <Check size={11} style={{ marginInlineEnd: 4, verticalAlign: -1 }} />}
+              {o}
+            </span>
+          );
+        })}
       </div>
     );
   }
@@ -460,13 +464,20 @@ export function EssayGradingPanel({
   if (res.error) return <Feedback error={res.error} />;
   const items = res.data?.items ?? [];
   const pendingCount = items.filter((i) => !i.isGraded).length;
+  const gradedCount = items.length - pendingCount;
+  const gradedPct = items.length ? Math.round((gradedCount / items.length) * 100) : 0;
   const visible = filter === "pending" ? items.filter((i) => !i.isGraded) : items;
 
   async function saveGrade(item: ManualGradingItem) {
     setErr("");
     setSavedId(null);
     const d = drafts[item.id];
-    const num = Number(d?.grade ?? item.gradeAwarded);
+    const rawStr = (d?.grade ?? String(item.gradeAwarded)).trim();
+    if (rawStr === "") {
+      setErr(t("Score must be between 0 and {0}.", { "0": item.maxGrade }));
+      return;
+    }
+    const num = Number(rawStr);
     if (!Number.isFinite(num) || num < 0 || num > item.maxGrade) {
       setErr(t("Score must be between 0 and {0}.", { "0": item.maxGrade }));
       return;
@@ -506,6 +517,17 @@ export function EssayGradingPanel({
             {t("Needs grading")} ({pendingCount})
           </button>
         </div>
+        {items.length > 0 && (
+          <div className="essay-progress-pill">
+            <span>
+              {t("Graded {0} of {1}", { "0": gradedCount, "1": items.length })}
+            </span>
+            <div className="essay-progress-track">
+              <span style={{ width: `${gradedPct}%` }} />
+            </div>
+            <b>{gradedPct}%</b>
+          </div>
+        )}
       </div>
 
       <Feedback error={err || undefined} />
@@ -530,6 +552,12 @@ export function EssayGradingPanel({
               grade: String(item.gradeAwarded),
               feedback: item.feedback,
             };
+            const presets = [
+              { label: "0", value: 0 },
+              { label: "50%", value: Number((item.maxGrade * 0.5).toFixed(2)) },
+              { label: "75%", value: Number((item.maxGrade * 0.75).toFixed(2)) },
+              { label: `${t("Full")} (${item.maxGrade})`, value: item.maxGrade },
+            ];
             return (
               <div className={`essay-grade-card ${item.isGraded ? "graded" : "pending"}`} key={item.id}>
                 <div className="essay-grade-head">
@@ -548,7 +576,7 @@ export function EssayGradingPanel({
 
                 <div className="essay-grade-q">
                   <small>{t("Question")}</small>
-                  <p>{questionDisplayText({ text: item.questionText, mediaType: item.questionMediaType }, t)}</p>
+                  <p dir="auto">{questionDisplayText({ text: item.questionText, mediaType: item.questionMediaType }, t)}</p>
                   {item.questionMediaUrl && item.questionMediaType && (
                     <QuestionMediaPlayer
                       mediaUrl={item.questionMediaUrl}
@@ -561,13 +589,13 @@ export function EssayGradingPanel({
                 {item.modelAnswer?.trim() && (
                   <div className="essay-grade-rubric">
                     <small>{t("Model answer / Rubric")}</small>
-                    <p>{item.modelAnswer}</p>
+                    <p dir="auto">{item.modelAnswer}</p>
                   </div>
                 )}
 
                 <div className="essay-grade-answer">
                   <small>{t("Student's answer")}</small>
-                  <p>{item.answer.trim() || t("(No answer written)")}</p>
+                  <p dir="auto">{item.answer.trim() || t("(No answer written)")}</p>
                 </div>
 
                 <div className="essay-grade-controls">
@@ -575,34 +603,56 @@ export function EssayGradingPanel({
                     <label htmlFor={`eg-score-${item.id}`}>
                       {t("Score")} (0–{item.maxGrade})
                     </label>
-                    <input
-                      id={`eg-score-${item.id}`}
-                      type="number"
-                      min={0}
-                      max={item.maxGrade}
-                      step={0.5}
-                      value={d.grade}
-                      onChange={(e) =>
-                        setDrafts((prev) => ({
-                          ...prev,
-                          [item.id]: { ...d, grade: e.target.value },
-                        }))
-                      }
-                    />
+                    <div className="essay-score-input-row">
+                      <input
+                        id={`eg-score-${item.id}`}
+                        type="number"
+                        min={0}
+                        max={item.maxGrade}
+                        step={0.5}
+                        value={d.grade}
+                        onChange={(e) => {
+                          if (savedId === item.id) setSavedId(null);
+                          setDrafts((prev) => ({
+                            ...prev,
+                            [item.id]: { ...d, grade: e.target.value },
+                          }));
+                        }}
+                      />
+                      <div className="essay-quick-scores" role="group" aria-label={t("Quick score")}>
+                        {presets.map((p) => (
+                          <button
+                            key={p.label}
+                            type="button"
+                            className={`essay-preset-btn ${Number(d.grade) === p.value ? "on" : ""}`}
+                            onClick={() => {
+                              if (savedId === item.id) setSavedId(null);
+                              setDrafts((prev) => ({
+                                ...prev,
+                                [item.id]: { ...d, grade: String(p.value) },
+                              }));
+                            }}
+                          >
+                            {p.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                   </div>
-                  <div className="field" style={{ flex: 1 }}>
+                  <div className="field" style={{ flex: 1, minWidth: 200 }}>
                     <label htmlFor={`eg-fb-${item.id}`}>{t("Feedback (optional)")}</label>
                     <input
                       id={`eg-fb-${item.id}`}
                       type="text"
                       maxLength={1000}
                       value={d.feedback}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        if (savedId === item.id) setSavedId(null);
                         setDrafts((prev) => ({
                           ...prev,
                           [item.id]: { ...d, feedback: e.target.value },
-                        }))
-                      }
+                        }));
+                      }}
                       placeholder={t("Short grading note…")}
                     />
                   </div>

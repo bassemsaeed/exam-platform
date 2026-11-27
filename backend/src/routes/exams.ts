@@ -211,15 +211,19 @@ function toSafeExam<T extends { accessCodeHash: string | null }>(exam: T) {
 // GET /exams/import-students/template — downloads a ready-to-fill .xlsx
 // template for importing exam-eligible students. Optional ?subject_id=&prefill=true
 // prefills the caller's current-term roster for that subject.
-exams.get("/import-students/template", async (req, res) => {
+exams.get("/import-students/template", rateLimit(60, 60_000, "exam:import-students-template"), async (req, res) => {
   const a = req as unknown as AuthedRequest;
   if (a.role === "student") return res.status(403).json({ error: "forbidden" });
   const q = z
     .object({
-      subject_id: z.string().optional(),
+      subject_id: z.string().uuid().optional(),
       prefill: z.enum(["true", "false"]).optional(),
     })
     .parse(req.query);
+  const safeCell = (v: string | null | undefined) => {
+    const s = String(v ?? "");
+    return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+  };
 
   const rows: (string | number)[][] = [["username", "email", "full_name"]];
   let filename = "exam-students-template.xlsx";
@@ -251,7 +255,7 @@ exams.get("/import-students/template", async (req, res) => {
           for (const m of sec.memberships) {
             if (!m.student.isActive || seen.has(m.student.id)) continue;
             seen.add(m.student.id);
-            rows.push([m.student.username ?? "", m.student.email, m.student.name]);
+            rows.push([safeCell(m.student.username), safeCell(m.student.email), safeCell(m.student.name)]);
           }
         }
       } else {
@@ -263,7 +267,7 @@ exams.get("/import-students/template", async (req, res) => {
         });
         for (const e of enrolled) {
           if (!e.student.isActive) continue;
-          rows.push([e.student.username ?? "", e.student.email, e.student.name]);
+          rows.push([safeCell(e.student.username), safeCell(e.student.email), safeCell(e.student.name)]);
         }
       }
     }
@@ -298,7 +302,7 @@ exams.post(
 
     const body = z
       .object({
-        subjectId: z.string().min(1),
+        subjectId: z.string().uuid(),
         enrolledOnly: z
           .enum(["true", "false"])
           .optional()
@@ -1289,6 +1293,7 @@ exams.get("/:id/analytics", async (req, res) => {
     { key: "75_100", label: "75–100% time", min: 0.75, max: Infinity },
   ];
   const timeBucketPcts = timeBucketDefs.map(() => [] as number[]);
+  const rawTimeScorePoints: { minutes: number; score: number }[] = [];
   let usedSum = 0, usedN = 0, rushSubmits = 0;
   for (const s of graded) {
     if (s.startedAt && s.submittedAt) {
@@ -1300,9 +1305,19 @@ exams.get("/:id/analytics", async (req, res) => {
       if (p !== null) {
         const bIdx = timeBucketDefs.findIndex((b) => frac >= b.min && frac < b.max);
         if (bIdx >= 0) timeBucketPcts[bIdx].push(p);
+        rawTimeScorePoints.push({
+          minutes: Number(mins.toFixed(1)),
+          score: Math.round(p),
+        });
       }
     }
   }
+  const timeScorePoints =
+    rawTimeScorePoints.length <= 240
+      ? rawTimeScorePoints
+      : Array.from({ length: 240 }, (_, i) =>
+          rawTimeScorePoints[Math.floor((i * rawTimeScorePoints.length) / 240)],
+        );
   const timeBuckets = timeBucketDefs.map((b, i) => {
     const arr = timeBucketPcts[i];
     return {
@@ -1629,6 +1644,7 @@ exams.get("/:id/analytics", async (req, res) => {
     distribution,
     submitCurve,
     timeBuckets,
+    timeScorePoints,
     difficultyBreakdown,
     questionTypeBreakdown,
     flaggedSummary,
@@ -1649,7 +1665,23 @@ exams.get("/:id/results", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   if (a.role === "student") return res.status(403).json({ error: "forbidden" });
   const q = z.object({ limit: z.coerce.number().int().min(1).max(config.lists.resultsMax).default(500) }).parse(req.query);
-  const exam = await prisma.exam.findUnique({ where: { id: String(req.params.id) }, select: { id: true, subjectId: true, termId: true, targetScope: true, createdBy: true } });
+  const exam = await prisma.exam.findUnique({
+    where: { id: String(req.params.id) },
+    select: {
+      id: true,
+      subjectId: true,
+      termId: true,
+      targetScope: true,
+      createdBy: true,
+      title: true,
+      type: true,
+      purpose: true,
+      startTime: true,
+      subject: { select: { code: true, name: true } },
+      term: { select: { name: true } },
+      creator: { select: { id: true, name: true, role: true } },
+    },
+  });
   if (!exam) return res.status(404).json({ error: "not found" });
   // Creators always see their own. Otherwise: term-scoped assignment AND the
   // view permission — a prior-term assignment alone must not open this term.
@@ -1666,6 +1698,28 @@ exams.get("/:id/results", async (req, res) => {
   if (a.role === "ta" && exam.createdBy === a.userId && !(await hasPermission(a.userId, a.role, "view_own_grades"))) {
     return res.status(403).json({ error: "forbidden", need: "view_own_grades" });
   }
+
+  // Resolve course doctor name(s) for official PDF exports.
+  let doctorName = exam.creator.role === "doctor" ? exam.creator.name : "";
+  if (!doctorName) {
+    const docs = await prisma.doctorAssignment.findMany({
+      where: { subjectId: exam.subjectId, termId: exam.termId },
+      select: { doctor: { select: { name: true } } },
+      orderBy: { doctor: { name: "asc" } },
+    });
+    doctorName = docs.map((d) => d.doctor.name).filter(Boolean).join(" · ") || exam.creator.name;
+  }
+  const meta = {
+    title: exam.title || exam.subject.name,
+    type: exam.type,
+    purpose: exam.purpose,
+    startTime: exam.startTime,
+    subjectCode: exam.subject.code,
+    subjectName: exam.subject.name,
+    termName: exam.term.name,
+    doctorName,
+    creatorName: exam.creator.name,
+  };
 
   if (exam.targetScope === "student_list") {
     const [targets, sittings] = await Promise.all([
@@ -1720,7 +1774,7 @@ exams.get("/:id/results", async (req, res) => {
         ]
       : [];
     await audit(a.userId, "results.view", "exam", exam.id, { groups: groups.length, limit: q.limit });
-    return res.json({ examId: exam.id, groups });
+    return res.json({ examId: exam.id, meta, groups });
   }
 
   const sections = await prisma.section.findMany({
@@ -1802,7 +1856,7 @@ exams.get("/:id/results", async (req, res) => {
     }
   }
   await audit(a.userId, "results.view", "exam", exam.id, { groups: groups.length, limit: q.limit });
-  res.json({ examId: exam.id, groups });
+  res.json({ examId: exam.id, meta, groups });
 });
 
 // GET /exams/:id/manual-grading — lists submitted essay answers awaiting or
@@ -1862,7 +1916,7 @@ exams.get("/:id/manual-grading", async (req, res) => {
       maxGrade: Number(r.question.grade),
       answer: r.selectedAnswer ?? "",
       gradeAwarded: Number(r.gradeAwarded ?? 0),
-      feedback: r.creditAdjustmentReason ?? "",
+      feedback: r.creditAdjustmentReason === "Manually graded" ? "" : (r.creditAdjustmentReason ?? ""),
       isGraded: Number(r.gradeAwarded ?? 0) > 0 || Boolean(r.creditAdjustmentReason),
     })),
   });
@@ -1893,8 +1947,14 @@ exams.patch("/:id/manual-grading/:seqId", async (req, res) => {
   if (!seq || seq.studentExam.examId !== own.exam.id) {
     return res.status(404).json({ error: "submission answer not found" });
   }
+  if (seq.question.questionType !== "essay") {
+    return res.status(422).json({ error: "manual grading only applies to essay questions" });
+  }
+  if (seq.studentExam.status !== "submitted" && seq.studentExam.status !== "auto_submitted") {
+    return res.status(409).json({ error: "cannot grade an attempt that is still in progress" });
+  }
   const maxGrade = Number(seq.question.grade);
-  if (body.gradeAwarded > maxGrade) {
+  if (!Number.isFinite(body.gradeAwarded) || body.gradeAwarded > maxGrade) {
     return res.status(422).json({ error: `gradeAwarded cannot exceed question max grade (${maxGrade})` });
   }
 

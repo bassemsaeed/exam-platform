@@ -11,6 +11,7 @@ import {
   Building2,
   GraduationCap,
   Layers,
+  Upload,
   Users,
   X,
 } from "lucide-react";
@@ -607,28 +608,39 @@ export function AdminResource({ user }: { user: SessionUser }) {
         }
         action={
           !readOnly && (
-            <button
-              className="primary"
-              onClick={() => {
-                action.reset();
-                setEdit("new");
-              }}
-            >
-              <Plus size={16} />{" "}
-              {resource === "assignments"
-                ? assignment === "tas"
-                  ? t("Assign teaching assistant")
-                  : t("Add assignment")
-                : resource === "seb-keys"
-                  ? t("Register browser key")
-                  : t("Add {0}", {
-                      "0": t(
-                        resource === "terms"
-                          ? "term"
-                          : resource.replace(/s$/, ""),
-                      ),
-                    })}
-            </button>
+            <div className="action-row">
+              {(resource === "subjects" || resource === "assignments") && (
+                <Link
+                  to="/imports?type=students&target=subject"
+                  className="button secondary"
+                >
+                  <Upload size={15} />
+                  {t("Import students")}
+                </Link>
+              )}
+              <button
+                className="primary"
+                onClick={() => {
+                  action.reset();
+                  setEdit("new");
+                }}
+              >
+                <Plus size={16} />{" "}
+                {resource === "assignments"
+                  ? assignment === "tas"
+                    ? t("Assign teaching assistant")
+                    : t("Add assignment")
+                  : resource === "seb-keys"
+                    ? t("Register browser key")
+                    : t("Add {0}", {
+                        "0": t(
+                          resource === "terms"
+                            ? "term"
+                            : resource.replace(/s$/, ""),
+                        ),
+                      })}
+              </button>
+            </div>
           )
         }
       />

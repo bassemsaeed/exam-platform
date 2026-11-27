@@ -11,6 +11,12 @@ import { envelope, page, pageQuery } from "../lib/pagination.js";
 import { prisma } from "../lib/prisma.js";
 import { requireAuth, requireRole, type AuthedRequest } from "../middleware/auth.js";
 import { rateLimit } from "../middleware/rateLimit.js";
+import {
+  generateReadablePassword,
+  parseStudentWorkbook,
+  safeExcelCell,
+  type StudentSheetRow,
+} from "../lib/studentImportUtils.js";
 
 // Excel columns: username*, password*, full_name*, role(admin|doctor|ta|student)*,
 // email?, year? (1..7 student cohort), college? (free text),
@@ -190,20 +196,29 @@ adminImports.post("/commit", rateLimit(30, 60_000, "admin-import:commit"), async
   // password-hash payload retained and unretryable.
   const term = await prisma.term.findFirst({ where: { isCurrent: true } });
   if (!term) return res.status(409).json({ error: "no current term" });
+  // Pre-verify ownership & payload kind so a target_students batch cannot be
+  // committed through the legacy all-roles route (prevents type confusion).
+  const pre = await prisma.importBatch.findUnique({
+    where: { id: batchId },
+    select: { status: true, expiresAt: true, type: true, uploadedBy: true, payload: true },
+  });
+  if (!pre || pre.type !== "users") return res.status(404).json({ error: "batch not found" });
+  if (pre.uploadedBy !== me) return res.status(403).json({ error: "only the uploader can commit this batch" });
+  if (!Array.isArray(pre.payload)) {
+    return res.status(400).json({ error: "wrong commit endpoint for this batch type" });
+  }
   // Atomic claim: only one committer can flip dry_run→committed (kills the
   // double-commit race). A second caller sees count 0 and gets told why.
   const claimed = await prisma.importBatch.updateMany({
-    where: { id: batchId, type: "users", status: "dry_run", expiresAt: { gt: new Date() } },
+    where: { id: batchId, type: "users", uploadedBy: me, status: "dry_run", expiresAt: { gt: new Date() } },
     data: { status: "committed" },
   });
   if (claimed.count === 0) {
-    const batch = await prisma.importBatch.findUnique({ where: { id: batchId }, select: { status: true, expiresAt: true, type: true } });
-    if (!batch || batch.type !== "users") return res.status(404).json({ error: "batch not found" });
-    if (batch.expiresAt.getTime() < Date.now()) {
+    if (pre.expiresAt.getTime() < Date.now()) {
       await prisma.importBatch.update({ where: { id: batchId }, data: { status: "expired", payload: {} } });
       return res.status(409).json({ error: "batch expired" });
     }
-    return res.status(409).json({ error: `already ${batch.status}` });
+    return res.status(409).json({ error: `already ${pre.status}` });
   }
   const batch = await prisma.importBatch.findUniqueOrThrow({ where: { id: batchId } });
   type StoredRow = Omit<ParsedRow, "password"> & { passwordHash: string };
@@ -326,3 +341,836 @@ adminImports.get("/", async (req, res) => {
   ]);
   res.json(envelope(total, q, rows));
 });
+
+// ============================================================================
+// Target-First Bulk Student Import (College or Subject + optional Section)
+// ============================================================================
+
+interface TargetStudentBatchPayload {
+  kind: "target_students";
+  target: "college" | "subject";
+  collegeId?: string;
+  collegeName?: string;
+  departmentId?: string | null;
+  subjectId?: string;
+  termId?: string;
+  sectionId?: string | null;
+  rows: {
+    line: number;
+    status: "new" | "existing" | "already_enrolled";
+    existingUserId?: string;
+    username: string;
+    fullName: string;
+    email: string;
+    academicYear?: number;
+    sectionId?: string | null;
+    passwordHash?: string;
+  }[];
+}
+
+// Ephemeral bounded in-memory map for one-time plaintext credential downloads right after commit.
+// Plaintext passwords are NEVER written to Postgres, bound to uploadedBy, and capped at 40 batches.
+const MAX_PENDING_CRED_BATCHES = 40;
+const pendingStudentCredentials = new Map<
+  string,
+  {
+    uploadedBy: string;
+    expiresAt: number;
+    rows: { username: string; fullName: string; email: string; password: string }[];
+  }
+>();
+
+function prunePendingCredentials() {
+  const now = Date.now();
+  for (const [k, v] of pendingStudentCredentials) {
+    if (v.expiresAt <= now) pendingStudentCredentials.delete(k);
+  }
+  while (pendingStudentCredentials.size >= MAX_PENDING_CRED_BATCHES) {
+    const oldest = pendingStudentCredentials.keys().next().value;
+    if (oldest) pendingStudentCredentials.delete(oldest);
+    else break;
+  }
+}
+
+// GET /api/v1/admin/users/import/students/template?target=college|subject&collegeId=...&subjectId=...
+adminImports.get(
+  "/students/template",
+  rateLimit(60, 60_000, "admin-import:students-template"),
+  async (req, res) => {
+  const target = String(req.query.target ?? "college") === "subject" ? "subject" : "college";
+  const collegeId = typeof req.query.collegeId === "string" && req.query.collegeId.trim() ? req.query.collegeId.trim() : undefined;
+  const subjectId = typeof req.query.subjectId === "string" && req.query.subjectId.trim() ? req.query.subjectId.trim() : undefined;
+
+  let targetLabel = target === "college" ? "Target College (selected in portal)" : "Target Subject (selected in portal)";
+  let fileSlug = target;
+  let sampleSection = "Section A";
+
+  if (target === "college" && collegeId) {
+    const col = await prisma.college.findUnique({ where: { id: collegeId }, select: { code: true, name: true } }).catch(() => null);
+    if (col) {
+      targetLabel = `${col.code} — ${col.name}`;
+      fileSlug = `college-${col.code.replace(/[^a-zA-Z0-9_-]+/g, "_")}`;
+    }
+  } else if (target === "subject" && subjectId) {
+    const sub = await prisma.subject.findUnique({ where: { id: subjectId }, select: { code: true, name: true } }).catch(() => null);
+    if (sub) {
+      targetLabel = `${sub.code} — ${sub.name}`;
+      fileSlug = `subject-${sub.code.replace(/[^a-zA-Z0-9_-]+/g, "_")}`;
+      const term = await prisma.term.findFirst({ where: { isCurrent: true }, select: { id: true } });
+      if (term) {
+        const sec = await prisma.section.findFirst({
+          where: { subjectId, termId: term.id },
+          select: { name: true },
+          orderBy: { name: "asc" },
+        });
+        if (sec) sampleSection = sec.name;
+      }
+    }
+  }
+
+  const wb = XLSX.utils.book_new();
+
+  if (target === "college") {
+    const sampleRows = [
+      {
+        student_id: "20260001",
+        full_name: "Ahmed Mohamed Hassan",
+        email: "20260001@o6u.edu.eg",
+        year: 1,
+        password: "",
+      },
+      {
+        student_id: "20260002",
+        full_name: "سارة محمود علي",
+        email: "20260002@o6u.edu.eg",
+        year: 1,
+        password: "",
+      },
+      {
+        student_id: "20260003",
+        full_name: "Omar Khaled Ibrahim",
+        email: "",
+        year: 2,
+        password: "",
+      },
+    ];
+    const ws = XLSX.utils.json_to_sheet(sampleRows, {
+      header: ["student_id", "full_name", "email", "year", "password"],
+    });
+    ws["!cols"] = [{ wch: 16 }, { wch: 28 }, { wch: 26 }, { wch: 8 }, { wch: 18 }];
+    XLSX.utils.book_append_sheet(wb, ws, "Students");
+
+    const guide = [
+      { Column: "Target", Required: "-", Description: targetLabel, Arabic: "الهدف المحدد من البوابة (لا حاجة لتكراره في الملف)" },
+      { Column: "student_id", Required: "Yes", Description: "Unique student ID / username (letters, digits, ., _, -). Also accepts: username, الرقم الجامعي", Arabic: "الرقم الجامعي / اسم المستخدم (مطلوب)" },
+      { Column: "full_name", Required: "For new students", Description: "Student full name (English or Arabic). Optional if student already exists. Also accepts: name, اسم الطالب", Arabic: "اسم الطالب الكامل (مطلوب للطلاب الجدد فقط)" },
+      { Column: "email", Required: "Optional", Description: "Student email. Auto-generated from student_id if left blank.", Arabic: "البريد الإلكتروني (اختياري)" },
+      { Column: "year", Required: "Optional", Description: "Academic year (1 to 7). Uses the default year picked in the UI if blank.", Arabic: "الفرقة الدراسية من 1 إلى 7 (اختياري)" },
+      { Column: "password", Required: "Optional", Description: "Initial password for NEW accounts only. Leave blank to auto-generate (existing accounts keep their password).", Arabic: "كلمة المرور للحسابات الجديدة فقط — اتركها فارغة للتوليد التلقائي" },
+    ];
+    const gws = XLSX.utils.json_to_sheet(guide);
+    gws["!cols"] = [{ wch: 14 }, { wch: 16 }, { wch: 62 }, { wch: 52 }];
+    XLSX.utils.book_append_sheet(wb, gws, "Guide");
+  } else {
+    const sampleRows = [
+      {
+        student_id: "20260001",
+        full_name: "Ahmed Mohamed Hassan",
+        email: "20260001@o6u.edu.eg",
+        section: sampleSection,
+        year: 2,
+        password: "",
+      },
+      {
+        student_id: "20260002",
+        full_name: "سارة محمود علي",
+        email: "20260002@o6u.edu.eg",
+        section: sampleSection,
+        year: 2,
+        password: "",
+      },
+      {
+        student_id: "20260003",
+        full_name: "Omar Khaled Ibrahim",
+        email: "",
+        section: "",
+        year: 2,
+        password: "",
+      },
+    ];
+    const ws = XLSX.utils.json_to_sheet(sampleRows, {
+      header: ["student_id", "full_name", "email", "section", "year", "password"],
+    });
+    ws["!cols"] = [{ wch: 16 }, { wch: 28 }, { wch: 26 }, { wch: 16 }, { wch: 8 }, { wch: 18 }];
+    XLSX.utils.book_append_sheet(wb, ws, "Students");
+
+    const guide = [
+      { Column: "Target", Required: "-", Description: targetLabel, Arabic: "المقرر المحدد من البوابة (لا حاجة لكتابة كود المقرر في كل صف)" },
+      { Column: "student_id", Required: "Yes", Description: "Unique student ID / username (or provide email for existing students). Also accepts: username, الرقم الجامعي", Arabic: "الرقم الجامعي / اسم المستخدم (مطلوب)" },
+      { Column: "full_name", Required: "For new students", Description: "Required only when creating brand-new student accounts. Existing students only need student_id or email.", Arabic: "اسم الطالب (مطلوب فقط إذا كان الطالب غير مسجل بالمنصة)" },
+      { Column: "email", Required: "Optional", Description: "Student email (can also match an existing student account).", Arabic: "البريد الإلكتروني (اختياري)" },
+      { Column: "section", Required: "Optional", Description: "Section name inside this subject (e.g. " + sampleSection + "). Uses the section selected in the UI if left blank.", Arabic: "اسم الشعبة داخل المقرر (اختياري)" },
+      { Column: "year", Required: "Optional", Description: "Academic year (1 to 7) for new accounts.", Arabic: "الفرقة الدراسية من 1 إلى 7 (اختياري)" },
+      { Column: "password", Required: "Optional", Description: "Initial password for NEW accounts only. Existing students' passwords are never modified.", Arabic: "كلمة المرور للطلاب الجدد فقط (لا يتم تغيير كلمة مرور الطلاب الحاليين)" },
+    ];
+    const gws = XLSX.utils.json_to_sheet(guide);
+    gws["!cols"] = [{ wch: 14 }, { wch: 16 }, { wch: 62 }, { wch: 52 }];
+    XLSX.utils.book_append_sheet(wb, gws, "Guide");
+  }
+
+  const out = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="o6u-students-${fileSlug}.xlsx"`);
+  res.send(out);
+});
+
+// POST /api/v1/admin/users/import/students/dry-run
+adminImports.post(
+  "/students/dry-run",
+  rateLimit(30, 60_000, "admin-import:students-dry-run"),
+  upload.single("file"),
+  async (req, res) => {
+    if (!req.file) return res.status(400).json({ error: "file required" });
+    if (!spreadsheetFileOk(req.file.originalname, req.file.mimetype)) {
+      return res.status(422).json({ error: "file must be .xlsx/.xls/.csv" });
+    }
+
+    const meta = z
+      .object({
+        target: z.enum(["college", "subject"]),
+        collegeId: z.string().uuid().optional(),
+        departmentId: z.string().uuid().optional(),
+        subjectId: z.string().uuid().optional(),
+        termId: z.string().uuid().optional(),
+        sectionId: z.string().uuid().optional(),
+        defaultYear: z.coerce.number().int().min(1).max(7).optional(),
+        createMissing: z
+          .union([z.boolean(), z.string()])
+          .transform((v) => (typeof v === "boolean" ? v : v !== "false"))
+          .default(true),
+        passwordMode: z.enum(["auto", "student_id", "fixed"]).default("auto"),
+        fixedPassword: z.string().optional(),
+      })
+      .parse({
+        target: req.body?.target,
+        collegeId: req.body?.collegeId || undefined,
+        departmentId: req.body?.departmentId || undefined,
+        subjectId: req.body?.subjectId || undefined,
+        termId: req.body?.termId || undefined,
+        sectionId: req.body?.sectionId || undefined,
+        defaultYear: req.body?.defaultYear ? req.body.defaultYear : undefined,
+        createMissing: req.body?.createMissing ?? "true",
+        passwordMode: req.body?.passwordMode || "auto",
+        fixedPassword: req.body?.fixedPassword || undefined,
+      });
+
+    if (meta.passwordMode === "fixed" && (!meta.fixedPassword || meta.fixedPassword.length < config.password.minLength)) {
+      return res
+        .status(422)
+        .json({ error: `fixedPassword must be at least ${config.password.minLength} characters` });
+    }
+
+    // Resolve and validate target entities
+    let college: { id: string; code: string; name: string } | null = null;
+    let department: { id: string; code: string; name: string; collegeId: string | null } | null = null;
+    let subject: { id: string; code: string; name: string; departmentId: string | null } | null = null;
+    let term: { id: string; name: string } | null = null;
+    let fixedSection: { id: string; name: string } | null = null;
+    let sectionsByName = new Map<string, { id: string; name: string }>();
+
+    if (meta.target === "college") {
+      if (!meta.collegeId) return res.status(422).json({ error: "collegeId is required for college import" });
+      college = await prisma.college.findUnique({
+        where: { id: meta.collegeId },
+        select: { id: true, code: true, name: true },
+      });
+      if (!college) return res.status(404).json({ error: "college not found" });
+      if (meta.departmentId) {
+        department = await prisma.department.findUnique({
+          where: { id: meta.departmentId },
+          select: { id: true, code: true, name: true, collegeId: true },
+        });
+        if (!department) return res.status(404).json({ error: "department not found" });
+        if (department.collegeId && department.collegeId !== college.id) {
+          return res.status(422).json({ error: "department does not belong to the selected college" });
+        }
+      }
+    } else {
+      if (!meta.subjectId) return res.status(422).json({ error: "subjectId is required for subject import" });
+      subject = await prisma.subject.findUnique({
+        where: { id: meta.subjectId },
+        select: { id: true, code: true, name: true, departmentId: true },
+      });
+      if (!subject) return res.status(404).json({ error: "subject not found" });
+      term = meta.termId
+        ? await prisma.term.findUnique({ where: { id: meta.termId }, select: { id: true, name: true } })
+        : await prisma.term.findFirst({ where: { isCurrent: true }, select: { id: true, name: true } });
+      if (!term) return res.status(409).json({ error: "no active term found" });
+      const subSections = await prisma.section.findMany({
+        where: { subjectId: subject.id, termId: term.id },
+        select: { id: true, name: true },
+      });
+      sectionsByName = new Map(subSections.map((s) => [s.name.trim().toLowerCase(), s]));
+      if (meta.sectionId) {
+        const foundSec = subSections.find((s) => s.id === meta.sectionId);
+        if (!foundSec) return res.status(422).json({ error: "section not found for this subject and term" });
+        fixedSection = foundSec;
+      }
+      // Also resolve college/department from the subject's department so newly created accounts get proper affiliation
+      const dep = subject.departmentId
+        ? await prisma.department.findUnique({
+            where: { id: subject.departmentId },
+            select: { id: true, code: true, name: true, collegeId: true, college: { select: { id: true, code: true, name: true } } },
+          })
+        : null;
+      if (dep) {
+        department = { id: dep.id, code: dep.code, name: dep.name, collegeId: dep.collegeId };
+        if (dep.college) college = dep.college;
+      }
+    }
+
+    let parsed: { rows: StudentSheetRow[]; errors: { line: number; reason: string }[] };
+    try {
+      parsed = parseStudentWorkbook(req.file.buffer);
+    } catch (err) {
+      return res.status(422).json({ error: err instanceof Error ? err.message : "empty or corrupt file" });
+    }
+    if (!parsed.rows.length && !parsed.errors.length) {
+      return res.status(422).json({ error: "spreadsheet has no student rows" });
+    }
+
+    // Bulk lookup existing users by username or email
+    const usernames = [...new Set(parsed.rows.map((r) => r.username).filter(Boolean))];
+    const emails = [...new Set(parsed.rows.map((r) => r.email).filter((e): e is string => Boolean(e)))];
+    const existingUsers = await prisma.user.findMany({
+      where: {
+        OR: [
+          ...(usernames.length ? [{ username: { in: usernames } }] : []),
+          ...(emails.length ? [{ email: { in: emails } }] : []),
+        ],
+      },
+      select: { id: true, username: true, email: true, name: true, role: true, collegeId: true, departmentId: true, academicYear: true },
+    });
+    const byUsername = new Map(existingUsers.filter((u) => u.username).map((u) => [u.username!.toLowerCase(), u]));
+    const byEmail = new Map(existingUsers.map((u) => [u.email.toLowerCase(), u]));
+
+    // Bulk lookup existing enrollments & section memberships for subject target
+    const enrolledIds = new Set<string>();
+    const existingMemberships = new Set<string>();
+    if (meta.target === "subject" && subject && term && existingUsers.length) {
+      const existingIds = existingUsers.map((u) => u.id);
+      const [existingEnr, existingSecs] = await Promise.all([
+        prisma.enrollment.findMany({
+          where: { subjectId: subject.id, termId: term.id, studentId: { in: existingIds } },
+          select: { studentId: true },
+        }),
+        prisma.sectionMembership.findMany({
+          where: { section: { subjectId: subject.id, termId: term.id }, studentId: { in: existingIds } },
+          select: { studentId: true, sectionId: true },
+        }),
+      ]);
+      for (const e of existingEnr) enrolledIds.add(e.studentId);
+      for (const m of existingSecs) existingMemberships.add(`${m.studentId}:${m.sectionId}`);
+    }
+
+    const errors = parsed.errors.slice();
+    const seenUsernames = new Set<string>();
+    const seenEmails = new Set<string>();
+    const validated: {
+      line: number;
+      status: "new" | "existing" | "already_enrolled";
+      existingUserId?: string;
+      username: string;
+      fullName: string;
+      email: string;
+      academicYear?: number;
+      sectionId?: string | null;
+      sectionName?: string | null;
+      plainPassword?: string;
+    }[] = [];
+
+    for (const r of parsed.rows) {
+      const matched = (r.username ? byUsername.get(r.username) : undefined) ?? (r.email ? byEmail.get(r.email) : undefined);
+
+      if (matched) {
+        if (matched.role !== "student") {
+          errors.push({ line: r.line, reason: `account "${matched.username ?? matched.email}" is a ${matched.role}, not a student` });
+          continue;
+        }
+        const dedupeKey = (matched.username ?? matched.id).toLowerCase();
+        if (seenUsernames.has(dedupeKey)) {
+          errors.push({ line: r.line, reason: `duplicate student in file: ${matched.username ?? matched.email}` });
+          continue;
+        }
+        seenUsernames.add(dedupeKey);
+
+        let secId: string | null = fixedSection?.id ?? null;
+        let secName: string | null = fixedSection?.name ?? null;
+        if (meta.target === "subject" && !secId && r.sectionName) {
+          const sec = sectionsByName.get(r.sectionName.trim().toLowerCase());
+          if (!sec) {
+            errors.push({ line: r.line, reason: `unknown section "${r.sectionName}" in ${subject?.code}` });
+            continue;
+          }
+          secId = sec.id;
+          secName = sec.name;
+        }
+
+        const alreadyEnrolled =
+          meta.target === "subject"
+            ? enrolledIds.has(matched.id) && (!secId || existingMemberships.has(`${matched.id}:${secId}`))
+            : matched.collegeId === college?.id &&
+              (!meta.departmentId || matched.departmentId === meta.departmentId) &&
+              (r.academicYear === undefined || matched.academicYear === r.academicYear);
+
+        validated.push({
+          line: r.line,
+          status: alreadyEnrolled ? "already_enrolled" : "existing",
+          existingUserId: matched.id,
+          username: matched.username ?? r.username,
+          fullName: r.fullName || matched.name,
+          email: matched.email,
+          academicYear: r.academicYear ?? meta.defaultYear,
+          sectionId: secId,
+          sectionName: secName,
+        });
+        continue;
+      }
+
+      // Brand-new student account
+      if (meta.target === "subject" && !meta.createMissing) {
+        errors.push({ line: r.line, reason: `student "${r.username || r.email}" not found in portal` });
+        continue;
+      }
+      if (!r.username) {
+        errors.push({ line: r.line, reason: "student_id / username is required to create a new account" });
+        continue;
+      }
+      if (!r.fullName) {
+        errors.push({ line: r.line, reason: `full_name is required for new student "${r.username}"` });
+        continue;
+      }
+      if (seenUsernames.has(r.username)) {
+        errors.push({ line: r.line, reason: `duplicate student_id in file: ${r.username}` });
+        continue;
+      }
+      const computedEmail = (r.email || `${r.username}@${config.email.placeholderDomain}`).toLowerCase();
+      if (seenEmails.has(computedEmail) || byEmail.has(computedEmail)) {
+        errors.push({ line: r.line, reason: `email already used: ${computedEmail}` });
+        continue;
+      }
+
+      let secId: string | null = fixedSection?.id ?? null;
+      let secName: string | null = fixedSection?.name ?? null;
+      if (meta.target === "subject" && !secId && r.sectionName) {
+        const sec = sectionsByName.get(r.sectionName.trim().toLowerCase());
+        if (!sec) {
+          errors.push({ line: r.line, reason: `unknown section "${r.sectionName}" in ${subject?.code}` });
+          continue;
+        }
+        secId = sec.id;
+        secName = sec.name;
+      }
+
+      let plainPassword = r.password ?? "";
+      if (plainPassword) {
+        if (plainPassword.length < config.password.minLength) {
+          errors.push({ line: r.line, reason: `password must be at least ${config.password.minLength} characters` });
+          continue;
+        }
+      } else if (meta.passwordMode === "fixed") {
+        plainPassword = meta.fixedPassword!;
+      } else if (meta.passwordMode === "student_id") {
+        plainPassword =
+          r.username.length >= config.password.minLength
+            ? r.username
+            : `${r.username}00000000`.slice(0, config.password.minLength);
+      } else {
+        plainPassword = generateReadablePassword();
+      }
+
+      seenUsernames.add(r.username);
+      seenEmails.add(computedEmail);
+      validated.push({
+        line: r.line,
+        status: "new",
+        username: r.username,
+        fullName: r.fullName,
+        email: computedEmail,
+        academicYear: r.academicYear ?? meta.defaultYear,
+        sectionId: secId,
+        sectionName: secName,
+        plainPassword,
+      });
+    }
+
+    // Hash ONLY newly created accounts (in parallel chunks) — existing students need zero hashing!
+    const storedRows: TargetStudentBatchPayload["rows"] = [];
+    const credsForMemory: { username: string; fullName: string; email: string; password: string }[] = [];
+    const n = config.importBatch.hashConcurrency;
+    for (let i = 0; i < validated.length; i += n) {
+      const chunk = await Promise.all(
+        validated.slice(i, i + n).map(async (r) => {
+          if (r.status === "new" && r.plainPassword) {
+            const passwordHash = await hashPassword(r.plainPassword);
+            credsForMemory.push({
+              username: r.username,
+              fullName: r.fullName,
+              email: r.email,
+              password: r.plainPassword,
+            });
+            return {
+              line: r.line,
+              status: r.status,
+              username: r.username,
+              fullName: r.fullName,
+              email: r.email,
+              academicYear: r.academicYear,
+              sectionId: r.sectionId,
+              passwordHash,
+            };
+          }
+          return {
+            line: r.line,
+            status: r.status,
+            existingUserId: r.existingUserId,
+            username: r.username,
+            fullName: r.fullName,
+            email: r.email,
+            academicYear: r.academicYear,
+            sectionId: r.sectionId,
+          };
+        }),
+      );
+      storedRows.push(...chunk);
+    }
+
+    const me = (req as unknown as AuthedRequest).userId;
+    const expiresAt = new Date(Date.now() + config.importBatch.ttlMs);
+    const payload: TargetStudentBatchPayload = {
+      kind: "target_students",
+      target: meta.target,
+      collegeId: college?.id,
+      collegeName: college?.name,
+      departmentId: department?.id ?? null,
+      subjectId: subject?.id,
+      termId: term?.id,
+      sectionId: fixedSection?.id ?? null,
+      rows: storedRows,
+    };
+
+    const batch = await prisma.importBatch.create({
+      data: {
+        type: "users",
+        uploadedBy: me,
+        filename: req.file.originalname,
+        status: "dry_run",
+        totalRows: parsed.rows.length + parsed.errors.length,
+        validRows: validated.length,
+        payload: JSON.parse(JSON.stringify(payload)),
+        expiresAt,
+      },
+    });
+
+    prunePendingCredentials();
+    if (credsForMemory.length > 0) {
+      pendingStudentCredentials.set(batch.id, {
+        uploadedBy: me,
+        expiresAt: expiresAt.getTime(),
+        rows: credsForMemory,
+      });
+    }
+
+    const newCount = validated.filter((r) => r.status === "new").length;
+    const existingCount = validated.filter((r) => r.status === "existing").length;
+    const alreadyCount = validated.filter((r) => r.status === "already_enrolled").length;
+
+    res.json({
+      batchId: batch.id,
+      target: meta.target,
+      targetSummary: {
+        college: college ? { id: college.id, code: college.code, name: college.name } : null,
+        department: department ? { id: department.id, code: department.code, name: department.name } : null,
+        subject: subject ? { id: subject.id, code: subject.code, name: subject.name } : null,
+        term: term ? { id: term.id, name: term.name } : null,
+        section: fixedSection ? { id: fixedSection.id, name: fixedSection.name } : null,
+      },
+      counts: {
+        total: parsed.rows.length + parsed.errors.length,
+        valid: validated.length,
+        newAccounts: newCount,
+        existingStudents: existingCount,
+        alreadyEnrolled: alreadyCount,
+        errors: errors.length,
+      },
+      errors,
+      preview: validated.slice(0, 60).map((r) => ({
+        line: r.line,
+        status: r.status,
+        username: r.username,
+        fullName: r.fullName,
+        email: r.email,
+        academicYear: r.academicYear ?? null,
+        sectionName: r.sectionName ?? null,
+      })),
+      previewTruncated: validated.length > 60,
+      expiresAt: batch.expiresAt,
+    });
+  },
+);
+
+// POST /api/v1/admin/users/import/students/commit
+adminImports.post(
+  "/students/commit",
+  rateLimit(30, 60_000, "admin-import:students-commit"),
+  async (req, res) => {
+    const { batchId } = z.object({ batchId: z.string() }).parse(req.body);
+    const me = (req as unknown as AuthedRequest).userId;
+
+    // Pre-verify ownership & payload kind BEFORE claiming to prevent type confusion or cross-admin hijacking.
+    const pre = await prisma.importBatch.findUnique({
+      where: { id: batchId },
+      select: { status: true, expiresAt: true, type: true, uploadedBy: true, payload: true },
+    });
+    if (!pre || pre.type !== "users") return res.status(404).json({ error: "batch not found" });
+    if (pre.uploadedBy !== me) {
+      return res.status(403).json({ error: "only the admin who validated this batch can commit it" });
+    }
+    const prePayload = pre.payload as unknown as Partial<TargetStudentBatchPayload> | null;
+    if (!prePayload || prePayload.kind !== "target_students" || !Array.isArray(prePayload.rows)) {
+      return res.status(400).json({ error: "invalid student batch payload" });
+    }
+
+    const claimed = await prisma.importBatch.updateMany({
+      where: { id: batchId, type: "users", uploadedBy: me, status: "dry_run", expiresAt: { gt: new Date() } },
+      data: { status: "committed" },
+    });
+    if (claimed.count === 0) {
+      if (pre.expiresAt.getTime() < Date.now()) {
+        await prisma.importBatch.update({ where: { id: batchId }, data: { status: "expired", payload: {} } });
+        pendingStudentCredentials.delete(batchId);
+        return res.status(409).json({ error: "batch expired" });
+      }
+      return res.status(409).json({ error: `already ${pre.status}` });
+    }
+
+    const batch = await prisma.importBatch.findUniqueOrThrow({ where: { id: batchId } });
+    const payload = batch.payload as unknown as TargetStudentBatchPayload;
+
+    let created = 0;
+    let updated = 0;
+    let enrolled = 0;
+    let sectionAssigned = 0;
+    let skipped = 0;
+    const rowErrors: { line: number; reason: string }[] = [];
+
+    const CHUNK = 200;
+    for (let i = 0; i < payload.rows.length; i += CHUNK) {
+      const slice = payload.rows.slice(i, i + CHUNK);
+      const newRows = slice.filter((r) => r.status === "new" && r.passwordHash);
+      const existingRows = slice.filter((r) => r.status !== "new" && r.existingUserId);
+
+      // Map of username -> created userId for enrollment/section step
+      const userIdByLine = new Map<number, string>();
+      for (const r of existingRows) userIdByLine.set(r.line, r.existingUserId!);
+
+      try {
+        await prisma.$transaction(async (tx) => {
+          // 1. Bulk create new student users + credential accounts
+          if (newRows.length > 0) {
+            const prepared = newRows.map((r) => ({
+              row: r,
+              id: `u_${crypto.randomUUID()}`,
+            }));
+            const userRes = await tx.user.createMany({
+              data: prepared.map(({ row, id }) => ({
+                id,
+                name: row.fullName,
+                email: row.email,
+                emailVerified: false,
+                username: row.username,
+                role: "student" as const,
+                canChangePassword: defaultCanChangePassword("student"),
+                isActive: true,
+                academicYear: row.academicYear ?? null,
+                college: payload.collegeName ?? null,
+                collegeId: payload.collegeId ?? null,
+                departmentId: payload.departmentId ?? null,
+              })),
+              skipDuplicates: true,
+            });
+            created += userRes.count;
+
+            // Resolve actual IDs in case any username raced and was skipped
+            const createdUsers = await tx.user.findMany({
+              where: { username: { in: prepared.map((p) => p.row.username) } },
+              select: { id: true, username: true },
+            });
+            const byU = new Map(createdUsers.map((u) => [u.username!.toLowerCase(), u.id]));
+            const accountsToCreate: {
+              id: string;
+              providerId: string;
+              accountId: string;
+              userId: string;
+              password: string;
+            }[] = [];
+            for (const { row } of prepared) {
+              const uid = byU.get(row.username.toLowerCase());
+              if (uid) {
+                userIdByLine.set(row.line, uid);
+                accountsToCreate.push({
+                  id: `acc-${uid}`,
+                  providerId: "credential",
+                  accountId: uid,
+                  userId: uid,
+                  password: row.passwordHash!,
+                });
+              }
+            }
+            if (accountsToCreate.length > 0) {
+              await tx.account.createMany({ data: accountsToCreate, skipDuplicates: true });
+            }
+          }
+
+          // 2. Update existing students' college/department/year when importing to college
+          if (payload.target === "college" && existingRows.length > 0 && payload.collegeId) {
+            for (const r of existingRows) {
+              if (r.status === "already_enrolled") {
+                skipped++;
+                continue;
+              }
+              await tx.user.update({
+                where: { id: r.existingUserId! },
+                data: {
+                  college: payload.collegeName ?? undefined,
+                  collegeId: payload.collegeId,
+                  ...(payload.departmentId ? { departmentId: payload.departmentId } : {}),
+                  ...(r.academicYear !== undefined ? { academicYear: r.academicYear } : {}),
+                },
+              });
+              updated++;
+            }
+          } else if (payload.target === "subject") {
+            // Optional year update for existing students if explicitly provided in file
+            for (const r of existingRows) {
+              if (r.status === "already_enrolled") skipped++;
+            }
+          }
+
+          // 3. Bulk enroll & assign sections for subject target
+          if (payload.target === "subject" && payload.subjectId && payload.termId) {
+            const enrollData: { studentId: string; subjectId: string; termId: string }[] = [];
+            const secData: { sectionId: string; studentId: string }[] = [];
+            for (const r of slice) {
+              const uid = userIdByLine.get(r.line);
+              if (!uid) continue;
+              enrollData.push({ studentId: uid, subjectId: payload.subjectId, termId: payload.termId });
+              if (r.sectionId) {
+                secData.push({ sectionId: r.sectionId, studentId: uid });
+              }
+            }
+            if (enrollData.length > 0) {
+              const enrRes = await tx.enrollment.createMany({ data: enrollData, skipDuplicates: true });
+              enrolled += enrRes.count;
+            }
+            if (secData.length > 0) {
+              const secRes = await tx.sectionMembership.createMany({ data: secData, skipDuplicates: true });
+              sectionAssigned += secRes.count;
+            }
+          }
+        });
+      } catch (err) {
+        rowErrors.push({
+          line: slice[0]?.line ?? 2,
+          reason: err instanceof Error ? err.message : "chunk commit failed",
+        });
+      }
+    }
+
+    const credEntry = pendingStudentCredentials.get(batch.id);
+    const memCreds = credEntry && credEntry.uploadedBy === me ? credEntry.rows : [];
+    pendingStudentCredentials.delete(batch.id);
+
+    const imported = created + updated + enrolled;
+    await prisma.importBatch.update({ where: { id: batch.id }, data: { payload: {} } });
+    const log = await prisma.excelImportLog.create({
+      data: {
+        importType: "users",
+        batchId: batch.id,
+        uploadedBy: me,
+        filename: batch.filename,
+        totalRows: batch.totalRows,
+        importedCount: created + updated + enrolled,
+        errorCount: rowErrors.length,
+        errorReport: rowErrors,
+      },
+    });
+    await audit(me, "import.students.commit", "import_batch", batch.id, {
+      target: payload.target,
+      collegeId: payload.collegeId,
+      subjectId: payload.subjectId,
+      created,
+      updated,
+      enrolled,
+      sectionAssigned,
+      skipped,
+      errors: rowErrors.length,
+    });
+
+    res.json({
+      ok: true,
+      imported,
+      created,
+      updated,
+      enrolled,
+      sectionAssigned,
+      skipped,
+      errors: rowErrors,
+      credentials: memCreds,
+      logId: log.id,
+    });
+  },
+);
+
+// POST /api/v1/admin/users/import/students/credentials-xlsx — stateless XLSX formatter for newly created accounts
+adminImports.post(
+  "/students/credentials-xlsx",
+  rateLimit(30, 60_000, "admin-import:credentials-xlsx"),
+  async (req, res) => {
+    const body = z
+      .object({
+        rows: z
+          .array(
+            z.object({
+              username: z.string().max(120),
+              fullName: z.string().max(200),
+              email: z.string().max(260),
+              password: z.string().max(200),
+            }),
+          )
+          .min(1)
+          .max(5000),
+        label: z.string().max(80).optional(),
+      })
+      .parse(req.body);
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(
+      body.rows.map((r, i) => ({
+        "#": i + 1,
+        student_id: safeExcelCell(r.username),
+        full_name: safeExcelCell(r.fullName),
+        email: safeExcelCell(r.email),
+        initial_password: safeExcelCell(r.password),
+      })),
+    );
+    ws["!cols"] = [{ wch: 6 }, { wch: 16 }, { wch: 28 }, { wch: 28 }, { wch: 18 }];
+    XLSX.utils.book_append_sheet(wb, ws, "New Student Credentials");
+
+    const slug = (body.label || "students").replace(/[^a-zA-Z0-9_-]+/g, "_");
+    const out = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="o6u-credentials-${slug}.xlsx"`);
+    res.send(out);
+  },
+);

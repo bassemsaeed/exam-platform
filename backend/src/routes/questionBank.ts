@@ -519,6 +519,90 @@ function spreadsheetFileOk(filename: string, mimetype: string): boolean {
   return false;
 }
 
+// GET /question-bank/import/template?subject_code= — downloads a ready-to-fill
+// .xlsx spreadsheet with sample rows for all 7 question types plus a Guide sheet.
+questionBank.get("/import/template", rateLimit(60, 60_000, "bank-import:template"), async (req, res) => {
+  const a = req as unknown as AuthedRequest;
+  if (a.role === "student") return res.status(403).json({ error: "forbidden" });
+  const q = z.object({ subject_code: z.string().max(120).optional() }).parse(req.query);
+  const rawCode = q.subject_code?.trim() || "CS101";
+  const code = /^[=+\-@\t\r]/.test(rawCode) ? `'${rawCode}` : rawCode;
+  const isAdmin = a.role === "admin";
+
+  const headers = [
+    "subject_code",
+    "question_type",
+    "text",
+    "options",
+    "correct_answer",
+    "grade",
+    "difficulty",
+    "image_filename",
+    "media_filename",
+    "media_type",
+    ...(isAdmin ? ["owner_type", "owner"] : []),
+  ];
+
+  const extraAdmin = isAdmin ? ["doctor", "doc1"] : [];
+  const sampleRows: (string | number)[][] = [
+    headers,
+    [code, "mcq", "What is the time complexity of binary search?", "O(1)|O(log n)|O(n)|O(n log n)", "O(log n)", 2, "easy", "", "", "", ...extraAdmin],
+    [code, "true_false", "HTTP is a stateless protocol.", "True|False", "True", 1, "easy", "", "", "", ...extraAdmin],
+    [code, "multi_select", "Which of the following are transport-layer protocols?", "TCP|UDP|HTTP|IP", "TCP|UDP", 3, "medium", "", "", "", ...extraAdmin],
+    [code, "short_answer", "What does CPU stand for?", "Central Processing Unit|central processing unit", "Central Processing Unit", 2, "easy", "", "", "", ...extraAdmin],
+    [code, "essay", "Explain the difference between a process and a thread.", "", "Mention shared address space vs isolated memory and context-switch cost.", 5, "hard", "", "", "", ...extraAdmin],
+    [code, "matching", "Match each protocol with its default port.", "HTTP=80|HTTPS=443|SSH=22", "", 3, "medium", "", "", "", ...extraAdmin],
+    [code, "ordering", "Order the software development lifecycle phases from first to last.", "Requirements|Design|Implementation|Testing", "", 4, "medium", "", "", "", ...extraAdmin],
+  ];
+
+  const guideRows: string[][] = [
+    ["Column", "Required", "Format & Notes"],
+    ["subject_code", "Yes (unless chosen in UI)", "Course code such as CS101 or MATH201."],
+    ["question_type", "Yes", "One of: mcq, true_false, multi_select, short_answer, essay, matching, ordering."],
+    ["text", "Yes (optional if image/media attached)", "Question prompt shown to students."],
+    ["options", "Depends on type", "mcq/multi_select/ordering: pipe-separated (A|B|C). true_false: True|False. short_answer: accepted answers (Ans1|Ans2). matching: Left1=Right1|Left2=Right2. essay: leave blank."],
+    ["correct_answer", "Depends on type", "mcq/true_false: exact option text. multi_select: pipe-separated correct options (A|C). short_answer: primary answer. essay: optional model answer/rubric. matching/ordering: leave blank."],
+    ["grade", "Yes", "Positive number (e.g., 1, 2, 2.5, 5)."],
+    ["difficulty", "Yes", "One of: easy, medium, hard."],
+    ["image_filename", "Optional", "Exact filename inside the optional ZIP (png, jpg, jpeg, webp, gif)."],
+    ["media_filename", "Optional", "Exact audio/video filename inside the optional ZIP (mp3, wav, ogg, m4a, webm, mp4, mov)."],
+    ["media_type", "Optional", "audio or video (auto-detected if left blank)."],
+    ...(isAdmin
+      ? [
+          ["owner_type", "Admin only", "doctor or ta_shared."],
+          ["owner", "Admin only", "Username of the doctor or TA who owns this question."],
+        ]
+      : []),
+  ];
+
+  const wb = XLSX.utils.book_new();
+  const wsQ = XLSX.utils.aoa_to_sheet(sampleRows);
+  wsQ["!cols"] = [
+    { wch: 14 },
+    { wch: 15 },
+    { wch: 48 },
+    { wch: 42 },
+    { wch: 30 },
+    { wch: 8 },
+    { wch: 12 },
+    { wch: 18 },
+    { wch: 18 },
+    { wch: 12 },
+    ...(isAdmin ? [{ wch: 12 }, { wch: 14 }] : []),
+  ];
+  XLSX.utils.book_append_sheet(wb, wsQ, "Questions");
+
+  const wsGuide = XLSX.utils.aoa_to_sheet(guideRows);
+  wsGuide["!cols"] = [{ wch: 18 }, { wch: 24 }, { wch: 86 }];
+  XLSX.utils.book_append_sheet(wb, wsGuide, "Guide");
+
+  const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+  const safeCode = code.replace(/[^a-zA-Z0-9_.-]/g, "_");
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename="questions-template-${safeCode}.xlsx"`);
+  res.send(buf);
+});
+
 questionBank.post("/import/dry-run", rateLimit(30, 60_000, "bank-import:dry-run"), bankUpload, async (req, res) => {
   const a = req as unknown as AuthedRequest;
   if (a.role === "student") return res.status(403).json({ error: "forbidden" });
@@ -674,7 +758,7 @@ questionBank.post("/import/dry-run", rateLimit(30, 60_000, "bank-import:dry-run"
   const appliedSubject = targetCode
     ? await prisma.subject.findUnique({ where: { code: targetCode }, select: { code: true, name: true } })
     : null;
-  res.json({ batchId: batch.id, valid: rows.length, errors, expiresAt: batch.expiresAt, subject: appliedSubject, preview: rows.slice(0, 50).map((r) => ({ line: r.line, text: r.text, options: r.options, correctAnswer: r.correctAnswer, grade: r.grade, difficulty: r.difficulty })), previewTruncated: rows.length > 50 });
+  res.json({ batchId: batch.id, valid: rows.length, errors, expiresAt: batch.expiresAt, subject: appliedSubject, preview: rows.slice(0, 50).map((r) => ({ line: r.line, questionType: r.questionType, text: r.text, options: r.options, correctAnswer: r.correctAnswer, grade: r.grade, difficulty: r.difficulty })), previewTruncated: rows.length > 50 });
 });
 
 questionBank.post("/import/commit", rateLimit(30, 60_000, "bank-import:commit"), bankUpload, async (req, res) => {

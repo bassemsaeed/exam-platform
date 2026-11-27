@@ -7,6 +7,7 @@ import {
   GraduationCap,
   Layers,
   Plus,
+  Upload,
   Users,
 } from "lucide-react";
 import { useT } from "../lib/i18n";
@@ -328,6 +329,12 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
               description={`${c.code} · ${c.students ?? 0} ${t("students")} · ${c.doctors ?? 0} ${t("doctors")} · ${c.subjectTotal ?? c.subjects?.length ?? 0} ${t("subjects")}`}
               action={
                 <div className="action-row">
+                  <Link
+                    to={`/imports?type=students&target=college&collegeId=${encodeURIComponent(c.id)}`}
+                    className="button primary"
+                  >
+                    <Upload size={15} /> {t("Import students")}
+                  </Link>
                   <button className="secondary" onClick={() => { setLinkDeptId(""); setOp("link-dept"); }}>
                     <Plus size={15} /> {t(" Link department ")}
                   </button>

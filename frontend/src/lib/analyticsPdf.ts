@@ -1,4 +1,4 @@
-import { buildGradeBands, type ExamAnalyticsData, type AnalyticsQuestion } from "../components/ExamAnalytics";
+import type { ExamAnalyticsData, AnalyticsQuestion } from "../components/ExamAnalytics";
 import { questionDisplayText } from "../components/QuestionMedia";
 import { questionTypeLabel } from "../components/QuestionTypesUI";
 import { label } from "./platform";
@@ -12,7 +12,25 @@ function escHtml(v: unknown): string {
     .replace(/'/g, "&#39;");
 }
 
-export function exportAnalyticsPdf({
+async function loadLogoDataUrl(): Promise<string> {
+  const fallback = `${window.location.origin}/o6u-logo.png`;
+  try {
+    const res = await fetch("/o6u-logo.png");
+    if (!res.ok) return fallback;
+    const blob = await res.blob();
+    return await new Promise<string>((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () =>
+        resolve(typeof reader.result === "string" ? reader.result : fallback);
+      reader.onerror = () => resolve(fallback);
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return fallback;
+  }
+}
+
+export async function exportAnalyticsPdf({
   data,
   examTitle,
   wrongThreshold,
@@ -28,54 +46,84 @@ export function exportAnalyticsPdf({
   const isRtl = language === "ar";
   const dir = isRtl ? "rtl" : "ltr";
   const localeStr = isRtl ? "ar-EG" : "en-US";
+  const logoSrc = await loadLogoDataUrl();
   const generatedAt = new Intl.DateTimeFormat(localeStr, {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date());
 
   const isFlagged = (q: AnalyticsQuestion) =>
-    q.pctWrong >= wrongThreshold || q.distractorBeatKey;
+    q.pctWrong >= wrongThreshold ||
+    q.distractorBeatKey ||
+    (q.discriminationIndex !== null && q.discriminationIndex < 0);
 
-  const flagged = data.questions.filter(isFlagged);
-  const bands = buildGradeBands(data.distribution, data.submitted);
-  const maxBand = Math.max(1, ...bands.map((b) => b.count));
+  const indexed = data.questions.map((q, i) => ({ ...q, code: `Q${i + 1}` }));
+  const flagged = indexed.filter(isFlagged);
+  const maxDist = Math.max(1, ...data.distribution);
+  const totalDist = Math.max(1, data.distribution.reduce((a, b) => a + b, 0));
 
-  const qualityText = (q: AnalyticsQuestion) => {
-    if (q.distractorBeatKey) return t("Check answer key");
-    if (q.discriminationIndex !== null && q.discriminationIndex < 0) return t("Check wording");
-    if (q.pctWrong >= wrongThreshold) return `${q.pctWrong}% ${t("wrong")}`;
-    return t("OK");
-  };
+  const d = data.distribution;
+  const tiers = [
+    { label: t("Excellent"), range: "90–100%", n: d[9] ?? 0, color: "#15803d" },
+    { label: t("Very Good"), range: "80–89%", n: d[8] ?? 0, color: "#0a4d7b" },
+    { label: t("Good"), range: "70–79%", n: d[7] ?? 0, color: "#2b86c5" },
+    { label: t("Pass"), range: "60–69%", n: d[6] ?? 0, color: "#d97706" },
+    {
+      label: t("Below Pass"),
+      range: "< 60%",
+      n: (d[0] ?? 0) + (d[1] ?? 0) + (d[2] ?? 0) + (d[3] ?? 0) + (d[4] ?? 0) + (d[5] ?? 0),
+      color: "#c2594b",
+    },
+  ];
 
-  const gradeBandsHtml = bands
-    .map((b) => {
-      const w = b.count > 0 ? Math.max(6, Math.round((b.count / maxBand) * 100)) : 0;
-      return `
-        <tr>
-          <td><b>${escHtml(t(b.label))}</b> <span class="cell-sub">${b.range}</span></td>
-          <td>
-            <div class="inline-bar">
-              <div class="inline-track"><div class="inline-fill ${b.key === "below" ? "warn" : "good"}" style="width:${w}%"></div></div>
-              <b>${b.count}</b> <span class="cell-sub">(${b.pct}%)</span>
-            </div>
-          </td>
-        </tr>`;
-    })
-    .join("");
+  // Inline SVG Score Distribution Histogram for sharp vector print
+  const svgW = 460;
+  const svgH = 148;
+  const pL = 28;
+  const pR = 10;
+  const pT = 18;
+  const pB = 22;
+  const pw = svgW - pL - pR;
+  const ph = svgH - pT - pB;
+  const bw = pw / 10;
+  const passX = pL + pw * 0.6;
+  const avgX = pL + pw * Math.min(1, Math.max(0, data.avg / 100));
 
-  const diffRowsHtml = (data.difficultyBreakdown ?? [])
+  const histSvg = `
+    <svg width="100%" viewBox="0 0 ${svgW} ${svgH}" xmlns="http://www.w3.org/2000/svg">
+      ${[0, Math.ceil(maxDist / 2), maxDist]
+        .map((tk) => {
+          const y = pT + ph - (tk / maxDist) * ph;
+          return `<line x1="${pL}" x2="${svgW - pR}" y1="${y}" y2="${y}" stroke="#e5edf4" stroke-width="1"/>
+                  <text x="${pL - 6}" y="${y + 3}" text-anchor="end" font-size="9" fill="#64748b">${tk}</text>`;
+        })
+        .join("")}
+      ${data.distribution
+        .map((n, i) => {
+          const bh = n > 0 ? Math.max(3, (n / maxDist) * ph) : 0;
+          const x = pL + i * bw + 4;
+          const y = pT + ph - bh;
+          const w = Math.max(8, bw - 8);
+          const fill = i >= 6 ? "#0a4d7b" : "#c97a6d";
+          return `
+            ${n > 0 ? `<rect x="${x}" y="${y}" width="${w}" height="${bh}" rx="3" fill="${fill}"/>` : ""}
+            ${n > 0 ? `<text x="${x + w / 2}" y="${y - 4}" text-anchor="middle" font-size="9" font-weight="600" fill="#1e293b">${n}</text>` : ""}
+            <text x="${pL + i * bw + bw / 2}" y="${svgH - 6}" text-anchor="middle" font-size="8.5" fill="#64748b">${i * 10}%</text>
+          `;
+        })
+        .join("")}
+      <line x1="${passX}" x2="${passX}" y1="${pT - 4}" y2="${pT + ph}" stroke="#15803d" stroke-width="1.4" stroke-dasharray="4 3"/>
+      <text x="${passX + 3}" y="${pT + 7}" font-size="8.5" font-weight="600" fill="#15803d">60%</text>
+      <line x1="${avgX}" x2="${avgX}" y1="${pT - 4}" y2="${pT + ph}" stroke="#f58220" stroke-width="1.4" stroke-dasharray="3 3"/>
+    </svg>`;
+
+  const tierRowsHtml = tiers
     .map(
-      (d) => `
+      (tr) => `
       <tr>
-        <td><b>${escHtml(t(label(d.difficulty)))}</b></td>
-        <td>${d.questionCount}</td>
-        <td>${d.correct} / ${d.attempts}</td>
-        <td>
-          <div class="inline-bar">
-            <div class="inline-track"><div class="inline-fill ${d.pctCorrect < 45 ? "bad" : d.pctCorrect < 65 ? "warn" : "good"}" style="width:${d.pctCorrect}%"></div></div>
-            <b>${d.pctCorrect}%</b>
-          </div>
-        </td>
+        <td><span class="dot" style="background:${tr.color}"></span><b>${escHtml(tr.label)}</b> <span class="muted">(${tr.range})</span></td>
+        <td class="num"><b>${tr.n}</b></td>
+        <td class="num">${Math.round((tr.n / totalDist) * 100)}%</td>
       </tr>`,
     )
     .join("");
@@ -85,46 +133,33 @@ export function exportAnalyticsPdf({
       (s) => `
       <tr>
         <td><b>${escHtml(s.name)}</b></td>
-        <td>${s.n}</td>
-        <td><b>${Math.round(s.avg)}%</b></td>
-        <td>${Math.round(s.passRate)}%</td>
+        <td class="num">${s.n}</td>
+        <td class="num"><b>${Math.round(s.avg)}%</b></td>
+        <td class="num">${Math.round(s.passRate)}%</td>
       </tr>`,
     )
     .join("");
 
-  const flaggedRowsHtml = flagged
-    .map(
-      (q, idx) => `
-      <tr class="row-flagged">
-        <td>${idx + 1}</td>
-        <td>
-          <b>${escHtml(questionDisplayText(q, t))}</b>
-          <div class="cell-sub">${escHtml(questionTypeLabel(q.type, t))} · ${escHtml(t(label(q.difficulty)))}</div>
-        </td>
-        <td class="num bad"><b>${q.pctWrong}%</b></td>
-        <td class="num">${q.correct} / ${q.attempts}</td>
-        <td>${q.mostCommonWrongOption ? `${escHtml(q.mostCommonWrongOption.label)} (${q.mostCommonWrongOption.pct}%)` : "—"}</td>
-        <td><span class="pill bad">${escHtml(qualityText(q))}</span></td>
-      </tr>`,
-    )
-    .join("");
-
-  const allQuestionsHtml = data.questions
-    .map((q, idx) => {
+  const allQuestionsHtml = indexed
+    .map((q) => {
       const fl = isFlagged(q);
-      const tone = q.pctCorrect < 40 ? "bad" : q.pctCorrect < 60 ? "warn" : "good";
+      const tone = q.pctCorrect >= 70 ? "good" : q.pctCorrect >= 50 ? "warn" : "bad";
+      const statusTxt = q.distractorBeatKey
+        ? t("Check key")
+        : fl
+          ? `${q.pctWrong}% ${t("wrong")}`
+          : t("OK");
       return `
-      <tr class="${fl ? "row-flagged" : ""}">
-        <td>${idx + 1}</td>
+      <tr>
+        <td class="num"><b>${q.code}</b></td>
         <td>
           <b>${escHtml(questionDisplayText(q, t))}</b>
           <div class="cell-sub">${escHtml(questionTypeLabel(q.type, t))} · ${escHtml(t(label(q.difficulty)))} · ${q.grade} ${escHtml(t("marks"))}</div>
         </td>
         <td class="num"><span class="pill ${tone}">${q.pctCorrect}%</span></td>
-        <td class="num">${q.pctWrong}%</td>
-        <td class="num">${q.correct} / ${q.wrong} / ${q.skipped}</td>
+        <td class="num">${q.correct} / ${q.attempts}</td>
         <td class="num">${q.avgAward} / ${q.grade}</td>
-        <td>${fl ? `<span class="pill bad">${escHtml(t("Needs review"))}</span>` : `<span class="pill good">${escHtml(t("Good"))}</span>`}</td>
+        <td class="num">${fl ? `<span class="pill flag">${escHtml(statusTxt)}</span>` : `<span class="pill ok">${escHtml(statusTxt)}</span>`}</td>
       </tr>`;
     })
     .join("");
@@ -136,146 +171,105 @@ export function exportAnalyticsPdf({
   <title>${escHtml(examTitle)} — ${escHtml(t("Assessment Analytics Report"))}</title>
   <style>
     @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+Arabic:wght@400;500;600;700&display=swap");
-    @page { size: A4; margin: 14mm; }
+    @page { size: A4; margin: 13mm; }
     * { box-sizing: border-box; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
     body {
       margin: 0;
       font-family: ${isRtl ? '"Noto Sans Arabic", Inter, Arial, sans-serif' : 'Inter, "Noto Sans Arabic", Arial, sans-serif'};
       color: #163349;
       background: #ffffff;
-      font-size: 11.5px;
+      font-size: 11px;
       line-height: 1.5;
     }
     .header {
       display: flex;
       justify-content: space-between;
-      align-items: flex-start;
+      align-items: center;
       gap: 16px;
-      padding: 16px 20px;
-      border-radius: 10px;
-      background: #103e60;
-      color: #ffffff;
-      margin-bottom: 16px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid #103e60;
+      margin-bottom: 14px;
     }
-    .header h1 { margin: 0 0 4px; font-size: 18px; font-weight: 700; }
-    .header .sub { opacity: 0.85; font-size: 11px; }
-    .header .meta { text-align: end; font-size: 10.5px; opacity: 0.9; white-space: nowrap; }
+    .header-left { display: flex; align-items: center; gap: 14px; }
+    .header-logo { height: 42px; width: auto; object-fit: contain; }
+    .header h1 { margin: 0 0 2px; font-size: 16px; font-weight: 700; color: #103e60; }
+    .header .sub { color: #5f7a8f; font-size: 10.5px; }
+    .header .meta { text-align: end; font-size: 10px; color: #5f7a8f; white-space: nowrap; }
     .kpi-grid {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
       gap: 10px;
-      margin-bottom: 16px;
+      margin-bottom: 14px;
     }
     .kpi {
       border: 1px solid #d7e3ee;
       border-radius: 8px;
-      padding: 11px 13px;
+      padding: 10px 12px;
       background: #f8fbfd;
       break-inside: avoid;
     }
-    .kpi.alert { border-color: #f3c2c2; background: #fff7f7; }
-    .kpi small { display: block; color: #5f7a8f; font-size: 10px; font-weight: 600; }
-    .kpi strong { display: block; font-size: 20px; color: #103e60; margin: 4px 0 2px; }
-    .kpi.alert strong { color: #b91c1c; }
-    .kpi span { font-size: 10px; color: #6e8699; }
-    .section {
-      margin-bottom: 16px;
-      break-inside: avoid;
-    }
-    .section-wide { margin-bottom: 16px; }
-    h2 {
-      font-size: 13.5px;
-      font-weight: 700;
-      color: #103e60;
-      margin: 0 0 8px;
-      padding-bottom: 5px;
-      border-bottom: 1.5px solid #e3edf5;
-    }
-    .alert-box {
-      padding: 10px 14px;
-      border-radius: 8px;
-      background: #fff5f5;
-      border: 1px solid #f5c2c2;
-      border-inline-start: 4px solid #dc2626;
-      color: #8f1d1d;
-      margin-bottom: 12px;
-      font-size: 11px;
-    }
+    .kpi small { display: block; color: #5f7a8f; font-size: 9.5px; font-weight: 600; }
+    .kpi strong { display: block; font-size: 19px; color: #103e60; margin: 3px 0 2px; }
+    .kpi span { font-size: 9.5px; color: #6e8699; }
     .two-col {
       display: grid;
-      grid-template-columns: 1.15fr 0.85fr;
-      gap: 14px;
-      margin-bottom: 16px;
+      grid-template-columns: 1.35fr 0.85fr;
+      gap: 12px;
+      margin-bottom: 14px;
     }
     .box {
       border: 1px solid #dfe9f2;
       border-radius: 8px;
-      padding: 12px 14px;
+      padding: 11px 13px;
       background: #ffffff;
       break-inside: avoid;
     }
-    .hist {
-      display: flex;
-      align-items: flex-end;
-      gap: 5px;
-      height: 115px;
-      padding: 8px 4px 2px;
+    h2 {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: #103e60;
+      margin: 0 0 8px;
+      padding-bottom: 5px;
+      border-bottom: 1px solid #e6eff6;
     }
-    .bar-col {
-      flex: 1;
-      height: 100%;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 3px;
+    .spread-note {
+      margin-top: 6px;
+      font-size: 9.5px;
+      color: #5b768c;
+      text-align: center;
     }
-    .bar-col.pass-line {
-      border-inline-start: 1.5px dashed #16a34a;
-      padding-inline-start: 4px;
-    }
-    .bar-num { font-size: 9.5px; font-weight: 600; color: #355870; }
-    .bar-track { flex: 1; width: 100%; display: flex; align-items: flex-end; justify-content: center; }
-    .bar-fill { width: 100%; max-width: 24px; border-radius: 3px 3px 1px 1px; }
-    .bar-fill.pass { background: #0a4d7b; }
-    .bar-fill.fail { background: #e06b58; }
-    .bar-fill.empty { background: #e3edf5; }
-    .bar-lbl { font-size: 8.5px; color: #758ea1; }
-    table { width: 100%; border-collapse: collapse; font-size: 10.5px; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-inline-end: 6px; vertical-align: middle; }
+    .muted { color: #6c8497; font-size: 9.5px; }
+    table { width: 100%; border-collapse: collapse; font-size: 10px; }
+    thead { display: table-header-group; }
     th {
       text-align: start;
       background: #f2f7fb;
       color: #355870;
       font-weight: 600;
-      padding: 7px 8px;
+      padding: 6.5px 8px;
       border-bottom: 1px solid #d7e3ee;
     }
     td {
-      padding: 7px 8px;
+      padding: 6.5px 8px;
       border-bottom: 1px solid #ebf1f6;
-      vertical-align: top;
+      vertical-align: middle;
     }
     tr { break-inside: avoid; }
-    tr.row-flagged td { background: #fff9f9; }
     .num { text-align: center; white-space: nowrap; }
-    .cell-sub { font-size: 9.5px; color: #6c8497; margin-top: 2px; }
+    .cell-sub { font-size: 9px; color: #6c8497; margin-top: 2px; }
     .pill {
       display: inline-block;
       padding: 2px 7px;
       border-radius: 999px;
-      font-size: 9.5px;
+      font-size: 9px;
       font-weight: 600;
       white-space: nowrap;
     }
-    .pill.good { background: #e7f7ee; color: #166534; }
-    .pill.warn { background: #fff4de; color: #9a5206; }
-    .pill.bad { background: #fee2e2; color: #b91c1c; }
-    .bad { color: #b91c1c; }
-    .inline-bar { display: flex; align-items: center; gap: 6px; }
-    .inline-track { flex: 1; height: 6px; border-radius: 999px; background: #e5eef5; overflow: hidden; min-width: 50px; }
-    .inline-fill { height: 100%; border-radius: 999px; }
-    .inline-fill.good { background: #16a34a; }
-    .inline-fill.warn { background: #d97706; }
-    .inline-fill.bad { background: #dc2626; }
+    .pill.good, .pill.ok { background: #e8f6ee; color: #166534; }
+    .pill.warn, .pill.flag { background: #fff4df; color: #9a5206; }
+    .pill.bad { background: #fdecea; color: #9b2c2c; }
+    .section { margin-bottom: 14px; }
     .footer {
       margin-top: 14px;
       padding-top: 8px;
@@ -289,9 +283,12 @@ export function exportAnalyticsPdf({
 </head>
 <body>
   <div class="header">
-    <div>
-      <h1>${escHtml(examTitle)}</h1>
-      <div class="sub">${escHtml(t("Assessment Analytics Report"))}</div>
+    <div class="header-left">
+      <img src="${escHtml(logoSrc)}" alt="O6U" class="header-logo" />
+      <div>
+        <h1>${escHtml(examTitle)}</h1>
+        <div class="sub">${escHtml(t("Assessment Analytics Report"))}</div>
+      </div>
     </div>
     <div class="meta">
       <div>${escHtml(generatedAt)}</div>
@@ -301,12 +298,12 @@ export function exportAnalyticsPdf({
 
   <div class="kpi-grid">
     <div class="kpi">
-      <small>${escHtml(t("Students finished"))}</small>
+      <small>${escHtml(t("Attendance"))}</small>
       <strong>${data.submitted}${data.assigned !== null ? ` / ${data.assigned}` : ""}</strong>
       <span>${data.completionRate != null ? `${data.completionRate}% ${escHtml(t("completed"))}` : `${data.started} ${escHtml(t("started"))}`}${data.absent ? ` · ${data.absent} ${escHtml(t("absent"))}` : ""}</span>
     </div>
     <div class="kpi">
-      <small>${escHtml(t("Average score"))}</small>
+      <small>${escHtml(t("Class average"))}</small>
       <strong>${Math.round(data.avg)}%</strong>
       <span>${escHtml(t("Middle score"))} ${Math.round(data.median)}% · ${Math.round(data.low)}–${Math.round(data.high)}%</span>
     </div>
@@ -315,103 +312,66 @@ export function exportAnalyticsPdf({
       <strong>${Math.round(data.passRate)}%</strong>
       <span>${data.passCount} ${escHtml(t("passed"))} · ${Math.max(0, data.submitted - data.passCount)} ${escHtml(t("did not pass"))}</span>
     </div>
-    <div class="kpi ${flagged.length > 0 ? "alert" : ""}">
-      <small>${escHtml(t("Questions needing review"))}</small>
+    <div class="kpi">
+      <small>${escHtml(t("Flagged questions"))}</small>
       <strong>${flagged.length} / ${data.questions.length}</strong>
-      <span>${escHtml(t("Answered wrong by ≥{0}%", { "0": wrongThreshold }))}</span>
+      <span>${escHtml(t("≥{0}% wrong", { "0": wrongThreshold }))}</span>
     </div>
   </div>
 
-  ${
-    flagged.length > 0
-      ? `
-    <div class="section-wide">
-      <h2>${escHtml(t("Flagged questions (answered wrong by many students)"))}</h2>
-      <div class="alert-box">
-        ${escHtml(t("{0} of {1} questions need review because ≥{2}% of students missed them or a wrong choice beat the right answer.", { "0": flagged.length, "1": data.questions.length, "2": wrongThreshold }))}
-      </div>
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>${escHtml(t("Question"))}</th>
-            <th class="num">${escHtml(t("Wrong %"))}</th>
-            <th class="num">${escHtml(t("Correct"))}</th>
-            <th>${escHtml(t("Most chosen wrong answer"))}</th>
-            <th>${escHtml(t("Reason"))}</th>
-          </tr>
-        </thead>
-        <tbody>${flaggedRowsHtml}</tbody>
-      </table>
-    </div>`
-      : ""
-  }
-
   <div class="two-col">
+    <div class="box">
+      <h2>${escHtml(t("Score distribution & spread"))}</h2>
+      ${histSvg}
+      <div class="spread-note">
+        ${escHtml(t("Low"))} ${Math.round(data.low)}% · Q1 ${Math.round(data.q1 ?? data.low)}% · ${escHtml(t("Median"))} ${Math.round(data.median)}% · Q3 ${Math.round(data.q3 ?? data.high)}% · ${escHtml(t("High"))} ${Math.round(data.high)}%
+      </div>
+    </div>
     <div class="box">
       <h2>${escHtml(t("Grade breakdown"))}</h2>
       <table>
         <thead>
           <tr>
             <th>${escHtml(t("Grade level"))}</th>
-            <th>${escHtml(t("Students"))}</th>
+            <th class="num">${escHtml(t("Students"))}</th>
+            <th class="num">%</th>
           </tr>
         </thead>
-        <tbody>${gradeBandsHtml}</tbody>
+        <tbody>${tierRowsHtml}</tbody>
       </table>
-    </div>
-    <div class="box">
-      <h2>${escHtml(t("Performance by difficulty"))}</h2>
-      ${
-        diffRowsHtml
-          ? `<table>
-              <thead>
-                <tr>
-                  <th>${escHtml(t("Difficulty"))}</th>
-                  <th>${escHtml(t("Questions"))}</th>
-                  <th>${escHtml(t("Correct"))}</th>
-                  <th>${escHtml(t("Accuracy"))}</th>
-                </tr>
-              </thead>
-              <tbody>${diffRowsHtml}</tbody>
-            </table>`
-          : `<p class="cell-sub">—</p>`
-      }
     </div>
   </div>
 
   ${
     data.sections.length > 0
-      ? `
-    <div class="section">
-      <h2>${escHtml(t("Sections compared"))}</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>${escHtml(t("Section"))}</th>
-            <th>${escHtml(t("Students"))}</th>
-            <th>${escHtml(t("Average score"))}</th>
-            <th>${escHtml(t("Pass rate"))}</th>
-          </tr>
-        </thead>
-        <tbody>${sectionRowsHtml}</tbody>
-      </table>
-    </div>`
+      ? `<div class="section box">
+          <h2>${escHtml(t("Sections vs. class average"))}</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>${escHtml(t("Section"))}</th>
+                <th class="num">${escHtml(t("Students"))}</th>
+                <th class="num">${escHtml(t("Average"))}</th>
+                <th class="num">${escHtml(t("Pass rate (≥60%)"))}</th>
+              </tr>
+            </thead>
+            <tbody>${sectionRowsHtml}</tbody>
+          </table>
+        </div>`
       : ""
   }
 
-  <div class="section-wide">
-    <h2>${escHtml(t("All questions breakdown"))}</h2>
+  <div class="section">
+    <h2>${escHtml(t("Questions review"))}</h2>
     <table>
       <thead>
         <tr>
-          <th>#</th>
+          <th class="num" style="width:42px">#</th>
           <th>${escHtml(t("Question"))}</th>
           <th class="num">${escHtml(t("Correct %"))}</th>
-          <th class="num">${escHtml(t("Wrong %"))}</th>
-          <th class="num">${escHtml(t("Right / Wrong / Skipped"))}</th>
+          <th class="num">${escHtml(t("Correct"))}</th>
           <th class="num">${escHtml(t("Avg marks"))}</th>
-          <th>${escHtml(t("Status"))}</th>
+          <th class="num">${escHtml(t("Status"))}</th>
         </tr>
       </thead>
       <tbody>${allQuestionsHtml}</tbody>
@@ -419,52 +379,34 @@ export function exportAnalyticsPdf({
   </div>
 
   <div class="footer">
-    <span>${escHtml(t("O6U Examination Portal"))} · ${escHtml(t("Assessment Analytics Report"))}</span>
-    <span>${escHtml(t("Avg time used"))}: ${Math.round(data.avgMinutesUsed)} ${escHtml(t("min"))} · ${escHtml(t("Auto-submitted"))}: ${data.autoSubmitted}</span>
+    <span>${escHtml(t("O6U Examination Portal"))}</span>
+    <span>${escHtml(t("Avg time"))}: ${Math.round(data.avgMinutesUsed)}m · ${escHtml(t("Auto-submitted"))}: ${data.autoSubmitted}</span>
   </div>
+
+  <script>
+    window.addEventListener("load", () => {
+      const imgs = Array.from(document.images);
+      Promise.all(imgs.map((img) => img.complete ? Promise.resolve() : new Promise((r) => { img.onload = r; img.onerror = r; })))
+        .then(() => setTimeout(() => window.print(), 220));
+    });
+  </script>
 </body>
 </html>`;
 
-  // Render into a hidden same-origin iframe so popup blockers never interfere
-  // and the browser's native PDF/print engine shapes Arabic & RTL cleanly.
-  const iframe = document.createElement("iframe");
-  iframe.style.position = "fixed";
-  iframe.style.right = "0";
-  iframe.style.bottom = "0";
-  iframe.style.width = "0";
-  iframe.style.height = "0";
-  iframe.style.border = "0";
-  document.body.appendChild(iframe);
-
-  const doc = iframe.contentWindow?.document;
-  if (!doc) {
-    document.body.removeChild(iframe);
+  const w = window.open("", "_blank", "width=980,height=920");
+  if (!w) {
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${(examTitle || "exam").replace(/[^a-zA-Z0-9_-]+/g, "_")}-analytics.html`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
     return;
   }
-  doc.open();
-  doc.write(html);
-  doc.close();
-
-  const cleanup = () => {
-    setTimeout(() => {
-      if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-    }, 1000);
-  };
-
-  const triggerPrint = () => {
-    try {
-      iframe.contentWindow?.focus();
-      iframe.contentWindow?.print();
-    } finally {
-      cleanup();
-    }
-  };
-
-  // Wait briefly for web fonts/layout to settle before opening the PDF print dialog.
-  const fontsReady = (doc as Document & { fonts?: { ready: Promise<unknown> } }).fonts?.ready;
-  if (fontsReady) {
-    void Promise.race([fontsReady, new Promise((r) => setTimeout(r, 700))]).then(triggerPrint);
-  } else {
-    setTimeout(triggerPrint, 300);
-  }
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
 }
