@@ -836,7 +836,7 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                     ariaLabel={t("Department")}
                   />
                 </div>
-                <Feedback error={action.error} />
+                <Feedback error={allDepts.error || action.error} />
                 <div className="dialog-actions">
                   <button type="button" className="secondary" onClick={() => setOp(null)}>
                     {t("Cancel")}
@@ -916,7 +916,7 @@ export function CollegeDetail({ user }: { user: SessionUser }) {
                     ariaLabel={t("Merge into")}
                   />
                 </div>
-                <Feedback error={action.error} />
+                <Feedback error={colleges.error || action.error} />
               </Dialog>
             )}
             {op === "delete" && (

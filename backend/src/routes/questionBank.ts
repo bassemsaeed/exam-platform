@@ -816,10 +816,14 @@ questionBank.post("/import/commit", rateLimit(30, 60_000, "bank-import:commit"),
   if (claimed.count === 0) {
     const b = await prisma.importBatch.findUnique({ where: { id: body.batchId }, select: { status: true, expiresAt: true, type: true } });
     if (!b || b.type !== "questions") return res.status(404).json({ error: "batch not found" });
-    if (b.expiresAt.getTime() < Date.now()) {
-      await prisma.importBatch.update({ where: { id: body.batchId }, data: { status: "expired", payload: {} } });
+    if (b.status === "dry_run" && b.expiresAt.getTime() < Date.now()) {
+      await prisma.importBatch.updateMany({
+        where: { id: body.batchId, status: "dry_run" },
+        data: { status: "expired", payload: {} },
+      });
+      return res.status(409).json({ error: "batch expired" });
     }
-    return res.status(409).json({ error: b.expiresAt.getTime() < Date.now() ? "batch expired" : `already ${b.status}` });
+    return res.status(409).json({ error: `already ${b.status}` });
   }
   const batch = await prisma.importBatch.findUniqueOrThrow({ where: { id: body.batchId } });
   const staged = batch.payload as unknown as { rows: BankRow[] };

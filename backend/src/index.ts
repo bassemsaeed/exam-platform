@@ -157,6 +157,7 @@ app.get(
     res.json({ ...me, sessionExpiresAt: a.sessionExpiresAt ?? null });
   },
 );
+app.use("/api/v1/admin/users/import", adminImports);
 app.use("/api/v1/admin/users", adminUsers);
 app.use("/api/v1/admin/subjects", adminSubjects);
 app.use("/api/v1/admin/sections", adminSections);
@@ -166,7 +167,6 @@ app.use("/api/v1/admin/assignments", adminAssignments);
 app.use("/api/v1/admin/terms", adminTerms);
 app.use("/api/v1/admin/permissions", adminPermissions);
 app.use("/api/v1/admin/exams", adminExams);
-app.use("/api/v1/admin/users/import", adminImports);
 app.use("/api/v1/admin/seb-keys", adminSebKeys);
 app.use("/api/v1/admin/audit", adminAudit);
 app.use("/api/v1/admin/exports", adminExports);

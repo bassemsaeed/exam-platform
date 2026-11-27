@@ -1,5 +1,5 @@
 import { useT } from "../lib/i18n";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useParams, useLocation, useSearchParams } from "react-router-dom";
 import {
   Plus,
@@ -775,6 +775,12 @@ export function ExamDetail({ user }: { user: SessionUser }) {
   const [briefingText, setBriefingText] = useState("");
   const [briefingReq, setBriefingReq] = useState(false);
   const [briefingSaved, setBriefingSaved] = useState(false);
+  useEffect(() => {
+    setOperation("");
+    setConflicts(null);
+    setCompStudents([]);
+    setBriefingSaved(false);
+  }, [id]);
   useEffect(() => {
     if (!e) return;
     setBriefingText(e.instructionsText ?? "");
@@ -1612,6 +1618,39 @@ export function QuestionBank({ user }: { user: SessionUser }) {
   const [mediaPreviewUrl, setMediaPreviewUrl] = useState<string | null>(null);
   const [imageBusy, setImageBusy] = useState(false);
   const [createdQuestion, setCreatedQuestion] = useState<Question | null>(null);
+  const isAdmin = user.role === "admin";
+  const [ownerType, setOwnerType] = useState<"doctor" | "ta_shared">("doctor");
+  const [ownerUsername, setOwnerUsername] = useState("");
+
+  const termsQ = useResource<Entity[]>(user, "/api/v1/admin/terms", isAdmin);
+  const currentTermId = String(rowsOf(termsQ.data).find((tr) => tr.isCurrent)?.id ?? "");
+  const subjectDoctorsQ = useResource<Envelope<Entity>>(
+    user,
+    `/api/v1/admin/assignments/doctors?subject_id=${selectedSubject}&term_id=${currentTermId}&limit=100`,
+    isAdmin && Boolean(selectedSubject) && Boolean(currentTermId) && edit === "new",
+  );
+  const subjectSectionsQ = useResource<Envelope<Entity>>(
+    user,
+    `/api/v1/exams/sections?subject_id=${selectedSubject}`,
+    isAdmin && Boolean(selectedSubject) && edit === "new",
+  );
+  const doctorOwnerOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const row of rowsOf(subjectDoctorsQ.data)) {
+      const doc = row.doctor as { username?: string; name?: string } | undefined;
+      if (doc?.username) map.set(doc.username, `${doc.name ?? doc.username} (@${doc.username})`);
+    }
+    return [...map.entries()].map(([value, labelText]) => ({ value, label: labelText }));
+  }, [subjectDoctorsQ.data]);
+  const taOwnerOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const row of rowsOf(subjectSectionsQ.data)) {
+      const ta = row.ta as { username?: string; name?: string } | undefined;
+      if (ta?.username) map.set(ta.username, `${ta.name ?? ta.username} (@${ta.username})`);
+    }
+    return [...map.entries()].map(([value, labelText]) => ({ value, label: labelText }));
+  }, [subjectSectionsQ.data]);
+  const ownerOptions = ownerType === "doctor" ? doctorOwnerOptions : taOwnerOptions;
 
   useEffect(() => {
     if (!imageFile) {
@@ -1662,6 +1701,8 @@ export function QuestionBank({ user }: { user: SessionUser }) {
                 setMediaFile(null);
                 setMediaKind(null);
                 setCreatedQuestion(null);
+                setOwnerType("doctor");
+                setOwnerUsername("");
                 setEdit("new");
               }}
             >
@@ -1871,13 +1912,73 @@ export function QuestionBank({ user }: { user: SessionUser }) {
             setMediaFile(null);
             setMediaKind(null);
           }}
+          ownerSection={
+            isAdmin && edit === "new" && !createdQuestion ? (
+              <div className="field">
+                <span className="field-label">{t("Question bank owner")}</span>
+                <div className="segmented" style={{ marginBottom: 8 }}>
+                  <button
+                    type="button"
+                    className={ownerType === "doctor" ? "active" : ""}
+                    onClick={() => {
+                      setOwnerType("doctor");
+                      setOwnerUsername("");
+                    }}
+                  >
+                    {t("Doctor bank")}
+                  </button>
+                  <button
+                    type="button"
+                    className={ownerType === "ta_shared" ? "active" : ""}
+                    onClick={() => {
+                      setOwnerType("ta_shared");
+                      setOwnerUsername("");
+                    }}
+                  >
+                    {t("TA shared bank")}
+                  </button>
+                </div>
+                <Combo
+                  value={ownerUsername}
+                  options={ownerOptions}
+                  onChange={setOwnerUsername}
+                  placeholder={
+                    ownerType === "doctor"
+                      ? t("Select assigned doctor…")
+                      : t("Select section TA…")
+                  }
+                  ariaLabel={t("Question bank owner")}
+                />
+                <Feedback error={termsQ.error || subjectDoctorsQ.error || subjectSectionsQ.error} />
+                {!ownerOptions.length && (
+                  <small className="subtle">
+                    {ownerType === "doctor"
+                      ? t("No doctors assigned to this subject in the current term.")
+                      : t("No TAs assigned to sections of this subject in the current term.")}
+                  </small>
+                )}
+              </div>
+            ) : undefined
+          }
           onSubmit={async (body) => {
+            if (isAdmin && edit === "new" && !createdQuestion && !ownerUsername) {
+              setUploadError(t("Select the doctor or TA who owns this question bank."));
+              return;
+            }
             setImageBusy(true); setUploadError("");
             try {
               const q = await action.mutateAsync({
                 path: "/api/v1/question-bank" + (createdQuestion ? "/" + createdQuestion.id : edit === "new" ? "" : "/" + edit.id),
                 method: edit === "new" && !createdQuestion ? "POST" : "PATCH",
-                body: { ...body, ...(edit === "new" ? { subjectId: selectedSubject } : {}) },
+                body: {
+                  ...body,
+                  ...(edit === "new" && !createdQuestion
+                    ? {
+                        subjectId: selectedSubject,
+                        ...(isAdmin ? { ownerType, owner: ownerUsername } : {}),
+                      }
+                    : {}),
+                },
               });
               // Retain the created ID if upload fails, so retry cannot create a duplicate.
               setCreatedQuestion(q);
@@ -2718,8 +2819,8 @@ export function Exports({ user }: { user: SessionUser }) {
           )
         }
       />
-      <Feedback error={query.error} />
-      <Feedback error={downloadError || undefined} />
+      <Feedback error={query.error || exams.error || terms.error} />
+      <Feedback error={(!modal && !exportExamId ? action.error : null) || downloadError || undefined} />
       {staff && (
         <section className="panel">
           <div className="panel-heading">
@@ -2997,6 +3098,7 @@ export function Profile({ user }: { user: SessionUser }) {
         title={t("My account")}
         description={t("Your university profile and account security.")}
       />
+      <Feedback error={profile.error} />
       {<AccountGuide user={user} />}
       <div className="profile-grid">
         <section className="panel">
@@ -3105,8 +3207,11 @@ export function Imports({ user }: { user: SessionUser }) {
     const p = new URLSearchParams();
     p.set("type", next);
     setSearchParams(p, { replace: true });
+    setFile(null);
+    setImages(null);
     setBatch(null);
     setDone("");
+    action.reset();
   };
 
   const [file, setFile] = useState<File | null>(null);
@@ -3159,7 +3264,7 @@ export function Imports({ user }: { user: SessionUser }) {
       else if (file) f.set("file", file);
       if (!commit && question && targetSubject)
         f.set("subject_code", targetSubject);
-      if (images) f.set("images", images);
+      if (question && images) f.set("images", images);
       return api.upload<Entity>(base + (commit ? "/commit" : "/dry-run"), f);
     },
     onSuccess: (data, commit) => {
@@ -3304,7 +3409,7 @@ export function Imports({ user }: { user: SessionUser }) {
             />
           </div>
         )}
-        <Feedback error={action.error} />
+        <Feedback error={subjectsQ.error || action.error} />
         <button
           className="primary"
           disabled={!file || action.isPending}

@@ -656,6 +656,7 @@ export function AdminResource({ user }: { user: SessionUser }) {
               ]}
               onChange={(v) => {
                 setAssignment(v);
+                setTermFilter("");
                 setPage(1);
               }}
               ariaLabel={t("Assignment type")}
@@ -865,7 +866,16 @@ export function AdminResource({ user }: { user: SessionUser }) {
           />
         </>
       )}
-      <Feedback error={query.error} />
+      <Feedback
+        error={
+          query.error ||
+          (resource === "assignments" &&
+          assignment === "doctors" &&
+          assignViewMode === "subjects"
+            ? subjects.error
+            : null)
+        }
+      />
       <Feedback
         error={
           !edit && !remove && !current && !assignToSubject && !assignToDoctor
@@ -1570,11 +1580,13 @@ export function AdminResource({ user }: { user: SessionUser }) {
           onClose={() => setEdit(null)}
         >
           <FieldsForm
-            key={resource + String(edit === "new")}
+            key={resource + String(edit === "new") + (edit !== "new" ? String(edit.id) : "")}
             fields={
               edit !== "new" && resource === "sections"
                 ? fields.filter((f) => ["name", "taId"].includes(f.key))
-                : fields
+                : edit !== "new" && resource === "users" && edit.role === "admin"
+                  ? fields.filter((f) => f.key !== "role")
+                  : fields
             }
             initial={edit === "new" ? {} : edit}
             busy={action.isPending}
@@ -1593,11 +1605,15 @@ export function AdminResource({ user }: { user: SessionUser }) {
                 );
                 return;
               }
+              const payload =
+                edit !== "new" && resource === "users" && edit.role === "admin"
+                  ? Object.fromEntries(Object.entries(body).filter(([k]) => k !== "role"))
+                  : body;
               action.mutate(
                 {
                   path: path + (edit === "new" ? "" : "/" + edit.id),
                   method: edit === "new" ? "POST" : "PATCH",
-                  body,
+                  body: payload,
                 },
                 { onSuccess: () => setEdit(null) },
               );

@@ -58,7 +58,8 @@ async function sectionMap(subjectId: string, termId: string): Promise<Map<string
 
 async function resolveSpec(job: ExportJob): Promise<CsvSpec> {
   const params = (job.params ?? {}) as { sectionIds?: string[]; termId?: string; subjectId?: string };
-  if ((job.scope === "exam" || job.scope === "quiz") && job.examId) {
+  if (job.scope === "exam" || job.scope === "quiz") {
+    if (!job.examId) throw new Error("exam was deleted before export ran");
     const exam = await prisma.exam.findUniqueOrThrow({ where: { id: job.examId } });
     let studentIds: string[] | null = null;
     if (params.sectionIds?.length) {

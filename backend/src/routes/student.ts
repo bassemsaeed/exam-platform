@@ -778,14 +778,34 @@ student.post(
             },
           },
         });
-        const raceAdmission = await admitEntryToken(raceInstance.id, token, exam.maxReentries);
-        if (raceAdmission.outcome === "gone") return res.status(409).json({ error: "exam is no longer in progress" });
-        if (raceAdmission.outcome === "replay") return res.status(403).json({ error: "Re-entry token already used. Reopen the exam for a fresh entry." });
-        if (raceAdmission.outcome === "limit") return res.status(403).json({ error: "Exam re-entry limit reached. Contact your doctor." });
+        if (raceInstance.status !== "in_progress") {
+          return res.status(409).json({ error: "exam is no longer in progress" });
+        }
         const raceNow = (await dbNow()).getTime();
-        const maxEndTime = Math.min(exam.endTime.getTime(), raceInstance.startedAt!.getTime() + exam.durationMinutes * 60_000);
+        const raceStartedMs = raceInstance.startedAt?.getTime() ?? raceNow;
+        const maxEndTime = Math.min(exam.endTime.getTime(), raceStartedMs + exam.durationMinutes * 60_000);
+        if (raceNow >= maxEndTime) {
+          await autoSubmitExam(raceInstance.id);
+          return res.status(409).json({ error: "exam duration expired, auto-submitted" });
+        }
+        // True creation race (two concurrent initial /start calls within seconds):
+        // share the winner's server-issued token so a double-click neither burns
+        // a re-entry slot nor fails with 403 when maxReentries === 0.
+        let raceIssued: string;
+        let raceEntriesUsed: number;
+        if (raceInstance.entryTokens.length === 1 && raceNow - raceStartedMs < 10_000) {
+          raceIssued = raceInstance.entryTokens[0];
+          raceEntriesUsed = 1;
+        } else {
+          const raceAdmission = await admitEntryToken(raceInstance.id, token, exam.maxReentries);
+          if (raceAdmission.outcome === "gone") return res.status(409).json({ error: "exam is no longer in progress" });
+          if (raceAdmission.outcome === "replay") return res.status(403).json({ error: "Re-entry token already used. Reopen the exam for a fresh entry." });
+          if (raceAdmission.outcome === "limit") return res.status(403).json({ error: "Exam re-entry limit reached. Contact your doctor." });
+          raceIssued = raceAdmission.issued;
+          raceEntriesUsed = raceAdmission.entriesUsed;
+        }
         return res.json({
-          entryToken: raceAdmission.issued,
+          entryToken: raceIssued,
           title: exam.title,
           instructionsText: exam.instructionsText,
           instructionsMediaUrl: exam.instructionsMediaUrl,
@@ -796,7 +816,7 @@ student.post(
           notesForDoctor: raceInstance.notesForDoctor,
           notes: raceInstance.notes,
           maxReentries: exam.maxReentries,
-          entriesUsed: raceAdmission.entriesUsed,
+          entriesUsed: raceEntriesUsed,
           resultsReleased: exam.resultsReleased,
           id: raceInstance.id,
           examId: raceInstance.examId,

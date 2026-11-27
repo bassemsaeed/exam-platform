@@ -1864,6 +1864,8 @@ exams.get("/:id/results", async (req, res) => {
 exams.get("/:id/manual-grading", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   if (a.role === "student") return res.status(403).json({ error: "forbidden" });
+  const permErr = await creatorPermissionError(a.userId, a.role);
+  if (permErr) return res.status(403).json(permErr);
   const own = await ownExamOrAdmin(a.userId, a.role, String(req.params.id));
   if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
 
@@ -1927,6 +1929,8 @@ exams.get("/:id/manual-grading", async (req, res) => {
 exams.patch("/:id/manual-grading/:seqId", async (req, res) => {
   const a = req as unknown as AuthedRequest;
   if (a.role === "student") return res.status(403).json({ error: "forbidden" });
+  const permErr = await creatorPermissionError(a.userId, a.role);
+  if (permErr) return res.status(403).json(permErr);
   const own = await ownExamOrAdmin(a.userId, a.role, String(req.params.id));
   if ("error" in own) return res.status(own.error === "not found" ? 404 : 403).json({ error: own.error });
 

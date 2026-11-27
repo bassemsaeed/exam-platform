@@ -428,6 +428,7 @@ export function ExamWizard({ user }: { user: SessionUser }) {
           } catch {
             // ignore
           }
+          let mediaWarn: string | null = null;
           if (pendingMediaFile && pendingMediaType) {
             setUploadingMedia(true);
             try {
@@ -436,17 +437,19 @@ export function ExamWizard({ user }: { user: SessionUser }) {
               fd.append("mediaType", pendingMediaType);
               await api.upload(`/api/v1/exams/${e.id}/instructions-media`, fd);
             } catch (uploadErr) {
-              setError(
+              mediaWarn =
                 uploadErr instanceof Error
-                  ? `Assessment created, but media upload failed: ${uploadErr.message}. You can re-upload from the assessment page.`
-                  : "Assessment created, but media upload failed.",
-              );
+                  ? `Assessment created, but briefing media upload failed: ${uploadErr.message}. You can re-upload it from the assessment page.`
+                  : "Assessment created, but briefing media upload failed. You can re-upload it from the assessment page.";
             } finally {
               setUploadingMedia(false);
             }
           }
-          const warnings = (e as unknown as { warnings?: string[] })?.warnings;
-          if (warnings?.length) setCreatedWarn({ id: e.id, warnings });
+          const warnings = [
+            ...((e as unknown as { warnings?: string[] })?.warnings ?? []),
+            ...(mediaWarn ? [mediaWarn] : []),
+          ];
+          if (warnings.length) setCreatedWarn({ id: e.id, warnings });
           else navigate("/exams/" + e.id);
         },
       },
@@ -1126,6 +1129,7 @@ export function QuestionSheet({
   error,
   onClose,
   onSubmit,
+  ownerSection,
   imageUpload,
   mediaUpload,
   hasPendingAttachment = false,
@@ -1138,6 +1142,7 @@ export function QuestionSheet({
   error?: unknown;
   onClose: () => void;
   onSubmit: (body: Record<string, unknown>) => void;
+  ownerSection?: React.ReactNode;
   imageUpload?: React.ReactNode;
   mediaUpload?: React.ReactNode;
   hasPendingAttachment?: boolean;
@@ -1298,6 +1303,7 @@ export function QuestionSheet({
     <Sheet title={initial.id ? "Edit question" : "Add question"} onClose={onClose} wide>
       <div className="sheet-grid">
         <div>
+          {ownerSection}
           <div className="field">
             <span className="field-label">{t("Question type")}</span>
             <div className="qtype-grid">

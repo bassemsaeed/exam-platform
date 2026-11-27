@@ -1894,4 +1894,16 @@ export const arabic: Record<string, string> = {
   "Max marks for everyone": "الدرجة الكاملة للجميع",
   "Add (+1) or deduct (-0.5)": "زيادة (+1) أو خصم (-0.5)",
   "One fixed mark (0–max)": "درجة ثابتة (0–القصوى)",
+  "Question bank owner": "مالك بنك الأسئلة",
+  "Doctor bank": "بنك الدكتور",
+  "TA shared bank": "بنك المعيدين المشترك",
+  "Select assigned doctor…": "اختر الدكتور المكلّف…",
+  "Select section TA…": "اختر معيد الشعبة…",
+  "No doctors assigned to this subject in the current term.":
+    "لا يوجد دكاترة مكلّفون بهذا المقرر في الفصل الحالي.",
+  "No TAs assigned to sections of this subject in the current term.":
+    "لا يوجد معيدون مكلّفون بشُعب هذا المقرر في الفصل الحالي.",
+  "Select the doctor or TA who owns this question bank.":
+    "اختر الدكتور أو المعيد المالك لبنك الأسئلة.",
+  "Failed to export credentials": "فشل تصدير بيانات الدخول",
 };

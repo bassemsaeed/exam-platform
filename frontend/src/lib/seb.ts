@@ -88,5 +88,6 @@ export function isSebError(status: number, message: string): boolean {
 }
 
 export function apiUrl(path: string): string {
+  if (/^https?:\/\//i.test(path)) return path;
   return `${API}${path}`;
 }

@@ -214,8 +214,11 @@ adminImports.post("/commit", rateLimit(30, 60_000, "admin-import:commit"), async
     data: { status: "committed" },
   });
   if (claimed.count === 0) {
-    if (pre.expiresAt.getTime() < Date.now()) {
-      await prisma.importBatch.update({ where: { id: batchId }, data: { status: "expired", payload: {} } });
+    if (pre.status === "dry_run" && pre.expiresAt.getTime() < Date.now()) {
+      await prisma.importBatch.updateMany({
+        where: { id: batchId, status: "dry_run" },
+        data: { status: "expired", payload: {} },
+      });
       return res.status(409).json({ error: "batch expired" });
     }
     return res.status(409).json({ error: `already ${pre.status}` });
@@ -639,9 +642,21 @@ adminImports.post(
       return res.status(422).json({ error: "spreadsheet has no student rows" });
     }
 
-    // Bulk lookup existing users by username or email
+    // Bulk lookup existing users by username or email (including synthesized placeholder emails)
     const usernames = [...new Set(parsed.rows.map((r) => r.username).filter(Boolean))];
-    const emails = [...new Set(parsed.rows.map((r) => r.email).filter((e): e is string => Boolean(e)))];
+    const placeholderDomain = config.email.placeholderDomain.toLowerCase();
+    const emails = [
+      ...new Set(
+        parsed.rows
+          .flatMap((r) => {
+            const out: string[] = [];
+            if (r.email) out.push(r.email.toLowerCase());
+            if (r.username) out.push(`${r.username.toLowerCase()}@${placeholderDomain}`);
+            return out;
+          })
+          .filter(Boolean),
+      ),
+    ];
     const existingUsers = await prisma.user.findMany({
       where: {
         OR: [
@@ -946,8 +961,11 @@ adminImports.post(
       data: { status: "committed" },
     });
     if (claimed.count === 0) {
-      if (pre.expiresAt.getTime() < Date.now()) {
-        await prisma.importBatch.update({ where: { id: batchId }, data: { status: "expired", payload: {} } });
+      if (pre.status === "dry_run" && pre.expiresAt.getTime() < Date.now()) {
+        await prisma.importBatch.updateMany({
+          where: { id: batchId, status: "dry_run" },
+          data: { status: "expired", payload: {} },
+        });
         pendingStudentCredentials.delete(batchId);
         return res.status(409).json({ error: "batch expired" });
       }
@@ -963,6 +981,7 @@ adminImports.post(
     let sectionAssigned = 0;
     let skipped = 0;
     const rowErrors: { line: number; reason: string }[] = [];
+    const actuallyCreatedUsernames = new Set<string>();
 
     const CHUNK = 200;
     for (let i = 0; i < payload.rows.length; i += CHUNK) {
@@ -970,19 +989,27 @@ adminImports.post(
       const newRows = slice.filter((r) => r.status === "new" && r.passwordHash);
       const existingRows = slice.filter((r) => r.status !== "new" && r.existingUserId);
 
-      // Map of username -> created userId for enrollment/section step
-      const userIdByLine = new Map<number, string>();
-      for (const r of existingRows) userIdByLine.set(r.line, r.existingUserId!);
-
       try {
-        await prisma.$transaction(async (tx) => {
+        const chunkResult = await prisma.$transaction(async (tx) => {
+          let chunkCreated = 0;
+          let chunkUpdated = 0;
+          let chunkEnrolled = 0;
+          let chunkSectionAssigned = 0;
+          let chunkSkipped = 0;
+          const chunkRowErrors: { line: number; reason: string }[] = [];
+          const chunkCreatedUsernames: string[] = [];
+
+          // Map of line -> verified student userId for enrollment/section step
+          const userIdByLine = new Map<number, string>();
+          for (const r of existingRows) userIdByLine.set(r.line, r.existingUserId!);
+
           // 1. Bulk create new student users + credential accounts
           if (newRows.length > 0) {
             const prepared = newRows.map((r) => ({
               row: r,
               id: `u_${crypto.randomUUID()}`,
             }));
-            const userRes = await tx.user.createMany({
+            await tx.user.createMany({
               data: prepared.map(({ row, id }) => ({
                 id,
                 name: row.fullName,
@@ -999,14 +1026,17 @@ adminImports.post(
               })),
               skipDuplicates: true,
             });
-            created += userRes.count;
 
-            // Resolve actual IDs in case any username raced and was skipped
-            const createdUsers = await tx.user.findMany({
-              where: { username: { in: prepared.map((p) => p.row.username) } },
+            // Query strictly by our newly generated IDs so a race conflict with
+            // an existing non-student or concurrently created user can never be
+            // misattributed, enrolled, or returned as newly created credentials.
+            const insertedUsers = await tx.user.findMany({
+              where: { id: { in: prepared.map((p) => p.id) } },
               select: { id: true, username: true },
             });
-            const byU = new Map(createdUsers.map((u) => [u.username!.toLowerCase(), u.id]));
+            const insertedIds = new Set(insertedUsers.map((u) => u.id));
+            chunkCreated = insertedUsers.length;
+
             const accountsToCreate: {
               id: string;
               providerId: string;
@@ -1014,16 +1044,21 @@ adminImports.post(
               userId: string;
               password: string;
             }[] = [];
-            for (const { row } of prepared) {
-              const uid = byU.get(row.username.toLowerCase());
-              if (uid) {
-                userIdByLine.set(row.line, uid);
+            for (const { row, id } of prepared) {
+              if (insertedIds.has(id)) {
+                userIdByLine.set(row.line, id);
+                chunkCreatedUsernames.push(row.username.toLowerCase());
                 accountsToCreate.push({
-                  id: `acc-${uid}`,
+                  id: `acc-${id}`,
                   providerId: "credential",
-                  accountId: uid,
-                  userId: uid,
+                  accountId: id,
+                  userId: id,
                   password: row.passwordHash!,
+                });
+              } else {
+                chunkRowErrors.push({
+                  line: row.line,
+                  reason: `account conflict during commit for "${row.username}" (username or email already exists)`,
                 });
               }
             }
@@ -1036,7 +1071,7 @@ adminImports.post(
           if (payload.target === "college" && existingRows.length > 0 && payload.collegeId) {
             for (const r of existingRows) {
               if (r.status === "already_enrolled") {
-                skipped++;
+                chunkSkipped++;
                 continue;
               }
               await tx.user.update({
@@ -1048,12 +1083,11 @@ adminImports.post(
                   ...(r.academicYear !== undefined ? { academicYear: r.academicYear } : {}),
                 },
               });
-              updated++;
+              chunkUpdated++;
             }
           } else if (payload.target === "subject") {
-            // Optional year update for existing students if explicitly provided in file
             for (const r of existingRows) {
-              if (r.status === "already_enrolled") skipped++;
+              if (r.status === "already_enrolled") chunkSkipped++;
             }
           }
 
@@ -1071,14 +1105,32 @@ adminImports.post(
             }
             if (enrollData.length > 0) {
               const enrRes = await tx.enrollment.createMany({ data: enrollData, skipDuplicates: true });
-              enrolled += enrRes.count;
+              chunkEnrolled = enrRes.count;
             }
             if (secData.length > 0) {
               const secRes = await tx.sectionMembership.createMany({ data: secData, skipDuplicates: true });
-              sectionAssigned += secRes.count;
+              chunkSectionAssigned = secRes.count;
             }
           }
+
+          return {
+            chunkCreated,
+            chunkUpdated,
+            chunkEnrolled,
+            chunkSectionAssigned,
+            chunkSkipped,
+            chunkRowErrors,
+            chunkCreatedUsernames,
+          };
         });
+
+        created += chunkResult.chunkCreated;
+        updated += chunkResult.chunkUpdated;
+        enrolled += chunkResult.chunkEnrolled;
+        sectionAssigned += chunkResult.chunkSectionAssigned;
+        skipped += chunkResult.chunkSkipped;
+        rowErrors.push(...chunkResult.chunkRowErrors);
+        for (const u of chunkResult.chunkCreatedUsernames) actuallyCreatedUsernames.add(u);
       } catch (err) {
         rowErrors.push({
           line: slice[0]?.line ?? 2,
@@ -1088,7 +1140,10 @@ adminImports.post(
     }
 
     const credEntry = pendingStudentCredentials.get(batch.id);
-    const memCreds = credEntry && credEntry.uploadedBy === me ? credEntry.rows : [];
+    const memCreds =
+      credEntry && credEntry.uploadedBy === me
+        ? credEntry.rows.filter((c) => actuallyCreatedUsernames.has(c.username.toLowerCase()))
+        : [];
     pendingStudentCredentials.delete(batch.id);
 
     const imported = created + updated + enrolled;

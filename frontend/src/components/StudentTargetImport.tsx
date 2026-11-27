@@ -127,24 +127,25 @@ export function StudentTargetImport({
   const [batch, setBatch] = useState<DryRunResponse | null>(null);
   const [commitResult, setCommitResult] = useState<CommitResponse | null>(null);
   const [credDownloading, setCredDownloading] = useState(false);
+  const [credError, setCredError] = useState<string | null>(null);
 
   const collegesQ = useResource<Envelope<CollegeOpt> | CollegeOpt[]>(
     user,
-    "/api/v1/admin/colleges?limit=200",
+    "/api/v1/admin/colleges?limit=100",
   );
   const departmentsQ = useResource<Envelope<DeptOpt> | DeptOpt[]>(
     user,
-    "/api/v1/admin/departments?limit=300",
+    `/api/v1/admin/departments?limit=100${collegeId ? `&college_id=${encodeURIComponent(collegeId)}` : ""}`,
     target === "college",
   );
   const subjectsQ = useResource<Envelope<Subject> | Subject[]>(
     user,
-    "/api/v1/admin/subjects?limit=300",
+    "/api/v1/admin/subjects?limit=100",
     target === "subject",
   );
   const termsQ = useResource<Envelope<TermOpt> | TermOpt[]>(
     user,
-    "/api/v1/admin/terms?limit=50",
+    "/api/v1/admin/terms",
     target === "subject",
   );
 
@@ -238,6 +239,7 @@ export function StudentTargetImport({
   async function downloadCredentialsXlsx() {
     if (!commitResult?.credentials?.length) return;
     setCredDownloading(true);
+    setCredError(null);
     try {
       const targetLabel =
         target === "college"
@@ -255,7 +257,7 @@ export function StudentTargetImport({
           }),
         },
       );
-      if (!res.ok) throw new Error("Failed to export credentials");
+      if (!res.ok) throw new Error(t("Failed to export credentials"));
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -265,6 +267,8 @@ export function StudentTargetImport({
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+    } catch (err) {
+      setCredError(err instanceof Error ? err.message : t("Failed to export credentials"));
     } finally {
       setCredDownloading(false);
     }
@@ -326,6 +330,7 @@ export function StudentTargetImport({
 
       {/* Step 1: Target Selection */}
       <section className="panel sti-section">
+        <Feedback error={collegesQ.error || departmentsQ.error || subjectsQ.error || termsQ.error || sectionsQ.error} />
         <div className="panel-heading">
           <h2>
             {target === "college"
@@ -619,24 +624,27 @@ export function StudentTargetImport({
             </div>
 
             {commitResult.credentials.length > 0 && (
-              <div className="sti-creds-bar">
-                <span>
-                  {t("{0} newly created accounts have initial passwords ready to export (one-time download).", {
-                    "0": commitResult.credentials.length,
-                  })}
-                </span>
-                <button
-                  type="button"
-                  className="primary"
-                  disabled={credDownloading}
-                  onClick={() => void downloadCredentialsXlsx()}
-                >
-                  <Download size={14} />
-                  {credDownloading
-                    ? t("Preparing Excel…")
-                    : t("Download new credentials (.xlsx)")}
-                </button>
-              </div>
+              <>
+                <div className="sti-creds-bar">
+                  <span>
+                    {t("{0} newly created accounts have initial passwords ready to export (one-time download).", {
+                      "0": commitResult.credentials.length,
+                    })}
+                  </span>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={credDownloading}
+                    onClick={() => void downloadCredentialsXlsx()}
+                  >
+                    <Download size={14} />
+                    {credDownloading
+                      ? t("Preparing Excel…")
+                      : t("Download new credentials (.xlsx)")}
+                  </button>
+                </div>
+                <Feedback error={credError || undefined} />
+              </>
             )}
           </div>
         )}

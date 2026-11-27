@@ -102,8 +102,11 @@ export function normalizeQuestionSpec(
   }
 
   if (type === "short_answer") {
-    const acceptedRaw = Array.isArray(rawOptions)
+    const fromOptions = Array.isArray(rawOptions)
       ? rawOptions.map((o) => String(o ?? "").trim()).filter(Boolean)
+      : [];
+    const acceptedRaw = fromOptions.length
+      ? fromOptions
       : rawCorrect
           .split("|")
           .map((s) => s.trim())

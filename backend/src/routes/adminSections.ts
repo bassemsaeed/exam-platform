@@ -25,6 +25,7 @@ adminSections.get("/", async (req, res) => {
       select: {
         id: true, name: true, subjectId: true, termId: true, taId: true,
         subject: { select: { code: true, name: true } },
+        term: { select: { id: true, name: true } },
         ta: { select: { name: true, username: true } },
         _count: { select: { memberships: true } },
       },
